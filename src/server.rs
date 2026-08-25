@@ -26,7 +26,7 @@ use axum::extract::{Query, State};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use compact_str::CompactString;
 use serde::Deserialize;
@@ -35,15 +35,20 @@ use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
-use crate::auth::extract_viewer_did_from_headers;
+use crate::auth::{
+    authenticate_pds_session, extract_session_did_from_headers, extract_viewer_did_from_headers,
+};
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
+use crate::preferences::UserPreferencesStore;
 use crate::recommender::Recommender;
 use crate::snapshot::SnapshotStatusTracker;
 use crate::types::{
-    ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedSkeletonResponse, GraphTelemetryInfo,
-    ImpressionTelemetryInfo, InternerTelemetryInfo, MemoryTelemetryInfo, RecommendationDials,
-    SkeletonFeedPost, TasteTwinsQuery, TelemetryResponse,
+    ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedSkeletonResponse, GenericStatusResponse,
+    GraphTelemetryInfo, ImpressionTelemetryInfo, InternerTelemetryInfo, LoginRequestBody,
+    MemoryTelemetryInfo, PreferencesPayloadDto, PreferencesResponseDto, RecommendationDials,
+    SavePreferencesRequestBody, SkeletonFeedPost, TasteTwinsQuery, TelemetryResponse, TopicWeights,
+    UserDials, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -57,6 +62,8 @@ pub const DEFAULT_FEED_RKEY: &str = "for-your-consideration";
 pub struct AppState {
     /// Reference to the algorithmic recommendation engine.
     pub recommender: Arc<Recommender>,
+    /// Store for user preference dials.
+    pub preferences_store: Arc<UserPreferencesStore>,
     /// Tracker for snapshot persistence status and metrics.
     pub snapshot_tracker: Arc<SnapshotStatusTracker>,
     /// Tracker for real-time Jetstream firehose ingestion velocity and statistics.
@@ -81,6 +88,7 @@ impl AppState {
     ) -> Self {
         Self {
             recommender,
+            preferences_store: Arc::new(UserPreferencesStore::new()),
             snapshot_tracker: Arc::new(SnapshotStatusTracker::default()),
             ingestion_tracker: Arc::new(IngestionTracker::default()),
             service_did: service_did.into(),
@@ -88,6 +96,13 @@ impl AppState {
             feed_rkey: CompactString::new(DEFAULT_FEED_RKEY),
             start_time: Instant::now(),
         }
+    }
+
+    /// Sets a custom preferences store.
+    #[must_use]
+    pub fn with_preferences_store(mut self, preferences_store: Arc<UserPreferencesStore>) -> Self {
+        self.preferences_store = preferences_store;
+        self
     }
 
     /// Sets a custom snapshot status tracker.
@@ -125,6 +140,16 @@ pub struct FeedSkeletonQuery {
     pub freshness: Option<String>,
     /// Exploration serendipity dial (e.g. "familiar", "balanced", "`deep_dive`").
     pub discovery: Option<String>,
+    /// Topic bias multiplier for Art category (0.0 to 5.0).
+    pub art: Option<f32>,
+    /// Topic bias multiplier for Tech category (0.0 to 5.0).
+    pub tech: Option<f32>,
+    /// Topic bias multiplier for Science category (0.0 to 5.0).
+    pub science: Option<f32>,
+    /// Topic bias multiplier for News category (0.0 to 5.0).
+    pub news: Option<f32>,
+    /// Topic bias multiplier for Culture category (0.0 to 5.0).
+    pub culture: Option<f32>,
     /// Whether to generate structured explanation traces (optional bool).
     pub explain: Option<bool>,
 }
@@ -132,7 +157,13 @@ pub struct FeedSkeletonQuery {
 /// Builds the production Axum HTTP router with all endpoints and middleware.
 pub fn create_xrpc_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::DELETE,
+        ])
         .allow_origin(tower_http::cors::Any)
         .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT]);
 
@@ -153,6 +184,13 @@ pub fn create_xrpc_router(state: AppState) -> Router {
         .route("/api/taste-twins", get(handle_get_taste_twins))
         .route("/api/feed-preview", get(handle_get_feed_preview))
         .route("/api/explain", get(handle_get_explain))
+        .route("/api/auth/login", post(handle_post_auth_login))
+        .route(
+            "/api/preferences",
+            get(handle_get_preferences)
+                .post(handle_post_preferences)
+                .delete(handle_delete_preferences),
+        )
         .layer(cors)
         .with_state(state)
 }
@@ -186,15 +224,81 @@ pub async fn handle_get_feed_skeleton(
         }
     };
 
+    // 1. Resolve viewer DID from Authorization Bearer JWT
     let viewer_did = extract_viewer_did_from_headers(&headers);
 
-    let dials = RecommendationDials::from_query(
-        query.freshness.as_deref(),
-        query.discovery.as_deref(),
-        query.explain,
-        query.limit,
-        query.cursor,
-    );
+    // 2. Precedence Hierarchy:
+    //    1) Explicit HTTP query parameters (?freshness, ?discovery, ?art, etc.)
+    //    2) Persisted UserDials (from UserPreferencesStore via viewer DID)
+    //    3) System Defaults (UserDials::default())
+    let base_dials = if let Some(ref did) = viewer_did {
+        state
+            .preferences_store
+            .get_by_did(&state.recommender.interner, did)
+            .unwrap_or_default()
+    } else {
+        UserDials::default()
+    };
+
+    let half_life_secs = match query.freshness.as_deref() {
+        Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
+        Some("balanced" | "36h") => 36.0 * 3600.0,
+        Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
+        Some(custom) => custom
+            .parse::<f32>()
+            .unwrap_or(base_dials.freshness_half_life_secs)
+            .clamp(3600.0, 604_800.0),
+        None => base_dials.freshness_half_life_secs,
+    };
+
+    let explore_ratio = match query.discovery.as_deref() {
+        Some("familiar" | "low" | "5%") => 0.05,
+        Some("balanced" | "med" | "15%") => 0.15,
+        Some("deep_dive" | "deepdive" | "high" | "35%") => 0.35,
+        Some(custom) => custom
+            .parse::<f32>()
+            .unwrap_or(base_dials.serendipity_ratio)
+            .clamp(0.0, 0.50),
+        None => base_dials.serendipity_ratio,
+    };
+
+    let topic_weights = TopicWeights {
+        art: query
+            .art
+            .unwrap_or(base_dials.topic_weights.art)
+            .clamp(0.0, 5.0),
+        tech: query
+            .tech
+            .unwrap_or(base_dials.topic_weights.tech)
+            .clamp(0.0, 5.0),
+        science: query
+            .science
+            .unwrap_or(base_dials.topic_weights.science)
+            .clamp(0.0, 5.0),
+        news: query
+            .news
+            .unwrap_or(base_dials.topic_weights.news)
+            .clamp(0.0, 5.0),
+        culture: query
+            .culture
+            .unwrap_or(base_dials.topic_weights.culture)
+            .clamp(0.0, 5.0),
+    };
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .clamp(1, MAX_PAGE_LIMIT);
+    let explain = query.explain.unwrap_or(false);
+
+    let dials = RecommendationDials {
+        half_life_secs,
+        explore_ratio,
+        topic_weights,
+        explain,
+        limit,
+        cursor: query.cursor,
+    };
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -251,6 +355,173 @@ pub async fn handle_get_feed_skeleton(
                 .into_response()
         }
     }
+}
+
+/// Handler for `POST /api/auth/login`.
+pub async fn handle_post_auth_login(Json(body): Json<LoginRequestBody>) -> impl IntoResponse {
+    match authenticate_pds_session(&body.identifier, &body.password, body.pds_url.as_deref()).await
+    {
+        Ok(resp) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(resp),
+        )
+            .into_response(),
+        Err(FeedError::InvalidInput(msg)) => (
+            StatusCode::BAD_REQUEST,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new("InvalidRequest", msg)),
+        )
+            .into_response(),
+        Err(FeedError::Auth(msg)) => (
+            StatusCode::UNAUTHORIZED,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new("AuthenticationFailed", msg)),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new("PdsError", err.to_string())),
+        )
+            .into_response(),
+    }
+}
+
+/// Handler for `GET /api/preferences`.
+pub async fn handle_get_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new(
+                "Unauthorized",
+                "Missing or invalid authorization token",
+            )),
+        )
+            .into_response();
+    };
+
+    let saved = state
+        .preferences_store
+        .get_by_did(&state.recommender.interner, &viewer_did);
+    let is_custom = saved.is_some();
+    let dials = saved.unwrap_or_default();
+
+    let resp = PreferencesResponseDto {
+        did: viewer_did,
+        preferences: PreferencesPayloadDto {
+            freshness_hours: dials.freshness_half_life_hours(),
+            discovery_ratio: dials.discovery_ratio(),
+            topic_weights: dials.topic_weights,
+        },
+        is_custom,
+        dials: Some(dials.into()),
+    };
+
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        Json(resp),
+    )
+        .into_response()
+}
+
+/// Handler for `POST /api/preferences`.
+pub async fn handle_post_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SavePreferencesRequestBody>,
+) -> impl IntoResponse {
+    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new(
+                "Unauthorized",
+                "Missing or invalid authorization token",
+            )),
+        )
+            .into_response();
+    };
+
+    let dials = UserDials {
+        freshness_half_life_secs: body.freshness_hours * 3600.0,
+        serendipity_ratio: body.discovery_ratio,
+        topic_weights: body.topic_weights.unwrap_or_default(),
+        updated_at_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+
+    if let Err(err) = dials.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new("InvalidInput", err)),
+        )
+            .into_response();
+    }
+
+    state
+        .preferences_store
+        .set_by_did(&state.recommender.interner, &viewer_did, dials);
+
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        Json(GenericStatusResponse {
+            status: "ok".to_string(),
+            message: Some("Preferences saved successfully".to_string()),
+            did: Some(viewer_did),
+            preferences: Some(PreferencesPayloadDto {
+                freshness_hours: dials.freshness_half_life_hours(),
+                discovery_ratio: dials.discovery_ratio(),
+                topic_weights: dials.topic_weights,
+            }),
+            dials: Some(dials.into()),
+        }),
+    )
+        .into_response()
+}
+
+/// Handler for `DELETE /api/preferences`.
+pub async fn handle_delete_preferences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            Json(ApiErrorResponse::new(
+                "Unauthorized",
+                "Missing or invalid authorization token",
+            )),
+        )
+            .into_response();
+    };
+
+    state
+        .preferences_store
+        .delete_by_did(&state.recommender.interner, &viewer_did);
+
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        Json(GenericStatusResponse {
+            status: "reset_to_defaults".to_string(),
+            message: Some("Preferences reset to system defaults".to_string()),
+            did: Some(viewer_did),
+            preferences: None,
+            dials: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Handler for `GET /.well-known/did.json`.
@@ -556,7 +827,10 @@ mod tests {
     use super::*;
     use crate::graph::GraphStore;
     use crate::interner::StringInterner;
-    use crate::types::{FeedPreviewResponse, GraphProofChain, SignalType, TasteTwinsResponse};
+    use crate::types::{
+        FeedPreviewResponse, GraphProofChain, LoginSuccessResponse, PreferencesResponseDto,
+        SavePreferencesRequestBody, SignalType, TasteTwinsResponse, TopicWeights,
+    };
 
     fn create_test_state() -> AppState {
         let interner = Arc::new(StringInterner::new());
@@ -869,5 +1143,196 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let chain: GraphProofChain = serde_json::from_slice(&body).unwrap();
         assert_eq!(chain.steps.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_login_endpoints() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state);
+
+        // 1. Empty body/fields -> 400
+        let req_empty = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/login")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"identifier":"","password":""}"#))
+            .unwrap();
+        let resp_empty = app.clone().oneshot(req_empty).await.unwrap();
+        assert_eq!(resp_empty.status(), StatusCode::BAD_REQUEST);
+
+        // 2. Invalid password -> 401
+        let req_invalid = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/login")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"identifier":"alice.bsky.social","password":"invalid-password"}"#,
+            ))
+            .unwrap();
+        let resp_invalid = app.clone().oneshot(req_invalid).await.unwrap();
+        assert_eq!(resp_invalid.status(), StatusCode::UNAUTHORIZED);
+
+        // 3. Valid credentials -> 200 with token
+        let req_valid = Request::builder()
+            .method(Method::POST)
+            .uri("/api/auth/login")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"identifier":"alice.bsky.social","password":"valid-app-password"}"#,
+            ))
+            .unwrap();
+        let resp_valid = app.oneshot(req_valid).await.unwrap();
+        assert_eq!(resp_valid.status(), StatusCode::OK);
+        let body = resp_valid.into_body().collect().await.unwrap().to_bytes();
+        let login_res: LoginSuccessResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(login_res.status, "ok");
+        assert_eq!(login_res.handle, "alice.bsky.social");
+        assert!(!login_res.token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_api_preferences_crud_lifecycle() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state.clone());
+        let token = crate::auth::generate_session_token("did:plc:prefs_user", 3600);
+
+        // 1. Unauthenticated GET -> 401
+        let req_unauth = Request::builder()
+            .method(Method::GET)
+            .uri("/api/preferences")
+            .body(Body::empty())
+            .unwrap();
+        let resp_unauth = app.clone().oneshot(req_unauth).await.unwrap();
+        assert_eq!(resp_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Authenticated GET (defaults) -> 200 is_custom: false
+        let req_get_default = Request::builder()
+            .method(Method::GET)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_get_default = app.clone().oneshot(req_get_default).await.unwrap();
+        assert_eq!(resp_get_default.status(), StatusCode::OK);
+        let body = resp_get_default
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let prefs_resp: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
+        assert!(!prefs_resp.is_custom);
+        assert_eq!(prefs_resp.preferences.freshness_hours, 36.0);
+
+        // 3. Authenticated POST -> 200 saves custom dials
+        let save_req = SavePreferencesRequestBody {
+            freshness_hours: 12.0,
+            discovery_ratio: 0.35,
+            topic_weights: Some(TopicWeights {
+                art: 2.0,
+                tech: 3.0,
+                science: 1.5,
+                news: 0.5,
+                culture: 1.0,
+            }),
+        };
+        let req_post = Request::builder()
+            .method(Method::POST)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&save_req).unwrap()))
+            .unwrap();
+        let resp_post = app.clone().oneshot(req_post).await.unwrap();
+        assert_eq!(resp_post.status(), StatusCode::OK);
+
+        // 4. Authenticated GET (custom) -> 200 is_custom: true
+        let req_get_custom = Request::builder()
+            .method(Method::GET)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_get_custom = app.clone().oneshot(req_get_custom).await.unwrap();
+        assert_eq!(resp_get_custom.status(), StatusCode::OK);
+        let body = resp_get_custom
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let prefs_custom: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
+        assert!(prefs_custom.is_custom);
+        assert_eq!(prefs_custom.preferences.freshness_hours, 12.0);
+        assert_eq!(prefs_custom.preferences.discovery_ratio, 0.35);
+        assert_eq!(prefs_custom.preferences.topic_weights.art, 2.0);
+
+        // 5. Authenticated DELETE -> 200 resets to defaults
+        let req_del = Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_del = app.clone().oneshot(req_del).await.unwrap();
+        assert_eq!(resp_del.status(), StatusCode::OK);
+
+        // 6. Subsequent GET -> 200 is_custom: false
+        let req_get_after_del = Request::builder()
+            .method(Method::GET)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_get_after_del = app.oneshot(req_get_after_del).await.unwrap();
+        assert_eq!(resp_get_after_del.status(), StatusCode::OK);
+        let body = resp_get_after_del
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let prefs_after: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
+        assert!(!prefs_after.is_custom);
+    }
+
+    #[tokio::test]
+    async fn test_api_preferences_boundary_validation() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state);
+        let token = crate::auth::generate_session_token("did:plc:bounds_user", 3600);
+
+        // Freshness too low (<1h) -> 400
+        let req_low_freshness = Request::builder()
+            .method(Method::POST)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"freshness_hours":0.5,"discovery_ratio":0.15,"topic_weights":{"art":1.0,"tech":1.0,"science":1.0,"news":1.0,"culture":1.0}}"#))
+            .unwrap();
+        let resp_low = app.clone().oneshot(req_low_freshness).await.unwrap();
+        assert_eq!(resp_low.status(), StatusCode::BAD_REQUEST);
+
+        // Discovery too high (>0.50) -> 400
+        let req_high_disc = Request::builder()
+            .method(Method::POST)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"freshness_hours":24.0,"discovery_ratio":0.75,"topic_weights":{"art":1.0,"tech":1.0,"science":1.0,"news":1.0,"culture":1.0}}"#))
+            .unwrap();
+        let resp_disc = app.clone().oneshot(req_high_disc).await.unwrap();
+        assert_eq!(resp_disc.status(), StatusCode::BAD_REQUEST);
+
+        // Topic weight too high (>5.0x) -> 400
+        let req_high_topic = Request::builder()
+            .method(Method::POST)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"freshness_hours":24.0,"discovery_ratio":0.15,"topic_weights":{"art":6.0,"tech":1.0,"science":1.0,"news":1.0,"culture":1.0}}"#))
+            .unwrap();
+        let resp_topic = app.oneshot(req_high_topic).await.unwrap();
+        assert_eq!(resp_topic.status(), StatusCode::BAD_REQUEST);
     }
 }

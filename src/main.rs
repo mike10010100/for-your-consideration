@@ -77,18 +77,25 @@ async fn main() -> Result<()> {
     // 3. Initialize core domain services
     let interner = Arc::new(StringInterner::new());
     let graph = Arc::new(GraphStore::new());
+    let preferences_store = Arc::new(UserPreferencesStore::new());
     let recommender = Arc::new(Recommender::new(Arc::clone(&interner), Arc::clone(&graph)));
     let snapshot_tracker = Arc::new(SnapshotStatusTracker::new(&snapshot_config));
 
     // Hydrate snapshot on boot if it exists
     let restored_cursor = if snapshot_config.path.exists() {
-        match load_snapshot(&snapshot_config.path, &interner, &graph) {
+        match load_snapshot_with_preferences(
+            &snapshot_config.path,
+            &interner,
+            &graph,
+            &preferences_store,
+        ) {
             Ok(Some(loaded)) => {
                 info!(
                     duration_ms = loaded.load_duration_ms,
                     strings = loaded.header.num_strings,
                     users = loaded.header.num_users,
                     edges = loaded.header.total_forward_edges,
+                    preferences = loaded.header.num_preferences,
                     cursor = loaded.header.jetstream_cursor_us,
                     "Hydrated snapshot successfully from '{}'",
                     snapshot_config.path.display()
@@ -196,6 +203,7 @@ async fn main() -> Result<()> {
         CompactString::new(&service_did),
         CompactString::new(&hostname),
     )
+    .with_preferences_store(Arc::clone(&preferences_store))
     .with_feed_rkey(CompactString::new(&feed_rkey))
     .with_snapshot_tracker(Arc::clone(&snapshot_tracker))
     .with_ingestion_tracker(Arc::clone(&ingestion_tracker));
@@ -233,6 +241,7 @@ async fn main() -> Result<()> {
     // Spawn Periodic Snapshot Checkpoint task
     let snapshot_interner = Arc::clone(&interner);
     let snapshot_graph = Arc::clone(&graph);
+    let snapshot_preferences = Arc::clone(&preferences_store);
     let snapshot_cancel = cancel_token.clone();
     let snapshot_path = snapshot_config.path.clone();
     let snapshot_interval = Duration::from_secs(snapshot_config.interval_secs);
@@ -264,7 +273,7 @@ async fn main() -> Result<()> {
                     tracing::debug!("Triggering periodic snapshot checkpoint");
                     let current_cursor = snapshot_ingester_stats.latest_cursor_us.load(std::sync::atomic::Ordering::Relaxed);
                     let start_save = std::time::Instant::now();
-                    match save_snapshot(&snapshot_path, &snapshot_interner, &snapshot_graph, current_cursor) {
+                    match save_snapshot_with_preferences(&snapshot_path, &snapshot_interner, &snapshot_graph, &snapshot_preferences, current_cursor) {
                         Ok(_) => {
                             let duration_ms = start_save.elapsed().as_secs_f64() * 1000.0;
                             let file_size = snapshot_path.metadata().map_or(0, |m| m.len());
@@ -312,7 +321,13 @@ async fn main() -> Result<()> {
     let final_cursor = ingester.latest_cursor();
     info!("Persisting final snapshot on graceful shutdown...");
     let start_final = std::time::Instant::now();
-    match save_snapshot(&snapshot_config.path, &interner, &graph, final_cursor) {
+    match save_snapshot_with_preferences(
+        &snapshot_config.path,
+        &interner,
+        &graph,
+        &preferences_store,
+        final_cursor,
+    ) {
         Ok(_) => {
             let duration_ms = start_final.elapsed().as_secs_f64() * 1000.0;
             let file_size = snapshot_config.path.metadata().map_or(0, |m| m.len());

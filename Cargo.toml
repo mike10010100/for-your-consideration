@@ -29,6 +29,7 @@ axum = { version = "0.7", features = ["macros", "json"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http = "1.1"
+reqwest = { version = "0.12", features = ["json"] }
 
 # Fast In-Memory Graph & Interner
 roaring = "0.10"
@@ -48,7 +49,6 @@ thiserror = "1.0"
 
 [dev-dependencies]
 proptest = "1.5"
-reqwest = { version = "0.12", features = ["json"] }
 http-body-util = "0.1"
 
 [[bench]]

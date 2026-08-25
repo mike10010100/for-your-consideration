@@ -31,13 +31,17 @@ use tracing::info;
 use crate::error::{FeedError, Result};
 use crate::graph::{GraphSnapshotData, GraphStore};
 use crate::interner::StringInterner;
-use crate::types::{CompactEdge, PostMeta, SnapshotStatusInfo};
+use crate::preferences::UserPreferencesStore;
+use crate::types::{CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, UserDials};
 
 /// Magic 4-byte header identifier: `b"FYFD"` (For-You Feed).
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"FYFD";
 
-/// Current snapshot format version.
-pub const SNAPSHOT_FORMAT_VERSION: u16 = 1;
+/// Current snapshot format version (2 includes Section 8 User Preferences).
+pub const SNAPSHOT_FORMAT_VERSION: u16 = 2;
+
+/// Legacy snapshot format version without user preferences.
+pub const SNAPSHOT_FORMAT_VERSION_V1: u16 = 1;
 
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 64;
@@ -89,6 +93,8 @@ pub struct SnapshotHeader {
     pub payload_crc32: u32,
     /// CRC32 checksum over header bytes `0..56`.
     pub header_crc32: u32,
+    /// Number of saved user preference profiles.
+    pub num_preferences: u32,
 }
 
 /// Result of loading a snapshot.
@@ -264,16 +270,36 @@ impl<'a> ByteSliceReader<'a> {
     }
 }
 
-/// Atomically saves the interner, graph, and Jetstream cursor to disk.
+/// Atomically saves the interner, graph, and Jetstream cursor to disk with empty user preferences.
 ///
-/// 1. Writes binary data and computed CRC32 to a temporary file (`snapshot.bin.tmp`).
-/// 2. Seeks back to offset 0 and writes the completed 64-byte self-describing header.
-/// 3. Flushes and syncs to disk (`sync_all`).
-/// 4. Atomically renames the temporary file to destination path.
+/// Convenience wrapper around [`save_snapshot_with_preferences`].
 pub fn save_snapshot(
     path: impl AsRef<Path>,
     interner: &StringInterner,
     graph: &GraphStore,
+    jetstream_cursor_us: u64,
+) -> Result<SnapshotHeader> {
+    let empty_preferences = UserPreferencesStore::new();
+    save_snapshot_with_preferences(
+        path,
+        interner,
+        graph,
+        &empty_preferences,
+        jetstream_cursor_us,
+    )
+}
+
+/// Atomically saves the interner, graph, user preferences, and Jetstream cursor to disk.
+///
+/// 1. Writes binary data across Sections 1–8 and computes payload CRC32 into a temporary file (`snapshot.bin.tmp`).
+/// 2. Seeks back to offset 0 and writes the completed 64-byte self-describing header with header CRC32.
+/// 3. Flushes and syncs to disk (`sync_all`).
+/// 4. Atomically renames the temporary file to destination path.
+pub fn save_snapshot_with_preferences(
+    path: impl AsRef<Path>,
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
     jetstream_cursor_us: u64,
 ) -> Result<SnapshotHeader> {
     let dest_path = path.as_ref();
@@ -311,6 +337,7 @@ pub fn save_snapshot(
     // Export memory states
     let strings = interner.export_strings();
     let graph_data = graph.snapshot_data();
+    let pref_data = preferences.snapshot_data();
 
     // Section 1: Strings
     let num_strings = u32::try_from(strings.len())
@@ -419,6 +446,22 @@ pub fn save_snapshot(
         write_chunk(&ts.to_le_bytes())?;
     }
 
+    // Section 8: User Preferences
+    let num_preferences = u32::try_from(pref_data.len())
+        .map_err(|e| FeedError::Snapshot(format!("Too many user preferences for snapshot: {e}")))?;
+    write_chunk(&num_preferences.to_le_bytes())?;
+    for (uid, dials) in &pref_data {
+        write_chunk(&uid.to_le_bytes())?;
+        write_chunk(&dials.freshness_half_life_secs.to_le_bytes())?;
+        write_chunk(&dials.serendipity_ratio.to_le_bytes())?;
+        write_chunk(&dials.topic_weights.art.to_le_bytes())?;
+        write_chunk(&dials.topic_weights.tech.to_le_bytes())?;
+        write_chunk(&dials.topic_weights.science.to_le_bytes())?;
+        write_chunk(&dials.topic_weights.news.to_le_bytes())?;
+        write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
+        write_chunk(&dials.updated_at_secs.to_le_bytes())?;
+    }
+
     // Finalize CRC32
     let payload_crc32 = hasher.finalize();
     writer.flush()?;
@@ -447,6 +490,7 @@ pub fn save_snapshot(
     h_hasher.update(&header_bytes[0..56]);
     let header_crc32 = h_hasher.finalize();
     header_bytes[56..60].copy_from_slice(&header_crc32.to_le_bytes());
+    header_bytes[60..64].copy_from_slice(&num_preferences.to_le_bytes());
 
     // 3. Seek to offset 0 and write header
     let mut file = writer
@@ -475,6 +519,7 @@ pub fn save_snapshot(
         num_post_metadata,
         payload_crc32,
         header_crc32,
+        num_preferences,
     })
 }
 
@@ -486,6 +531,19 @@ pub fn load_snapshot(
     path: impl AsRef<Path>,
     interner: &StringInterner,
     graph: &GraphStore,
+) -> Result<Option<LoadedSnapshot>> {
+    let preferences = UserPreferencesStore::new();
+    load_snapshot_with_preferences(path, interner, graph, &preferences)
+}
+
+/// Loads and hydrates snapshot into the interner, graph, and user preferences with CRC32 integrity verification.
+///
+/// Supports both Version 1 snapshots (without preferences) and Version 2 snapshots (with preferences).
+pub fn load_snapshot_with_preferences(
+    path: impl AsRef<Path>,
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
 ) -> Result<Option<LoadedSnapshot>> {
     let file_path = path.as_ref();
     if !file_path.exists() {
@@ -517,7 +575,7 @@ pub fn load_snapshot(
     }
 
     let version = u16::from_le_bytes([header_buf[4], header_buf[5]]);
-    if version != SNAPSHOT_FORMAT_VERSION {
+    if version != SNAPSHOT_FORMAT_VERSION_V1 && version != SNAPSHOT_FORMAT_VERSION {
         return Err(FeedError::Snapshot(format!(
             "Unsupported snapshot version {version}, expected {SNAPSHOT_FORMAT_VERSION}"
         )));
@@ -572,6 +630,11 @@ pub fn load_snapshot(
         header_buf[56..60]
             .try_into()
             .map_err(|_| FeedError::Snapshot("Corrupt header header_crc".to_string()))?,
+    );
+    let header_num_preferences = u32::from_le_bytes(
+        header_buf[60..64]
+            .try_into()
+            .map_err(|_| FeedError::Snapshot("Corrupt header num_preferences".to_string()))?,
     );
 
     // Verify Header CRC
@@ -713,6 +776,83 @@ pub fn load_snapshot(
         active_recent_posts.push((pid, ts));
     }
 
+    // Section 8: User Preferences (Version 2)
+    let num_preferences = if version == SNAPSHOT_FORMAT_VERSION
+        && slice_reader.offset < payload.len()
+    {
+        let pref_count = slice_reader.read_u32()? as usize;
+        let mut user_preferences = Vec::with_capacity(pref_count);
+
+        for _ in 0..pref_count {
+            let uid = slice_reader.read_u32()?;
+            let freshness_bytes = slice_reader.read_bytes(4)?;
+            let freshness = f32::from_le_bytes([
+                freshness_bytes[0],
+                freshness_bytes[1],
+                freshness_bytes[2],
+                freshness_bytes[3],
+            ]);
+            let serendipity_bytes = slice_reader.read_bytes(4)?;
+            let serendipity = f32::from_le_bytes([
+                serendipity_bytes[0],
+                serendipity_bytes[1],
+                serendipity_bytes[2],
+                serendipity_bytes[3],
+            ]);
+            let art_bytes = slice_reader.read_bytes(4)?;
+            let art = f32::from_le_bytes([art_bytes[0], art_bytes[1], art_bytes[2], art_bytes[3]]);
+            let tech_bytes = slice_reader.read_bytes(4)?;
+            let tech =
+                f32::from_le_bytes([tech_bytes[0], tech_bytes[1], tech_bytes[2], tech_bytes[3]]);
+            let science_bytes = slice_reader.read_bytes(4)?;
+            let science = f32::from_le_bytes([
+                science_bytes[0],
+                science_bytes[1],
+                science_bytes[2],
+                science_bytes[3],
+            ]);
+            let news_bytes = slice_reader.read_bytes(4)?;
+            let news =
+                f32::from_le_bytes([news_bytes[0], news_bytes[1], news_bytes[2], news_bytes[3]]);
+            let culture_bytes = slice_reader.read_bytes(4)?;
+            let culture = f32::from_le_bytes([
+                culture_bytes[0],
+                culture_bytes[1],
+                culture_bytes[2],
+                culture_bytes[3],
+            ]);
+            let updated_at_secs = slice_reader.read_u64()?;
+
+            let dials = UserDials {
+                freshness_half_life_secs: freshness,
+                serendipity_ratio: serendipity,
+                topic_weights: TopicWeights {
+                    art,
+                    tech,
+                    science,
+                    news,
+                    culture,
+                },
+                updated_at_secs,
+            };
+
+            if let Err(err) = dials.validate() {
+                return Err(FeedError::Snapshot(format!(
+                    "Corrupted user preference record in snapshot for user {uid}: {err}"
+                )));
+            }
+
+            user_preferences.push((uid, dials));
+        }
+
+        preferences.restore_from_snapshot(user_preferences);
+        u32::try_from(pref_count)
+            .map_err(|e| FeedError::Snapshot(format!("Preference count exceeds u32: {e}")))?
+    } else {
+        preferences.clear();
+        header_num_preferences
+    };
+
     // 4. Hydrate in-memory stores
     interner.hydrate_from(interned_strings);
     graph.restore_from_snapshot(GraphSnapshotData {
@@ -726,7 +866,7 @@ pub fn load_snapshot(
 
     let load_duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
     info!(
-        "Hydrated snapshot in {load_duration_ms:.2} ms: {num_strings} strings, {num_users} users, {total_forward_edges} interactions"
+        "Hydrated snapshot in {load_duration_ms:.2} ms: {num_strings} strings, {num_users} users, {total_forward_edges} interactions, {num_preferences} preferences"
     );
 
     Ok(Some(LoadedSnapshot {
@@ -744,6 +884,7 @@ pub fn load_snapshot(
             num_post_metadata,
             payload_crc32: expected_payload_crc,
             header_crc32: expected_header_crc,
+            num_preferences,
         },
         load_duration_ms,
     }))

@@ -35,6 +35,7 @@ pub mod error;
 pub mod graph;
 pub mod ingest;
 pub mod interner;
+pub mod preferences;
 pub mod recommender;
 pub mod server;
 pub mod snapshot;
@@ -43,8 +44,10 @@ pub mod types;
 /// Convenient prelude re-exporting core data structures, algorithms, and graph primitives.
 pub mod prelude {
     pub use crate::auth::{
-        extract_viewer_did, extract_viewer_did_from_headers, is_valid_did,
-        parse_jwt_payload_unverified, validate_service_jwt, ServiceJwtPayload,
+        authenticate_pds_session, extract_session_did_from_headers, extract_viewer_did,
+        extract_viewer_did_from_headers, generate_session_token, is_valid_did,
+        parse_jwt_payload_unverified, validate_service_jwt, validate_session_token,
+        ServiceJwtPayload,
     };
     pub use crate::error::{FeedError, Result};
     pub use crate::graph::{
@@ -60,6 +63,7 @@ pub mod prelude {
         DEFAULT_MAX_BACKOFF_SECS, DEFAULT_PING_INTERVAL_SECS,
     };
     pub use crate::interner::StringInterner;
+    pub use crate::preferences::{shard_idx, UserPreferencesStore, PREFERENCE_SHARDS};
     pub use crate::recommender::{
         classify_post, deterministic_topic_fallback, match_creator_seed, match_uri_keywords,
         ImpressionEntry, ImpressionStore, Recommender, ViewerImpressionHistory,
@@ -67,23 +71,32 @@ pub mod prelude {
         HARD_SUPPRESSION_WINDOW_SECS, IMPRESSION_SHARDS,
     };
     pub use crate::server::{
-        create_xrpc_router, handle_get_explain, handle_get_feed_preview, handle_get_feed_skeleton,
-        handle_get_healthz, handle_get_taste_twins, handle_get_telemetry, serve_xrpc, AppState,
-        FeedSkeletonQuery, DEFAULT_FEED_RKEY,
+        create_xrpc_router, handle_delete_preferences, handle_get_explain, handle_get_feed_preview,
+        handle_get_feed_skeleton, handle_get_healthz, handle_get_preferences,
+        handle_get_taste_twins, handle_get_telemetry, handle_post_auth_login,
+        handle_post_preferences, serve_xrpc, AppState, FeedSkeletonQuery, DEFAULT_FEED_RKEY,
     };
     pub use crate::snapshot::{
-        load_snapshot, save_snapshot, LoadedSnapshot, SnapshotConfig, SnapshotHeader,
-        SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_MAGIC,
+        load_snapshot, load_snapshot_with_preferences, save_snapshot,
+        save_snapshot_with_preferences, LoadedSnapshot, SnapshotConfig, SnapshotHeader,
+        SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1,
+        SNAPSHOT_MAGIC,
     };
     pub use crate::types::{
-        ApiErrorResponse, CompactEdge, ExplainQuery, FeedPreviewItem, FeedPreviewQuery,
-        FeedPreviewResponse, FeedRecommendation, FeedSkeletonResponse, GraphProofChain,
-        GraphTelemetryInfo, ImpressionTelemetryInfo, IngestionVelocityInfo, InternerTelemetryInfo,
-        PostMeta, ProofChainStep, RecommendationDials, RecommendationSource, ScoreBreakdown,
-        ScoredPost, SharedPostInfo, SignalType, SkeletonFeedPost, SkeletonReason,
+        ApiErrorResponse, CompactEdge, DeletePreferencesResponse, ExplainQuery, FeedPreviewItem,
+        FeedPreviewQuery, FeedPreviewResponse, FeedRecommendation, FeedSkeletonResponse,
+        GenericStatusResponse, GetPreferencesResponse, GraphProofChain, GraphTelemetryInfo,
+        ImpressionTelemetryInfo, IngestionVelocityInfo, InternerTelemetryInfo, LoginRequest,
+        LoginRequestBody, LoginResponse, LoginSuccessResponse, PostMeta, PreferencesPayloadDto,
+        PreferencesResponseDto, ProofChainStep, RecommendationDials, RecommendationSource,
+        SavePreferencesRequestBody, ScoreBreakdown, ScoredPost, SetPreferencesRequest,
+        SetPreferencesResponse, SharedPostInfo, SignalType, SkeletonFeedPost, SkeletonReason,
         SnapshotStatusInfo, TasteTwinItem, TasteTwinsQuery, TasteTwinsResponse, TelemetryResponse,
-        TopicCategory, TopicWeights, BLUESKY_EPOCH_SECS, DEFAULT_EXPLORE_RATIO, DEFAULT_PAGE_LIMIT,
-        MAX_PAGE_LIMIT, NUM_TOPIC_CATEGORIES, TOPIC_CATEGORIES,
+        TopicCategory, TopicWeights, UserDials, UserDialsResponse, BLUESKY_EPOCH_SECS,
+        DEFAULT_EXPLORE_RATIO, DEFAULT_PAGE_LIMIT, DISCOVERY_MAX, DISCOVERY_MIN,
+        FRESHNESS_MAX_HOURS, FRESHNESS_MIN_HOURS, MAX_FRESHNESS_SECS, MAX_PAGE_LIMIT,
+        MAX_SERENDIPITY_RATIO, MAX_TOPIC_MULTIPLIER, MIN_FRESHNESS_SECS, MIN_SERENDIPITY_RATIO,
+        MIN_TOPIC_MULTIPLIER, NUM_TOPIC_CATEGORIES, TOPIC_CATEGORIES, TOPIC_MAX, TOPIC_MIN,
     };
 }
 

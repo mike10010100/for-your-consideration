@@ -316,6 +316,270 @@ impl RecommendationDials {
     }
 }
 
+/// Boundary constants for user preference dials validation.
+pub const FRESHNESS_MIN_HOURS: f32 = 1.0;
+pub const FRESHNESS_MAX_HOURS: f32 = 168.0;
+pub const DISCOVERY_MIN: f32 = 0.0;
+pub const DISCOVERY_MAX: f32 = 0.50;
+pub const TOPIC_MIN: f32 = 0.0;
+pub const TOPIC_MAX: f32 = 5.0;
+
+/// Boundary constants expressed in seconds / ratios for internal calculations.
+pub const MIN_FRESHNESS_SECS: f32 = FRESHNESS_MIN_HOURS * 3600.0;
+pub const MAX_FRESHNESS_SECS: f32 = FRESHNESS_MAX_HOURS * 3600.0;
+pub const MIN_SERENDIPITY_RATIO: f32 = DISCOVERY_MIN;
+pub const MAX_SERENDIPITY_RATIO: f32 = DISCOVERY_MAX;
+pub const MIN_TOPIC_MULTIPLIER: f32 = TOPIC_MIN;
+pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
+
+/// User-configurable recommendation dials persisted per viewer account.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UserDials {
+    /// Half-life time decay parameter in seconds (range: 1h [3,600s] to 168h [604,800s], default: 36h [129,600s]).
+    pub freshness_half_life_secs: f32,
+    /// Serendipity exploration ratio (range: 0.0 [0%] to 0.50 [50%], default: 0.15 [15%]).
+    pub serendipity_ratio: f32,
+    /// Topic bias multipliers for the 5 primary categories (range: 0.0x to 5.0x each, default: 1.0x).
+    pub topic_weights: TopicWeights,
+    /// Unix timestamp in seconds when preferences were last saved or updated.
+    pub updated_at_secs: u64,
+}
+
+impl Default for UserDials {
+    fn default() -> Self {
+        Self {
+            freshness_half_life_secs: DEFAULT_HALF_LIFE_SECS,
+            serendipity_ratio: DEFAULT_EXPLORE_RATIO,
+            topic_weights: TopicWeights::default(),
+            updated_at_secs: 0,
+        }
+    }
+}
+
+impl UserDials {
+    /// Validates all dial boundaries against strict specification limits.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.freshness_half_life_secs.is_finite()
+            || self.freshness_half_life_secs < MIN_FRESHNESS_SECS
+            || self.freshness_half_life_secs > MAX_FRESHNESS_SECS
+        {
+            return Err(format!(
+                "Freshness half-life must be between {:.1}h ({}s) and {:.1}h ({}s), got {:.1}s",
+                FRESHNESS_MIN_HOURS,
+                MIN_FRESHNESS_SECS as u32,
+                FRESHNESS_MAX_HOURS,
+                MAX_FRESHNESS_SECS as u32,
+                self.freshness_half_life_secs
+            ));
+        }
+
+        if !self.serendipity_ratio.is_finite()
+            || self.serendipity_ratio < MIN_SERENDIPITY_RATIO
+            || self.serendipity_ratio > MAX_SERENDIPITY_RATIO
+        {
+            return Err(format!(
+                "Discovery ratio must be between {:.2} ({}%) and {:.2} ({}%), got {:.3}",
+                DISCOVERY_MIN,
+                (DISCOVERY_MIN * 100.0) as u32,
+                DISCOVERY_MAX,
+                (DISCOVERY_MAX * 100.0) as u32,
+                self.serendipity_ratio
+            ));
+        }
+
+        for (name, weight) in [
+            ("Art", self.topic_weights.art),
+            ("Tech", self.topic_weights.tech),
+            ("Science", self.topic_weights.science),
+            ("News", self.topic_weights.news),
+            ("Culture", self.topic_weights.culture),
+        ] {
+            if !weight.is_finite()
+                || !(MIN_TOPIC_MULTIPLIER..=MAX_TOPIC_MULTIPLIER).contains(&weight)
+            {
+                return Err(format!(
+                    "Topic multiplier for {name} must be between {:.1}x and {:.1}x, got {:.2}x",
+                    MIN_TOPIC_MULTIPLIER, MAX_TOPIC_MULTIPLIER, weight
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns freshness half-life in hours.
+    #[must_use]
+    pub const fn freshness_half_life_hours(&self) -> f32 {
+        self.freshness_half_life_secs / 3600.0
+    }
+
+    /// Returns discovery / serendipity exploration ratio.
+    #[must_use]
+    pub const fn discovery_ratio(&self) -> f32 {
+        self.serendipity_ratio
+    }
+
+    /// Constructs [`UserDials`] from hours, discovery ratio, topic weights, and updated timestamp.
+    #[must_use]
+    pub const fn from_hours(
+        freshness_half_life_hours: f32,
+        discovery_ratio: f32,
+        topic_weights: TopicWeights,
+        updated_at_secs: u64,
+    ) -> Self {
+        Self {
+            freshness_half_life_secs: freshness_half_life_hours * 3600.0,
+            serendipity_ratio: discovery_ratio,
+            topic_weights,
+            updated_at_secs,
+        }
+    }
+
+    /// Converts [`UserDials`] into [`RecommendationDials`] with default page limits and cursor.
+    #[must_use]
+    pub const fn to_recommendation_dials(&self) -> RecommendationDials {
+        RecommendationDials {
+            half_life_secs: self.freshness_half_life_secs,
+            explore_ratio: self.serendipity_ratio,
+            topic_weights: self.topic_weights,
+            explain: false,
+            limit: DEFAULT_PAGE_LIMIT,
+            cursor: None,
+        }
+    }
+
+    /// Constructs [`UserDials`] from [`RecommendationDials`].
+    #[must_use]
+    pub const fn from_recommendation_dials(
+        dials: &RecommendationDials,
+        updated_at_secs: u64,
+    ) -> Self {
+        Self {
+            freshness_half_life_secs: dials.half_life_secs,
+            serendipity_ratio: dials.explore_ratio,
+            topic_weights: dials.topic_weights,
+            updated_at_secs,
+        }
+    }
+
+    /// Applies these custom user dials onto an existing [`RecommendationDials`] instance.
+    pub const fn apply_to_recommendation_dials(&self, dials: &mut RecommendationDials) {
+        dials.half_life_secs = self.freshness_half_life_secs;
+        dials.explore_ratio = self.serendipity_ratio;
+        dials.topic_weights = self.topic_weights;
+    }
+}
+
+/// Request payload for `POST /api/auth/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginRequestBody {
+    pub identifier: String,
+    pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pds_url: Option<String>,
+}
+
+/// Alias for [`LoginRequestBody`].
+pub type LoginRequest = LoginRequestBody;
+
+/// Successful response payload for `POST /api/auth/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginSuccessResponse {
+    pub status: String,
+    pub did: String,
+    pub handle: String,
+    pub token: String,
+    pub message: String,
+}
+
+/// Alias for [`LoginSuccessResponse`].
+pub type LoginResponse = LoginSuccessResponse;
+
+/// User preference dials representation for JSON REST API responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserDialsResponse {
+    pub freshness_half_life_hours: f32,
+    pub discovery_ratio: f32,
+    pub topics: TopicWeights,
+    pub updated_at_secs: u64,
+}
+
+impl From<UserDials> for UserDialsResponse {
+    fn from(dials: UserDials) -> Self {
+        Self {
+            freshness_half_life_hours: dials.freshness_half_life_hours(),
+            discovery_ratio: dials.discovery_ratio(),
+            topics: dials.topic_weights,
+            updated_at_secs: dials.updated_at_secs,
+        }
+    }
+}
+
+/// Preferences representation payload within [`PreferencesResponseDto`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreferencesPayloadDto {
+    #[serde(alias = "freshness_half_life_hours")]
+    pub freshness_hours: f32,
+    pub discovery_ratio: f32,
+    #[serde(alias = "topics")]
+    pub topic_weights: TopicWeights,
+}
+
+impl From<UserDials> for PreferencesPayloadDto {
+    fn from(dials: UserDials) -> Self {
+        Self {
+            freshness_hours: dials.freshness_half_life_hours(),
+            discovery_ratio: dials.discovery_ratio(),
+            topic_weights: dials.topic_weights,
+        }
+    }
+}
+
+/// Response payload for `GET /api/preferences`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreferencesResponseDto {
+    pub did: String,
+    pub preferences: PreferencesPayloadDto,
+    pub is_custom: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dials: Option<UserDialsResponse>,
+}
+
+/// Alias for [`PreferencesResponseDto`].
+pub type GetPreferencesResponse = PreferencesResponseDto;
+
+/// Request payload for `POST /api/preferences`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavePreferencesRequestBody {
+    #[serde(alias = "freshness_half_life_hours")]
+    pub freshness_hours: f32,
+    pub discovery_ratio: f32,
+    #[serde(alias = "topics", default)]
+    pub topic_weights: Option<TopicWeights>,
+}
+
+/// Alias for [`SavePreferencesRequestBody`].
+pub type SetPreferencesRequest = SavePreferencesRequestBody;
+
+/// Generic status response payload for mutations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenericStatusResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferences: Option<PreferencesPayloadDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dials: Option<UserDialsResponse>,
+}
+
+/// Alias for [`GenericStatusResponse`].
+pub type SetPreferencesResponse = GenericStatusResponse;
+/// Alias for [`GenericStatusResponse`].
+pub type DeletePreferencesResponse = GenericStatusResponse;
+
 /// The origin source of a recommended post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RecommendationSource {
@@ -1350,5 +1614,116 @@ mod tests {
         let parsed: ApiErrorResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.error, "InvalidRequest");
         assert_eq!(parsed.message, "Missing parameter");
+    }
+
+    #[test]
+    fn test_user_dials_default_and_validation() {
+        let default_dials = UserDials::default();
+        assert_eq!(default_dials.freshness_half_life_secs, 36.0 * 3600.0);
+        assert_eq!(default_dials.freshness_half_life_hours(), 36.0);
+        assert_eq!(default_dials.discovery_ratio(), 0.15);
+        assert_eq!(default_dials.topic_weights.art, 1.0);
+        assert!(default_dials.validate().is_ok());
+
+        // Boundary minimums
+        let min_dials = UserDials::from_hours(
+            FRESHNESS_MIN_HOURS,
+            DISCOVERY_MIN,
+            TopicWeights {
+                art: TOPIC_MIN,
+                tech: TOPIC_MIN,
+                science: TOPIC_MIN,
+                news: TOPIC_MIN,
+                culture: TOPIC_MIN,
+            },
+            1_700_000_000,
+        );
+        assert!(min_dials.validate().is_ok());
+        assert_eq!(min_dials.freshness_half_life_hours(), 1.0);
+        assert_eq!(min_dials.discovery_ratio(), 0.0);
+
+        // Boundary maximums
+        let max_dials = UserDials::from_hours(
+            FRESHNESS_MAX_HOURS,
+            DISCOVERY_MAX,
+            TopicWeights {
+                art: TOPIC_MAX,
+                tech: TOPIC_MAX,
+                science: TOPIC_MAX,
+                news: TOPIC_MAX,
+                culture: TOPIC_MAX,
+            },
+            1_700_000_000,
+        );
+        assert!(max_dials.validate().is_ok());
+        assert_eq!(max_dials.freshness_half_life_hours(), 168.0);
+        assert_eq!(max_dials.discovery_ratio(), 0.50);
+
+        // Invalid freshness too low
+        let mut invalid_freshness = default_dials;
+        invalid_freshness.freshness_half_life_secs = 3599.0;
+        assert!(invalid_freshness.validate().is_err());
+
+        // Invalid freshness too high
+        invalid_freshness.freshness_half_life_secs = MAX_FRESHNESS_SECS + 1.0;
+        assert!(invalid_freshness.validate().is_err());
+
+        // Invalid freshness NaN
+        invalid_freshness.freshness_half_life_secs = f32::NAN;
+        assert!(invalid_freshness.validate().is_err());
+
+        // Invalid discovery too high
+        let mut invalid_discovery = default_dials;
+        invalid_discovery.serendipity_ratio = 0.51;
+        assert!(invalid_discovery.validate().is_err());
+
+        // Invalid discovery negative
+        invalid_discovery.serendipity_ratio = -0.01;
+        assert!(invalid_discovery.validate().is_err());
+
+        // Invalid topic weight too high
+        let mut invalid_topic = default_dials;
+        invalid_topic.topic_weights.tech = 5.01;
+        assert!(invalid_topic.validate().is_err());
+
+        // Invalid topic weight negative
+        invalid_topic.topic_weights.tech = -0.1;
+        assert!(invalid_topic.validate().is_err());
+    }
+
+    #[test]
+    fn test_user_dials_conversions() {
+        let dials = UserDials::from_hours(
+            24.0,
+            0.20,
+            TopicWeights {
+                art: 1.5,
+                tech: 2.0,
+                science: 0.5,
+                news: 1.0,
+                culture: 1.2,
+            },
+            1_724_000_000,
+        );
+
+        let rec_dials = dials.to_recommendation_dials();
+        assert_eq!(rec_dials.half_life_secs, 24.0 * 3600.0);
+        assert_eq!(rec_dials.explore_ratio, 0.20);
+        assert_eq!(rec_dials.topic_weights.art, 1.5);
+        assert_eq!(rec_dials.limit, DEFAULT_PAGE_LIMIT);
+
+        let from_rec = UserDials::from_recommendation_dials(&rec_dials, 1_724_000_000);
+        assert_eq!(from_rec, dials);
+
+        let mut existing_rec = RecommendationDials::default();
+        dials.apply_to_recommendation_dials(&mut existing_rec);
+        assert_eq!(existing_rec.half_life_secs, 24.0 * 3600.0);
+        assert_eq!(existing_rec.explore_ratio, 0.20);
+        assert_eq!(existing_rec.topic_weights.tech, 2.0);
+
+        let resp: UserDialsResponse = dials.into();
+        assert_eq!(resp.freshness_half_life_hours, 24.0);
+        assert_eq!(resp.discovery_ratio, 0.20);
+        assert_eq!(resp.updated_at_secs, 1_724_000_000);
     }
 }
