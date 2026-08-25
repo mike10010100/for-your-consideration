@@ -2,8 +2,8 @@
 
 **Timestamp:** 2026-08-21T19:04:30-04:00  
 **Project:** High-Performance Single-Box "For You" Feed Engine for AT Protocol  
-**Working Directory:** [`/Users/mike10010100/git/atproto-experiments/for-your-consideration`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration)  
-**PRD Reference:** [`PRD.md`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/PRD.md)  
+**Working Directory:** `for-your-consideration/`  
+**PRD Reference:** [`PRD.md`](PRD.md)  
 **Standard:** [`mike10010100/rust-best-practices`](https://github.com/mike10010100/rust-best-practices)
 
 ---
@@ -12,16 +12,16 @@
 
 ### Completed:
 - **Milestone 1 (Core Graph Store & Interner)**:
-  - [`src/types.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/src/types.rs): Strongly typed interaction event types (`Like`, `Repost`, `Quote`, `Follow`), weighted edge records, and compact types.
-  - [`src/interner.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/src/interner.rs): Thread-safe 32-bit bidirectional string interner with double-checked locking.
-  - [`src/error.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/src/error.rs): `thiserror`-based domain error enums.
-  - [`src/graph.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/src/graph.rs): In-memory bipartite interaction graph with Roaring Bitmaps, exponential half-life time-decay, BM25 inverse degree dampening, and velocity eviction.
-  - [`src/lib.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/src/lib.rs): Crate root with `#![forbid(unsafe_code)]`.
+  - [`src/types.rs`](src/types.rs): Strongly typed interaction event types (`Like`, `Repost`, `Quote`, `Follow`), weighted edge records, and compact types.
+  - [`src/interner.rs`](src/interner.rs): Thread-safe 32-bit bidirectional string interner with double-checked locking.
+  - [`src/error.rs`](src/error.rs): `thiserror`-based domain error enums.
+  - [`src/graph.rs`](src/graph.rs): In-memory bipartite interaction graph with Roaring Bitmaps, exponential half-life time-decay, BM25 inverse degree dampening, and velocity eviction.
+  - [`src/lib.rs`](src/lib.rs): Crate root with `#![forbid(unsafe_code)]`.
 - **E2E Testing & Mock Infrastructure**:
-  - [`tests/graph_tests.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/tests/graph_tests.rs): Core unit tests for graph operations and time-decay math.
-  - [`tests/common/`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/tests/common/): Mock Jetstream server and test harness.
-  - [`tests/e2e_tier1_feature.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/tests/e2e_tier1_feature.rs): 90KB Tier 1 Feature test suite covering 35 PRD feature criteria.
-  - [`tests/e2e_tier2_boundary.rs`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/tests/e2e_tier2_boundary.rs): 84KB Tier 2 Boundary test suite covering edge cases and clock-warp safety.
+  - [`tests/graph_tests.rs`](tests/graph_tests.rs): Core unit tests for graph operations and time-decay math.
+  - [`tests/common/`](tests/common/): Mock Jetstream server and test harness.
+  - [`tests/e2e_tier1_feature.rs`](tests/e2e_tier1_feature.rs): 90KB Tier 1 Feature test suite covering 35 PRD feature criteria.
+  - [`tests/e2e_tier2_boundary.rs`](tests/e2e_tier2_boundary.rs): 84KB Tier 2 Boundary test suite covering edge cases and clock-warp safety.
 
 ---
 

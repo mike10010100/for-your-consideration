@@ -15,16 +15,21 @@ set -euo pipefail
 #   ./scripts/publish_feed.sh
 # ==============================================================================
 
-BSKY_HANDLE="${BSKY_HANDLE:-mike10010100.com}"
+BSKY_HANDLE="${BSKY_HANDLE:-}"
 FEED_RKEY="${FEED_RKEY:-for-your-consideration}"
 FEED_DISPLAY_NAME="${FEED_DISPLAY_NAME:-For Your Consideration}"
 FEED_DESCRIPTION="${FEED_DESCRIPTION:-Personalized algorithmic recommendation feed engine powered by multi-signal graph collaborative filtering, anti-fatigue decay, and serendipity exploration. (An homage to For You)}"
-FEED_HOSTNAME="${FEED_HOSTNAME:-feed.mike10010100.com}"
+FEED_HOSTNAME="${FEED_HOSTNAME:-feed.example.com}"
 PDS_URL="${PDS_URL:-https://bsky.social}"
+
+if [[ -z "${BSKY_HANDLE:-}" ]]; then
+  echo "Error: BSKY_HANDLE environment variable is required (e.g. BSKY_HANDLE=\"your-handle.bsky.social\")." >&2
+  exit 1
+fi
 
 if [[ -z "${BSKY_PASSWORD:-}" ]]; then
   echo "Error: BSKY_PASSWORD environment variable is required (use a Bluesky App Password)." >&2
-  echo "Example: BSKY_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" ./scripts/publish_feed.sh" >&2
+  echo "Example: BSKY_HANDLE=\"your-handle.bsky.social\" BSKY_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" ./scripts/publish_feed.sh" >&2
   exit 1
 fi
 

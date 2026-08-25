@@ -124,7 +124,7 @@ We provide a helper script that automates Cloudflare Tunnel setup:
 ```
 
 * **Mode 1 (Quick / Ephemeral)**: Instantly exposes `http://localhost:3000` via a public `*.trycloudflare.com` URL (zero-config, free).
-* **Mode 2 (Production Custom Domain)**: Authenticates and binds your custom domain (e.g. `feed.mike10010100.com`) directly to your permanent box without opening firewall ports.
+* **Mode 2 (Production Custom Domain)**: Authenticates and binds your custom domain (e.g. `feed.example.com`) directly to your permanent box without opening firewall ports.
 
 Verify your DID document is accessible:
 ```bash

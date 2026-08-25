@@ -3,7 +3,7 @@
 **Project Name:** `for-your-consideration`  
 **Target Platform:** AT Protocol / Bluesky Custom Feeds  
 **Language & Runtime:** Rust (Edition 2021), Tokio Async Runtime  
-**Location:** [`for-your-consideration/`](file:///Users/mike10010100/git/atproto-experiments/for-your-consideration/)  
+**Location:** `for-your-consideration/`  
 **Design Standard:** Strict compliance with [`mike10010100/rust-best-practices`](https://github.com/mike10010100/rust-best-practices)
 
 ---

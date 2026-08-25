@@ -4,10 +4,10 @@
 
 Implement Phase 2 of the high-performance single-box "For You" custom feed generator for AT Protocol / Bluesky in Rust, adding **atomic disk snapshot persistence**, **impression memory with anti-repetition fatigue**, and **enhanced new-user onboarding topic diversity** per the updated PRD.
 
-Working directory: /Users/mike10010100/git/atproto-experiments/for-your-consideration
+Working directory: for-your-consideration/
 Integrity mode: development
 
-Reference PRD: /Users/mike10010100/git/atproto-experiments/for-your-consideration/PRD.md
+Reference PRD: PRD.md
 Reference Best Practices: https://github.com/mike10010100/rust-best-practices
 
 ## Requirements
@@ -18,14 +18,27 @@ Implement a compact binary snapshot engine with CRC32 integrity verification tha
 ### R2. Impression Memory & Anti-Repetition Fatigue (`src/recommender.rs`)
 Implement an in-memory sliding LRU impression cache per viewer DID tracking served post timestamps. Enforce 100% suppression for posts served within the last 30 minutes, and exponential score dampening for posts served in the last 2–6 hours to eliminate feed repetition fatigue.
 
-### R3. Enhanced New-User Cold-Start & Onboarding Topic Diversity
-Enrich Tier 3 velocity candidate selection with topic diversity clustering (ensuring a balanced mix across art, tech, science, news, culture) and curated high-signal creator seeds for unauthenticated or brand-new Bluesky accounts.
+### R3. Dynamic Query Parameter Weights (`src/server.rs`, `src/types.rs`)
+Support dynamic per-request dial overrides in `app.bsky.feed.getFeedSkeleton`:
+- `freshness`: Half-life duration (`realtime` = 6h, `balanced` = 36h, `weekly` = 168h)
+- `discovery`: Serendipity exploration ratio (`familiar` = 0.05, `balanced` = 0.15, `deep_dive` = 0.35)
+- `topic_art`, `topic_tech`, `topic_science`, `topic_news`, `topic_culture`: Custom integer weights (0–100) for topic domain preferences
+- `explain=true`: Returns full mathematical proof chains explaining why each candidate post was selected.
 
-### R4. Server & Lifecycle Integration (`src/server.rs`, `src/main.rs`)
-Integrate impression recording into the `/xrpc/app.bsky.feed.getFeedSkeleton` response flow, wire automatic periodic snapshot tasks in the background `JoinSet`, and ensure clean graceful shutdown snapshotting.
+### R4. Production Validation, Clippy Pedantic & Benchmarks
+- All existing and new tests must pass (`cargo test`).
+- `#![forbid(unsafe_code)]` must be strictly enforced.
+- Zero Clippy warnings under `cargo clippy --all-targets -- -D warnings`.
+- Performance benchmark suites (`benches/snapshot_bench.rs`, `benches/fatigue_bench.rs`) verifying sub-50ms snapshot hydration and sub-2ms recommendation latency.
 
-### R5. Production Stability & QA Verification
-Maintain strict compliance with `mike10010100/rust-best-practices`: `#![forbid(unsafe_code)]`, zero unwraps/panics in production, strict `clippy::pedantic` with `-D warnings`, defensive time (`saturating_duration_since`), and comprehensive unit/integration/property tests.
+---
+
+## 2026-08-25T04:20:15Z
+
+Fix Jetstream ingest velocity regression and add live hydration progress tracking to the dashboard.
+
+Working directory: for-your-consideration/
+Reference PRD: PRD.md
 
 ## Acceptance Criteria
 

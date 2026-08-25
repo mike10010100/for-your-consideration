@@ -1319,7 +1319,7 @@
 
         <!-- Search Bar -->
         <div class="search-bar-group">
-          <input type="text" id="taste-twins-input" class="search-input" placeholder="Enter @handle or did:plc:... (e.g. @mike10010100.com)" value="mike10010100.com">
+          <input type="text" id="taste-twins-input" class="search-input" placeholder="Enter @handle or did:plc:... (e.g. @alice.bsky.social)" value="@alice.bsky.social">
           <button id="taste-twins-btn" class="btn btn-primary">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             Search
@@ -1329,10 +1329,10 @@
         <!-- Quick Preset Chips -->
         <div class="preset-chips">
           <span style="font-size: 0.75rem; color: var(--text-muted); align-self: center;">Try:</span>
-          <button class="chip" onclick="setTasteTwinsQuery('mike10010100.com')">@mike10010100.com</button>
+          <button class="chip" onclick="setTasteTwinsQuery('@alice.bsky.social')">@alice.bsky.social</button>
           <button class="chip" onclick="setTasteTwinsQuery('did:plc:alice')">did:plc:alice</button>
           <button class="chip" onclick="setTasteTwinsQuery('did:plc:bob')">did:plc:bob</button>
-          <button class="chip" onclick="setTasteTwinsQuery('@alice.bsky.social')">@alice.bsky.social</button>
+          <button class="chip" onclick="setTasteTwinsQuery('did:plc:carol')">did:plc:carol</button>
         </div>
 
         <!-- Taste Twins Results Container -->
@@ -1366,14 +1366,14 @@
               <span id="dial-viewer-badge" class="badge" style="font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--accent-sky);">Personalized</span>
             </div>
             <div style="display: flex; gap: 0.5rem; margin-bottom: 0.45rem;">
-              <input type="text" id="dial-viewer-input" class="search-input" style="padding: 0.45rem 0.75rem; font-size: 0.8125rem; flex: 1;" placeholder="Enter handle (e.g. mike10010100.com) or DID" value="mike10010100.com">
+              <input type="text" id="dial-viewer-input" class="search-input" style="padding: 0.45rem 0.75rem; font-size: 0.8125rem; flex: 1;" placeholder="Enter handle (e.g. alice.bsky.social) or DID" value="@alice.bsky.social">
               <button id="btn-simulate-feed" class="btn btn-primary btn-sm" style="white-space: nowrap;">Simulate Feed</button>
             </div>
             <!-- Quick Account Presets -->
             <div style="display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center;">
               <span style="font-size: 0.6875rem; color: var(--text-muted);">Presets:</span>
-              <button type="button" class="btn btn-sm btn-preset" data-viewer="mike10010100.com" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--accent-sky);">@mike10010100.com</button>
-              <button type="button" class="btn btn-preset" data-viewer="did:plc:alice" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">Alice (Sample)</button>
+              <button type="button" class="btn btn-sm btn-preset" data-viewer="@alice.bsky.social" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--accent-sky);">@alice.bsky.social</button>
+              <button type="button" class="btn btn-preset" data-viewer="did:plc:bob" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">Bob (Sample)</button>
               <button type="button" class="btn btn-preset" data-viewer="" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-muted);">Anonymous (Cold Start)</button>
             </div>
           </div>

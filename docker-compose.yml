@@ -11,8 +11,8 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=3000
-      - HOSTNAME=${HOSTNAME:-feed.mike10010100.com}
-      - SERVICE_DID=${SERVICE_DID:-did:web:feed.mike10010100.com}
+      - HOSTNAME=${HOSTNAME:-feed.example.com}
+      - SERVICE_DID=${SERVICE_DID:-did:web:feed.example.com}
       - FEED_RKEY=${FEED_RKEY:-for-your-consideration}
       - REPLAY_HOURS=${REPLAY_HOURS:-12}
       - SNAPSHOT_PATH=/data/snapshot.bin

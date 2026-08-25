@@ -13,7 +13,7 @@ set -euo pipefail
 # ==============================================================================
 
 LOCAL_PORT="${LOCAL_PORT:-3000}"
-DEFAULT_DOMAIN="${DEFAULT_DOMAIN:-feed.mike10010100.com}"
+DEFAULT_DOMAIN="${DEFAULT_DOMAIN:-feed.example.com}"
 TUNNEL_NAME="${TUNNEL_NAME:-fyc-feed}"
 
 echo "=========================================================="
@@ -98,7 +98,7 @@ if [[ "$MODE_CHOICE" == "1" ]]; then
   echo ""
   echo "To publish your feed to Bluesky right now with this tunnel URL, run:"
   echo "----------------------------------------------------------"
-  echo "BSKY_HANDLE=\"mike10010100.com\" \\"
+  echo "BSKY_HANDLE=\"your-handle.bsky.social\" \\"
   echo "BSKY_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\" \\"
   echo "FEED_HOSTNAME=\"$HOSTNAME_ONLY\" \\"
   echo "./scripts/publish_feed.sh"

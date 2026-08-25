@@ -2,7 +2,7 @@
 name = "for-your-consideration"
 version = "0.1.0"
 edition = "2021"
-authors = ["Michael <mike10010100>"]
+authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
 license = "MIT OR Apache-2.0"
 
