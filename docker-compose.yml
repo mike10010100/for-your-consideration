@@ -15,6 +15,7 @@ services:
       - SERVICE_DID=${SERVICE_DID:-did:web:feed.example.com}
       - FEED_RKEY=${FEED_RKEY:-for-your-consideration}
       - REPLAY_HOURS=${REPLAY_HOURS:-12}
+      - RETENTION_DAYS=${RETENTION_DAYS:-30}
       - SNAPSHOT_PATH=/data/snapshot.bin
       - SNAPSHOT_INTERVAL_SECS=300
       - RUST_LOG=info,for_your_consideration=info
@@ -29,9 +30,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 14336M
         reservations:
-          memory: 512M
+          memory: 1024M
 
 volumes:
   fyc_data:
