@@ -163,11 +163,18 @@ Users and clients can customize recommendation parameters dynamically using URL 
 
 ---
 
-## 🛡️ Invariants & Quality Standards
+## 🦀 Rust Best Practices & Architecture Standards
 
-Strictly adheres to [`mike10010100/rust-best-practices`](https://github.com/mike10010100/rust-best-practices):
-* `#![forbid(unsafe_code)]` enforced across all crates and modules.
-* Zero `.unwrap()`, zero `.expect()`, zero `panic!` in production paths.
-* Zero Clippy warnings (`-D warnings` with `clippy::pedantic` and `clippy::nursery`).
-* All background tasks tracked in `tokio::task::JoinSet` with cooperative `CancellationToken` cancellation.
-* Sub-2ms p99 recommendation latency under high write concurrency.
+This codebase strictly follows the production-grade stability patterns, defensive concurrency rules, and QA quality gates established in [`mike10010100/rust-best-practices`](https://github.com/mike10010100/rust-best-practices):
+
+* **Architecture Guide**: [`BEST_PRACTICES.md`](https://github.com/mike10010100/rust-best-practices/blob/main/BEST_PRACTICES.md)
+* **Tooling Blueprint**: [`TOOLING.md`](https://github.com/mike10010100/rust-best-practices/blob/main/TOOLING.md)
+* **AI Agent Instructions**: [`AGENTS.md`](AGENTS.md) (and [`agents.md`](https://github.com/mike10010100/rust-best-practices/blob/main/agents.md))
+
+### Non-Negotiable Invariants:
+1. **Zero Unsafe Code**: `#![forbid(unsafe_code)]` enforced crate-wide with 0 unsafe blocks.
+2. **Strict Crate-Root Safety Guard**: `#![deny(clippy::all, clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs, rust_2018_idioms)]`.
+3. **Zero Production Panics**: 100% typed error handling with `Result<T, FeedError>` and graceful fallback defaults.
+4. **Defensive Concurrency & Monotonic Time**: Clock-warp safe math (`saturating_duration_since`), drift-free interval scheduling, 64-shard partitioned locks, and zero lock holding across `.await` yield points.
+5. **Leak-Free Async Tasks**: All background workers managed within a supervised `tokio::task::JoinSet` bound to a unified `CancellationToken`.
+6. **Sub-2ms SLA**: Sub-2ms p99 query latency verified under concurrent ingestion and preference mutation stress.
