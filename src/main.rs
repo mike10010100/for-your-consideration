@@ -124,8 +124,9 @@ async fn main() -> Result<()> {
         None
     };
 
-    // 4. Initialize Jetstream Ingester & Ingestion Tracker with 12-Hour Historical Replay
-    let backfill_hours: u64 = std::env::var("BACKFILL_HOURS")
+    // 4. Initialize Jetstream Ingester & Ingestion Tracker with Historical Replay
+    let backfill_hours: u64 = std::env::var("REPLAY_HOURS")
+        .or_else(|_| std::env::var("BACKFILL_HOURS"))
         .ok()
         .and_then(|h| h.parse::<u64>().ok())
         .unwrap_or(12);
@@ -135,25 +136,23 @@ async fn main() -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
-    // Default backfill start: now - BACKFILL_HOURS
+    // Default backfill start: now - backfill_hours
     let backfill_start_us = now_epoch_secs
         .saturating_sub(backfill_hours.saturating_mul(3600))
         .saturating_mul(1_000_000);
 
-    // Max retention safety boundary (24 hours or BACKFILL_HOURS, whichever is larger)
-    let max_retention_secs = backfill_hours.saturating_mul(3600).max(24 * 3600);
-    let oldest_safe_cursor_us = now_epoch_secs
-        .saturating_sub(max_retention_secs)
-        .saturating_mul(1_000_000);
+    // Oldest safe cursor clamped to the requested replay/backfill window
+    let oldest_safe_cursor_us = backfill_start_us;
 
     let effective_cursor = match restored_cursor {
         Some(cursor) if cursor > 0 => {
             let safe_cursor = cursor.max(oldest_safe_cursor_us);
             if safe_cursor > cursor {
-                warn!(
+                info!(
                     snapshot_cursor = cursor,
                     clamped_cursor = safe_cursor,
-                    "Snapshot cursor is older than max relay retention window; clamped to oldest available replay point"
+                    backfill_hours = backfill_hours,
+                    "Snapshot cursor was older than requested {backfill_hours}h replay window; clamped to {backfill_hours}h ago"
                 );
             } else {
                 let downtime_secs = now_epoch_secs.saturating_sub(cursor / 1_000_000);
@@ -170,7 +169,7 @@ async fn main() -> Result<()> {
                 info!(
                     backfill_hours = backfill_hours,
                     cursor_us = backfill_start_us,
-                    "No snapshot cursor found; initiating {backfill_hours}-hour historical replay backfill from Jetstream"
+                    "Initiating {backfill_hours}-hour historical replay backfill from Jetstream"
                 );
                 Some(backfill_start_us)
             } else {
