@@ -1,0 +1,84 @@
+[package]
+name = "for-your-consideration"
+version = "0.1.0"
+edition = "2021"
+authors = ["Michael <mike10010100>"]
+description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "for_your_consideration"
+path = "src/lib.rs"
+
+[[bin]]
+name = "for-your-consideration"
+path = "src/main.rs"
+
+[dependencies]
+# Async Runtime & Concurrency
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = "0.3"
+parking_lot = "0.12"
+arc-swap = "1.7"
+
+# HTTP Web Framework & Networking
+axum = { version = "0.7", features = ["macros", "json"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+http = "1.1"
+
+# Fast In-Memory Graph & Interner
+roaring = "0.10"
+ahash = "0.8"
+compact_str = { version = "0.8", features = ["serde"] }
+
+# Serialization & ATProto Data
+crc32fast = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+# Observability & Errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+proptest = "1.5"
+reqwest = { version = "0.12", features = ["json"] }
+http-body-util = "0.1"
+
+[[bench]]
+name = "recommendation_latency"
+harness = false
+
+[[bench]]
+name = "memory_footprint"
+harness = false
+
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Allow common ergonomic exceptions if needed
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+significant_drop_tightening = "allow"
+float_cmp = "allow"
+type_complexity = "allow"
+uninlined_format_args = "allow"
+assertions_on_constants = "allow"
+unnecessary_cast = "allow"

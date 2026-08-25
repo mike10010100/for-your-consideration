@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Snapshots & Data
+*.bin
+*.bin.tmp
+snapshot.bin
+snapshot.bin.tmp
+
+# Environment & Secrets
+.env
+*.env
+*.pem
+*.key
+
+# Logs & OS artifacts
+*.log
+.DS_Store
+Thumbs.db
+.agents/
