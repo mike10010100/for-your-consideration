@@ -249,6 +249,18 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
+                    // Periodic memory bounding: Prune edges older than retention window (default: 7 days)
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let retention_days: u64 = std::env::var("RETENTION_DAYS")
+                        .ok()
+                        .and_then(|d| d.parse::<u64>().ok())
+                        .unwrap_or(7);
+                    let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
+                    snapshot_graph.prune_older_than(prune_cutoff);
+
                     tracing::debug!("Triggering periodic snapshot checkpoint");
                     let current_cursor = snapshot_ingester_stats.latest_cursor_us.load(std::sync::atomic::Ordering::Relaxed);
                     let start_save = std::time::Instant::now();
