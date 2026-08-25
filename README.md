@@ -97,48 +97,41 @@ cargo run --release
 
 To make your feed public and pin-able in the official Bluesky app, you need to expose your server via HTTPS and register your feed generator record.
 
-### Step 1: Deploy with Docker or Fly.io (or Cloudflare Tunnel)
+### Step 1: Run the Feed Engine
 
-#### Option A: Docker / Docker Compose (Recommended for VPS)
+#### Option A: Docker Compose (Recommended for Permanent Box)
 ```bash
-# Start with persistent volume for snapshots
+# Start with persistent volume for snapshot checkpoints
 docker compose up -d --build
 
-# Inspect live container logs
+# View live stream ingest and telemetry
 docker compose logs -f
 ```
 
-#### Option B: Fly.io (1-Click Cloud Deployment)
+#### Option B: Cargo Native
 ```bash
-# Create volume for persistent snapshot storage
-fly volumes create fyc_data --size 2 -r iad
-
-# Deploy app
-fly launch
-fly deploy
-```
-
-#### Option C: Cloudflare Tunnel (Quick Local Testing)
-```bash
-# Free zero-config port forwarding
-cloudflared tunnel --url http://localhost:3000
-```
-This gives you a public hostname, e.g. `feed.yourdomain.com` (or `xyz.trycloudflare.com`).
-
-Set your environment variables:
-```bash
-export HOSTNAME="feed.yourdomain.com"
-export SERVICE_DID="did:web:feed.yourdomain.com"
-export FEED_RKEY="for-your-consideration"
 cargo run --release
 ```
 
-Verify your DID document is accessible:
+---
+
+### Step 2: Expose Public HTTPS via Cloudflare Tunnel
+
+We provide a helper script that automates Cloudflare Tunnel setup:
+
 ```bash
-curl https://feed.yourdomain.com/.well-known/did.json
+./scripts/setup_tunnel.sh
 ```
 
-### Step 2: Publish Feed Generator Record to Bluesky
+* **Mode 1 (Quick / Ephemeral)**: Instantly exposes `http://localhost:3000` via a public `*.trycloudflare.com` URL (zero-config, free).
+* **Mode 2 (Production Custom Domain)**: Authenticates and binds your custom domain (e.g. `feed.mike10010100.com`) directly to your permanent box without opening firewall ports.
+
+Verify your DID document is accessible:
+```bash
+curl https://<YOUR_TUNNEL_DOMAIN>/.well-known/did.json
+```
+
+### Step 3: Publish Feed Generator Record to Bluesky
 
 Run the included publication script with a Bluesky App Password:
 
@@ -149,7 +142,7 @@ FEED_HOSTNAME="feed.yourdomain.com" \
 ./scripts/publish_feed.sh
 ```
 
-### Step 3: Pin in the Bluesky App!
+### Step 4: Pin in the Bluesky App!
 
 Open your generated share link:
 ```

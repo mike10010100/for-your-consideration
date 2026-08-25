@@ -1,21 +1,48 @@
-/target
+# Rust & Build Artifacts
+/target/
 **/*.rs.bk
 Cargo.lock
 
-# Snapshots & Data
+# Snapshots & In-Memory Persistence
 *.bin
 *.bin.tmp
 snapshot.bin
 snapshot.bin.tmp
+/data/
+data/
 
-# Environment & Secrets
+# Environment Variables & Secrets
 .env
 *.env
+.env.*
 *.pem
 *.key
+*.p12
 
-# Logs & OS artifacts
+# Cloudflare Tunnel Artifacts & Credentials
+.cloudflared/
+*.credentials.json
+cert.pem
+tunnel-token*
+cloudflared-config.yml
+
+# Logs, Screenshots & Local Run Artifacts
 *.log
-.DS_Store
-Thumbs.db
+*.png
+*.jpg
+*.jpeg
+scratch/
 .agents/
+
+# Operating System & IDE Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
