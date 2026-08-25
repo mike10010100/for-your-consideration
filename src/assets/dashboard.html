@@ -1319,7 +1319,7 @@
 
         <!-- Search Bar -->
         <div class="search-bar-group">
-          <input type="text" id="taste-twins-input" class="search-input" placeholder="Enter @handle or did:plc:... (e.g. did:plc:alice)" value="did:plc:alice">
+          <input type="text" id="taste-twins-input" class="search-input" placeholder="Enter @handle or did:plc:... (e.g. @mike10010100.com)" value="mike10010100.com">
           <button id="taste-twins-btn" class="btn btn-primary">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             Search
@@ -1329,9 +1329,9 @@
         <!-- Quick Preset Chips -->
         <div class="preset-chips">
           <span style="font-size: 0.75rem; color: var(--text-muted); align-self: center;">Try:</span>
+          <button class="chip" onclick="setTasteTwinsQuery('mike10010100.com')">@mike10010100.com</button>
           <button class="chip" onclick="setTasteTwinsQuery('did:plc:alice')">did:plc:alice</button>
           <button class="chip" onclick="setTasteTwinsQuery('did:plc:bob')">did:plc:bob</button>
-          <button class="chip" onclick="setTasteTwinsQuery('did:plc:carol')">did:plc:carol</button>
           <button class="chip" onclick="setTasteTwinsQuery('@alice.bsky.social')">@alice.bsky.social</button>
         </div>
 
@@ -1385,7 +1385,7 @@
                 <label for="slider-freshness" class="dial-label">Freshness Half-Life (&tau;)</label>
                 <span id="badge-freshness" class="dial-value-badge">36.0h (Balanced)</span>
               </div>
-              <input type="range" id="slider-freshness" class="range-slider" min="1" max="168" value="36" step="1">
+              <input type="range" id="slider-freshness" class="range-slider" min="1" max="168" value="36" step="1" aria-label="Freshness Half-Life">
             </div>
 
             <!-- Discovery / Serendipity (epsilon) -->
@@ -1394,7 +1394,7 @@
                 <label for="slider-discovery" class="dial-label">Discovery / Serendipity (&epsilon;)</label>
                 <span id="badge-discovery" class="dial-value-badge">15.0% (Balanced)</span>
               </div>
-              <input type="range" id="slider-discovery" class="range-slider" min="0" max="50" value="15" step="1">
+              <input type="range" id="slider-discovery" class="range-slider" min="0" max="50" value="15" step="1" aria-label="Discovery and Serendipity percentage">
             </div>
           </div>
 
@@ -1410,7 +1410,7 @@
                   <span style="font-size: 0.75rem; color: var(--topic-art); font-weight: 600;">Art</span>
                   <span id="badge-topic-art" class="dial-value-badge" style="color: var(--topic-art);">1.0x</span>
                 </div>
-                <input type="range" id="slider-topic-art" class="range-slider" min="0" max="5" value="1.0" step="0.1">
+                <input type="range" id="slider-topic-art" class="range-slider" min="0" max="5" value="1.0" step="0.1" aria-label="Art topic multiplier">
               </div>
               <!-- Tech -->
               <div class="dial-control">
@@ -1418,7 +1418,7 @@
                   <span style="font-size: 0.75rem; color: var(--topic-tech); font-weight: 600;">Tech</span>
                   <span id="badge-topic-tech" class="dial-value-badge" style="color: var(--topic-tech);">1.0x</span>
                 </div>
-                <input type="range" id="slider-topic-tech" class="range-slider" min="0" max="5" value="1.0" step="0.1">
+                <input type="range" id="slider-topic-tech" class="range-slider" min="0" max="5" value="1.0" step="0.1" aria-label="Tech topic multiplier">
               </div>
               <!-- Science -->
               <div class="dial-control">
@@ -1426,7 +1426,7 @@
                   <span style="font-size: 0.75rem; color: var(--topic-science); font-weight: 600;">Science</span>
                   <span id="badge-topic-science" class="dial-value-badge" style="color: var(--topic-science);">1.0x</span>
                 </div>
-                <input type="range" id="slider-topic-science" class="range-slider" min="0" max="5" value="1.0" step="0.1">
+                <input type="range" id="slider-topic-science" class="range-slider" min="0" max="5" value="1.0" step="0.1" aria-label="Science topic multiplier">
               </div>
               <!-- News -->
               <div class="dial-control">
@@ -1434,7 +1434,7 @@
                   <span style="font-size: 0.75rem; color: var(--topic-news); font-weight: 600;">News</span>
                   <span id="badge-topic-news" class="dial-value-badge" style="color: var(--topic-news);">1.0x</span>
                 </div>
-                <input type="range" id="slider-topic-news" class="range-slider" min="0" max="5" value="1.0" step="0.1">
+                <input type="range" id="slider-topic-news" class="range-slider" min="0" max="5" value="1.0" step="0.1" aria-label="News topic multiplier">
               </div>
               <!-- Culture -->
               <div class="dial-control">
@@ -1442,7 +1442,7 @@
                   <span style="font-size: 0.75rem; color: var(--topic-culture); font-weight: 600;">Culture</span>
                   <span id="badge-topic-culture" class="dial-value-badge" style="color: var(--topic-culture);">1.0x</span>
                 </div>
-                <input type="range" id="slider-topic-culture" class="range-slider" min="0" max="5" value="1.0" step="0.1">
+                <input type="range" id="slider-topic-culture" class="range-slider" min="0" max="5" value="1.0" step="0.1" aria-label="Culture topic multiplier">
               </div>
             </div>
           </div>
