@@ -618,12 +618,16 @@ pub fn build_jetstream_url(
 /// Raw wire envelope for Jetstream WebSocket messages.
 #[derive(Debug, Deserialize)]
 pub struct RawJetstreamMessage {
+    /// Author DID of the Jetstream event.
     #[serde(default)]
     pub did: CompactString,
+    /// Event timestamp in microseconds since unix epoch.
     #[serde(default)]
     pub time_us: u64,
+    /// Event kind string (e.g. "commit").
     #[serde(default)]
     pub kind: CompactString,
+    /// Commit operation payload if kind is "commit".
     #[serde(default)]
     pub commit: Option<RawJetstreamCommit>,
 }
@@ -631,12 +635,16 @@ pub struct RawJetstreamMessage {
 /// Raw wire payload for Jetstream commit operations.
 #[derive(Debug, Deserialize)]
 pub struct RawJetstreamCommit {
+    /// AT Protocol NSID collection (e.g. "app.bsky.feed.like").
     #[serde(default)]
     pub collection: CompactString,
+    /// Record key identifier.
     #[serde(default)]
     pub rkey: CompactString,
+    /// Commit operation type (e.g. "create", "delete").
     #[serde(default)]
     pub operation: CompactString,
+    /// Raw JSON record value if present.
     #[serde(default)]
     pub record: Option<serde_json::Value>,
 }
@@ -1203,6 +1211,7 @@ async fn run_reader_reconnect_loop(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
     use crate::types::BLUESKY_EPOCH_SECS;

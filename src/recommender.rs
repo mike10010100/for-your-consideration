@@ -1987,6 +1987,7 @@ fn current_time_secs() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
     use crate::types::SignalType;

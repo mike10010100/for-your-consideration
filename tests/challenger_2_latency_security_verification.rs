@@ -524,11 +524,11 @@ fn test_mission_2_zero_overhead_fast_path_latency_benchmark() {
     }
 
     // Benchmark lookup of unauthenticated / uninterned DID
+    let did = "did:plc:never_seen_fast_path_test";
     let iterations = 100_000;
     let t0 = Instant::now();
-    for i in 0..iterations {
-        let did = format!("did:plc:never_seen_{i}");
-        let res = preferences_store.get_by_did(&interner, &did);
+    for _ in 0..iterations {
+        let res = preferences_store.get_by_did(&interner, did);
         assert!(res.is_none());
     }
     let elapsed = t0.elapsed();

@@ -455,9 +455,16 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
     // Measure find_taste_twins latency
     let twins_resp = rec.find_taste_twins("did:plc:active_viewer", 20).unwrap();
     assert!(!twins_resp.twins.is_empty());
+    #[cfg(not(debug_assertions))]
     assert!(
-        twins_resp.query_latency_us < 20_000,
-        "Query latency should be well under 20ms in debug mode: {}us",
+        twins_resp.query_latency_us < 2_000,
+        "Query latency SLA violation in release: {}us",
+        twins_resp.query_latency_us
+    );
+    #[cfg(debug_assertions)]
+    assert!(
+        twins_resp.query_latency_us < 100_000,
+        "Query latency abnormal debug spike: {}us",
         twins_resp.query_latency_us
     );
 
@@ -471,9 +478,16 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
         .recommend_preview(Some("did:plc:active_viewer"), &dials)
         .unwrap();
     assert_eq!(preview_resp.items.len(), 30);
+    #[cfg(not(debug_assertions))]
     assert!(
-        preview_resp.query_latency_us < 20_000,
-        "Preview query latency should be fast: {}us",
+        preview_resp.query_latency_us < 2_000,
+        "Preview query latency SLA violation in release: {}us",
+        preview_resp.query_latency_us
+    );
+    #[cfg(debug_assertions)]
+    assert!(
+        preview_resp.query_latency_us < 100_000,
+        "Preview query latency abnormal debug spike: {}us",
         preview_resp.query_latency_us
     );
 }

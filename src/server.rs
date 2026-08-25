@@ -816,6 +816,7 @@ pub async fn serve_xrpc(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use std::sync::Arc;
 

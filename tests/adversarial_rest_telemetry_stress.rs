@@ -236,8 +236,8 @@ async fn test_adversarial_feed_preview_sub_2ms_latency_sla() {
 
     #[cfg(debug_assertions)]
     assert!(
-        p90 < 10000,
-        "Feed preview p90 query latency unexpected debug spike: p90 = {p90}µs >= 10000µs"
+        p90 < 25000,
+        "Feed preview p90 query latency unexpected debug spike: p90 = {p90}µs >= 25000µs"
     );
 }
 

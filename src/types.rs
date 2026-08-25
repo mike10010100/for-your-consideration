@@ -316,20 +316,30 @@ impl RecommendationDials {
     }
 }
 
-/// Boundary constants for user preference dials validation.
+/// Minimum allowable freshness half-life in hours (1.0 hour).
 pub const FRESHNESS_MIN_HOURS: f32 = 1.0;
+/// Maximum allowable freshness half-life in hours (168.0 hours / 7 days).
 pub const FRESHNESS_MAX_HOURS: f32 = 168.0;
+/// Minimum allowable serendipity discovery ratio (0.0 / 0%).
 pub const DISCOVERY_MIN: f32 = 0.0;
+/// Maximum allowable serendipity discovery ratio (0.50 / 50%).
 pub const DISCOVERY_MAX: f32 = 0.50;
+/// Minimum allowable topic category multiplier (0.0x).
 pub const TOPIC_MIN: f32 = 0.0;
+/// Maximum allowable topic category multiplier (5.0x).
 pub const TOPIC_MAX: f32 = 5.0;
 
-/// Boundary constants expressed in seconds / ratios for internal calculations.
+/// Minimum allowable freshness half-life in seconds (3,600s).
 pub const MIN_FRESHNESS_SECS: f32 = FRESHNESS_MIN_HOURS * 3600.0;
+/// Maximum allowable freshness half-life in seconds (604,800s).
 pub const MAX_FRESHNESS_SECS: f32 = FRESHNESS_MAX_HOURS * 3600.0;
+/// Minimum serendipity exploration ratio.
 pub const MIN_SERENDIPITY_RATIO: f32 = DISCOVERY_MIN;
+/// Maximum serendipity exploration ratio.
 pub const MAX_SERENDIPITY_RATIO: f32 = DISCOVERY_MAX;
+/// Minimum topic category multiplier.
 pub const MIN_TOPIC_MULTIPLIER: f32 = TOPIC_MIN;
+/// Maximum topic category multiplier.
 pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
 
 /// User-configurable recommendation dials persisted per viewer account.
@@ -473,8 +483,11 @@ impl UserDials {
 /// Request payload for `POST /api/auth/login`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginRequestBody {
+    /// Bluesky handle or DID identifier (e.g. "alice.bsky.social").
     pub identifier: String,
+    /// Bluesky App Password or password.
     pub password: String,
+    /// Optional custom PDS URL (defaults to `<https://bsky.social>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pds_url: Option<String>,
 }
@@ -485,10 +498,15 @@ pub type LoginRequest = LoginRequestBody;
 /// Successful response payload for `POST /api/auth/login`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginSuccessResponse {
+    /// Operation status string (e.g. "ok").
     pub status: String,
+    /// Authenticated user DID.
     pub did: String,
+    /// Authenticated user handle.
     pub handle: String,
+    /// Scoped authentication token.
     pub token: String,
+    /// Human-readable success message.
     pub message: String,
 }
 
@@ -498,9 +516,13 @@ pub type LoginResponse = LoginSuccessResponse;
 /// User preference dials representation for JSON REST API responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserDialsResponse {
+    /// Freshness time-decay half-life in hours.
     pub freshness_half_life_hours: f32,
+    /// Serendipitous discovery / exploration ratio (0.0 - 0.5).
     pub discovery_ratio: f32,
+    /// Granular topic category multipliers.
     pub topics: TopicWeights,
+    /// Timestamp in seconds since unix epoch when dials were last updated.
     pub updated_at_secs: u64,
 }
 
@@ -518,9 +540,12 @@ impl From<UserDials> for UserDialsResponse {
 /// Preferences representation payload within [`PreferencesResponseDto`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PreferencesPayloadDto {
+    /// Freshness half-life in hours.
     #[serde(alias = "freshness_half_life_hours")]
     pub freshness_hours: f32,
+    /// Exploration discovery ratio.
     pub discovery_ratio: f32,
+    /// 5-channel topic weight multipliers.
     #[serde(alias = "topics")]
     pub topic_weights: TopicWeights,
 }
@@ -538,9 +563,13 @@ impl From<UserDials> for PreferencesPayloadDto {
 /// Response payload for `GET /api/preferences`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PreferencesResponseDto {
+    /// Viewer DID.
     pub did: String,
+    /// Active preference settings.
     pub preferences: PreferencesPayloadDto,
+    /// Whether these preferences are custom-saved or system defaults.
     pub is_custom: bool,
+    /// Detailed dial breakdown if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dials: Option<UserDialsResponse>,
 }
@@ -551,9 +580,12 @@ pub type GetPreferencesResponse = PreferencesResponseDto;
 /// Request payload for `POST /api/preferences`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavePreferencesRequestBody {
+    /// Target freshness half-life in hours (1.0 to 168.0).
     #[serde(alias = "freshness_half_life_hours")]
     pub freshness_hours: f32,
+    /// Target discovery exploration ratio (0.0 to 0.5).
     pub discovery_ratio: f32,
+    /// Optional topic weight multipliers (0.0 to 5.0).
     #[serde(alias = "topics", default)]
     pub topic_weights: Option<TopicWeights>,
 }
@@ -564,13 +596,18 @@ pub type SetPreferencesRequest = SavePreferencesRequestBody;
 /// Generic status response payload for mutations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenericStatusResponse {
+    /// Operation status string (e.g. "ok").
     pub status: String,
+    /// Optional descriptive message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Optional affected user DID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub did: Option<String>,
+    /// Optional updated preferences summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferences: Option<PreferencesPayloadDto>,
+    /// Optional detailed dial representation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dials: Option<UserDialsResponse>,
 }
@@ -1229,6 +1266,7 @@ impl ApiErrorResponse {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
 

@@ -1,4 +1,14 @@
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented,
+    missing_docs,
+    rust_2018_idioms
+)]
 
 //! # `for-your-consideration`
 //!
@@ -30,15 +40,25 @@
 //! assert_eq!(graph.get_user_interactions(user_id).len(), 1);
 //! ```
 
+/// AT Protocol service authentication and viewer DID extraction.
 pub mod auth;
+/// Domain error types and result aliases.
 pub mod error;
+/// In-memory multi-signal interaction graph store and Roaring Bitmaps.
 pub mod graph;
+/// Real-time Jetstream WebSocket firehose ingestion pipeline.
 pub mod ingest;
+/// Bidirectional 32-bit string interner.
 pub mod interner;
+/// Sharded in-memory user preference dials store.
 pub mod preferences;
+/// Multi-signal 3-hop recommender engine.
 pub mod recommender;
+/// Axum HTTP XRPC and REST web server.
 pub mod server;
+/// Atomic binary snapshot persistence with CRC32 verification.
 pub mod snapshot;
+/// Core domain types, compact edges, and DTOs.
 pub mod types;
 
 /// Convenient prelude re-exporting core data structures, algorithms, and graph primitives.

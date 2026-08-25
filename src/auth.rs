@@ -377,6 +377,7 @@ pub async fn authenticate_pds_session(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
 

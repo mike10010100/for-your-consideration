@@ -156,6 +156,7 @@ impl StringInterner {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
     use super::*;
     use std::sync::Arc;
