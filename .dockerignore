@@ -1,0 +1,10 @@
+target/
+*.bin
+*.bin.tmp
+.git/
+.gitignore
+.env
+*.env
+.agents/
+*.png
+*.log

@@ -97,10 +97,30 @@ cargo run --release
 
 To make your feed public and pin-able in the official Bluesky app, you need to expose your server via HTTPS and register your feed generator record.
 
-### Step 1: Expose HTTPS via Cloudflare Tunnel (or Fly.io / VPS)
+### Step 1: Deploy with Docker or Fly.io (or Cloudflare Tunnel)
 
-Using Cloudflare Tunnel (free, zero-config port forwarding):
+#### Option A: Docker / Docker Compose (Recommended for VPS)
 ```bash
+# Start with persistent volume for snapshots
+docker compose up -d --build
+
+# Inspect live container logs
+docker compose logs -f
+```
+
+#### Option B: Fly.io (1-Click Cloud Deployment)
+```bash
+# Create volume for persistent snapshot storage
+fly volumes create fyc_data --size 2 -r iad
+
+# Deploy app
+fly launch
+fly deploy
+```
+
+#### Option C: Cloudflare Tunnel (Quick Local Testing)
+```bash
+# Free zero-config port forwarding
 cloudflared tunnel --url http://localhost:3000
 ```
 This gives you a public hostname, e.g. `feed.yourdomain.com` (or `xyz.trycloudflare.com`).

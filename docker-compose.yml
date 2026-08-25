@@ -1,0 +1,38 @@
+services:
+  feed-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: for-your-consideration:latest
+    container_name: for-your-consideration
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3000
+      - HOSTNAME=${HOSTNAME:-feed.mike10010100.com}
+      - SERVICE_DID=${SERVICE_DID:-did:web:feed.mike10010100.com}
+      - FEED_RKEY=${FEED_RKEY:-for-your-consideration}
+      - REPLAY_HOURS=${REPLAY_HOURS:-12}
+      - SNAPSHOT_PATH=/data/snapshot.bin
+      - SNAPSHOT_INTERVAL_SECS=300
+      - RUST_LOG=info,for_your_consideration=info
+    volumes:
+      - fyc_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 512M
+
+volumes:
+  fyc_data:
+    name: for_your_consideration_data

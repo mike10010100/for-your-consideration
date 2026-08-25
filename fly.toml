@@ -1,0 +1,43 @@
+# ==============================================================================
+# Fly.io App Configuration for "For Your Consideration" Feed Generator
+# ==============================================================================
+
+app = "for-your-consideration"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "3000"
+  HOSTNAME = "for-your-consideration.fly.dev"
+  SERVICE_DID = "did:web:for-your-consideration.fly.dev"
+  FEED_RKEY = "for-your-consideration"
+  SNAPSHOT_PATH = "/data/snapshot.bin"
+  SNAPSHOT_INTERVAL_SECS = "300"
+  REPLAY_HOURS = "12"
+  RUST_LOG = "info,for_your_consideration=info"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = "15s"
+  interval = "30s"
+  method = "GET"
+  path = "/healthz"
+  timeout = "5s"
+
+[[mounts]]
+  source = "fyc_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
