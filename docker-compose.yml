@@ -14,14 +14,14 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     ports:
-      - "3000:3000"
+      - "${PORT_BIND:-3030}:3000"
     environment:
       - HOST=0.0.0.0
       - PORT=3000
-      - HOSTNAME=${HOSTNAME:-feed.example.com}
-      - SERVICE_DID=${SERVICE_DID:-did:web:feed.example.com}
+      - HOSTNAME=${HOSTNAME:-fyc.mike10010100.com}
+      - SERVICE_DID=${SERVICE_DID:-did:web:fyc.mike10010100.com}
       - FEED_RKEY=${FEED_RKEY:-for-your-consideration}
-      - ADMIN_HANDLE=${ADMIN_HANDLE:-}
+      - ADMIN_HANDLE=${ADMIN_HANDLE:-mike10010100.com}
       - SESSION_SECRET=${SESSION_SECRET:-}
       - REPLAY_HOURS=${REPLAY_HOURS:-12}
       - RETENTION_DAYS=${RETENTION_DAYS:-30}
@@ -42,6 +42,17 @@ services:
           memory: ${MEM_LIMIT:-8192M}
         reservations:
           memory: 512M
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: fyc-cloudflared
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ~/.cloudflared:/etc/cloudflared:ro
+    depends_on:
+      feed-engine:
+        condition: service_healthy
 
 volumes:
   fyc_data:

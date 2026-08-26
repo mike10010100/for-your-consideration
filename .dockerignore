@@ -6,5 +6,4 @@ target/
 .env
 *.env
 .agents/
-*.png
 *.log

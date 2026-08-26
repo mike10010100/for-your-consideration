@@ -15,6 +15,7 @@ data/
 .env
 *.env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12
@@ -31,6 +32,8 @@ cloudflared-config.yml
 *.png
 *.jpg
 *.jpeg
+!assets/*.png
+!assets/*.jpg
 scratch/
 .agents/
 

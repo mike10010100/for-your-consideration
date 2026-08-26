@@ -11,17 +11,22 @@ WORKDIR /app
 COPY Cargo.toml ./
 
 # Create dummy source to pre-build dependencies for caching
-RUN mkdir src && \
+RUN mkdir src benches && \
     echo "pub fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
+    echo "fn main() {}" > benches/recommendation_latency.rs && \
+    echo "fn main() {}" > benches/memory_footprint.rs && \
     cargo build --release || true && \
-    rm -rf src
+    rm -rf src benches
 
 # Copy real source code and assets
 COPY src ./src
+COPY benches ./benches
+COPY assets ./assets
 
-# Build production release binary
-RUN cargo build --release --bin for-your-consideration && \
+# Build production release binary (clean dummy crate artifacts so real code is compiled)
+RUN rm -rf target/release/deps/for_your_consideration* target/release/for-your-consideration* target/release/.fingerprint/for-your-consideration* target/release/.fingerprint/for_your_consideration* && \
+    cargo build --release --bin for-your-consideration && \
     strip target/release/for-your-consideration
 
 # ==============================================================================
