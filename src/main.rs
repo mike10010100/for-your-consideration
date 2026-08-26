@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use compact_str::CompactString;
 use for_your_consideration::prelude::*;
+use rand::RngCore;
+use sha2::Digest;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -251,10 +253,31 @@ async fn main() -> Result<()> {
 
     let feed_rkey = std::env::var("FEED_RKEY").unwrap_or_else(|_| DEFAULT_FEED_RKEY.to_string());
 
-    if std::env::var("SESSION_SECRET").is_ok() {
+    let (session_secret, is_custom_secret) = std::env::var("SESSION_SECRET").map_or_else(
+        |_| {
+            let mut key = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
+            (key, false)
+        },
+        |sec| {
+            let trimmed = sec.trim();
+            if trimmed.is_empty() {
+                let mut key = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut key);
+                (key, false)
+            } else {
+                let hash = sha2::Sha256::digest(trimmed.as_bytes());
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&hash);
+                (key, true)
+            }
+        },
+    );
+
+    if is_custom_secret {
         info!("Custom HMAC session signing secret loaded from environment");
     } else {
-        warn!("SESSION_SECRET not set; using default HMAC session key (set SESSION_SECRET in production)");
+        info!("Generated cryptographically secure ephemeral 256-bit session key for this runtime instance");
     }
 
     // 5. Initialize Axum XRPC server with trackers
@@ -263,6 +286,7 @@ async fn main() -> Result<()> {
         CompactString::new(&service_did),
         CompactString::new(&hostname),
     )
+    .with_session_secret(session_secret)
     .with_preferences_store(Arc::clone(&preferences_store))
     .with_feed_rkey(CompactString::new(&feed_rkey))
     .with_admin_did(admin_did)
