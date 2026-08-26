@@ -18,8 +18,8 @@ set -euo pipefail
 BSKY_HANDLE="${BSKY_HANDLE:-}"
 FEED_RKEY="${FEED_RKEY:-for-your-consideration}"
 FEED_DISPLAY_NAME="${FEED_DISPLAY_NAME:-For Your Consideration}"
-FEED_DESCRIPTION="${FEED_DESCRIPTION:-Personalized algorithmic recommendation feed engine powered by multi-signal graph collaborative filtering, anti-fatigue decay, and serendipity exploration. (An homage to For You)}"
-FEED_HOSTNAME="${FEED_HOSTNAME:-feed.example.com}"
+FEED_HOSTNAME="${FEED_HOSTNAME:-fyc.mike10010100.com}"
+FEED_DESCRIPTION="${FEED_DESCRIPTION:-Personalized algorithmic recommendation feed engine powered by multi-signal graph collaborative filtering, anti-fatigue decay, and serendipity exploration (homage to For You). Customize your algorithm dials at https://${FEED_HOSTNAME}/dashboard}"
 PDS_URL="${PDS_URL:-https://bsky.social}"
 
 if [[ -z "${BSKY_HANDLE:-}" ]]; then
