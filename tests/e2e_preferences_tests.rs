@@ -2788,8 +2788,8 @@ mod tier2_boundary_corner_cases {
     fn test_tier2_f10_dashboard_password_input_type_password() {
         let html = include_str!("../src/assets/dashboard.html");
         assert!(
-            html.contains("type=\"password\"") || html.contains("type='password'"),
-            "Password input must have type='password'"
+            html.contains("id=\"input-handle\"") || html.contains("id='input-handle'"),
+            "Passwordless OAuth login must provide handle/DID input"
         );
     }
 

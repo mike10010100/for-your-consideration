@@ -1302,7 +1302,11 @@ fn test_empirical_16_thread_mixed_stress_matrix() {
         throughput, p50, p90, p99, p99 as f64 / 1000.0, max
     );
 
-    let min_throughput = if cfg!(debug_assertions) { 500.0 } else { 5_000.0 };
+    let min_throughput = if cfg!(debug_assertions) {
+        500.0
+    } else {
+        5_000.0
+    };
     assert!(
         throughput > min_throughput,
         "Concurrent mixed throughput should exceed {min_throughput} queries/sec, got {throughput:.1}"

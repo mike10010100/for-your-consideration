@@ -28,7 +28,10 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use compact_str::CompactString;
+use rand::RngCore;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +39,9 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 use crate::auth::{
-    authenticate_pds_session, extract_session_did_from_headers, extract_viewer_did_from_headers,
+    authenticate_pds_session, exchange_oauth_code, extract_session_did_from_headers,
+    extract_viewer_did_from_headers, generate_pkce_pair, publish_feed_generator_record,
+    resolve_identity_pds, OAuthSessionState, OAuthStateStore, DEFAULT_OAUTH_STATE_TTL_SECS,
 };
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
@@ -44,11 +49,12 @@ use crate::preferences::UserPreferencesStore;
 use crate::recommender::Recommender;
 use crate::snapshot::SnapshotStatusTracker;
 use crate::types::{
-    ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedSkeletonResponse, GenericStatusResponse,
-    GraphTelemetryInfo, ImpressionTelemetryInfo, InternerTelemetryInfo, LoginRequestBody,
-    MemoryTelemetryInfo, PreferencesPayloadDto, PreferencesResponseDto, RecommendationDials,
-    SavePreferencesRequestBody, SkeletonFeedPost, TasteTwinsQuery, TelemetryResponse, TopicWeights,
-    UserDials, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedPublishRequest, FeedSkeletonResponse,
+    GenericStatusResponse, GraphTelemetryInfo, ImpressionTelemetryInfo, InternerTelemetryInfo,
+    LoginRequestBody, MemoryTelemetryInfo, OAuthCallbackRequest, OAuthClientMetadata,
+    OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto, PreferencesResponseDto,
+    RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost, TasteTwinsQuery,
+    TelemetryResponse, TopicWeights, UserDials, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -64,6 +70,8 @@ pub struct AppState {
     pub recommender: Arc<Recommender>,
     /// Store for user preference dials.
     pub preferences_store: Arc<UserPreferencesStore>,
+    /// Store for pending OAuth authorization PKCE session states.
+    pub oauth_store: Arc<OAuthStateStore>,
     /// Tracker for snapshot persistence status and metrics.
     pub snapshot_tracker: Arc<SnapshotStatusTracker>,
     /// Tracker for real-time Jetstream firehose ingestion velocity and statistics.
@@ -79,7 +87,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates a new [`AppState`] instance with default snapshot and ingestion trackers.
+    /// Creates a new [`AppState`] instance with default snapshot, ingestion trackers, and OAuth store.
     #[must_use]
     pub fn new(
         recommender: Arc<Recommender>,
@@ -89,6 +97,7 @@ impl AppState {
         Self {
             recommender,
             preferences_store: Arc::new(UserPreferencesStore::new()),
+            oauth_store: Arc::new(OAuthStateStore::new()),
             snapshot_tracker: Arc::new(SnapshotStatusTracker::default()),
             ingestion_tracker: Arc::new(IngestionTracker::default()),
             service_did: service_did.into(),
@@ -102,6 +111,13 @@ impl AppState {
     #[must_use]
     pub fn with_preferences_store(mut self, preferences_store: Arc<UserPreferencesStore>) -> Self {
         self.preferences_store = preferences_store;
+        self
+    }
+
+    /// Sets a custom OAuth PKCE state store.
+    #[must_use]
+    pub fn with_oauth_store(mut self, oauth_store: Arc<OAuthStateStore>) -> Self {
+        self.oauth_store = oauth_store;
         self
     }
 
@@ -170,6 +186,12 @@ pub fn create_xrpc_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(handle_get_dashboard))
         .route("/dashboard", get(handle_get_dashboard))
+        .route("/oauth/callback", get(handle_get_dashboard))
+        .route(
+            "/oauth/client-metadata.json",
+            get(handle_get_client_metadata),
+        )
+        .route("/client-metadata.json", get(handle_get_client_metadata))
         .route(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             get(handle_get_feed_skeleton),
@@ -185,6 +207,9 @@ pub fn create_xrpc_router(state: AppState) -> Router {
         .route("/api/feed-preview", get(handle_get_feed_preview))
         .route("/api/explain", get(handle_get_explain))
         .route("/api/auth/login", post(handle_post_auth_login))
+        .route("/api/oauth/login", get(handle_get_oauth_login))
+        .route("/api/oauth/callback", post(handle_post_oauth_callback))
+        .route("/api/feed/publish", post(handle_post_feed_publish))
         .route(
             "/api/preferences",
             get(handle_get_preferences)
@@ -383,6 +408,319 @@ pub async fn handle_post_auth_login(Json(body): Json<LoginRequestBody>) -> impl 
             StatusCode::BAD_GATEWAY,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
             Json(ApiErrorResponse::new("PdsError", err.to_string())),
+        )
+            .into_response(),
+    }
+}
+
+/// Helper function to percent-encode query parameter values according to RFC 3986.
+fn percent_encode_query_param(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{:02X}", b);
+            }
+        }
+    }
+    encoded
+}
+
+/// Handler for `GET /oauth/client-metadata.json` and `GET /client-metadata.json`.
+pub async fn handle_get_client_metadata(State(state): State<AppState>) -> impl IntoResponse {
+    let metadata = OAuthClientMetadata::new_for_host(state.hostname.as_str());
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        Json(metadata),
+    )
+}
+
+/// Handler for `GET /api/oauth/login`.
+pub async fn handle_get_oauth_login(
+    State(state): State<AppState>,
+    Query(query): Query<OAuthLoginQuery>,
+) -> impl IntoResponse {
+    let Some(handle) = query
+        .handle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "InvalidRequest",
+                "Missing required 'handle' parameter",
+            )),
+        )
+            .into_response();
+    };
+
+    let resolved = match resolve_identity_pds(handle).await {
+        Ok(res) => res,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(ApiErrorResponse::new(
+                    "IdentityResolutionFailed",
+                    err.to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let pkce = generate_pkce_pair();
+    let mut state_bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let state_nonce = URL_SAFE_NO_PAD.encode(state_bytes);
+
+    let is_localhost = state.hostname.starts_with("localhost")
+        || state.hostname.starts_with("127.0.0.1")
+        || state.hostname.starts_with("0.0.0.0");
+    let scheme = if is_localhost { "http" } else { "https" };
+
+    let redirect_uri = query
+        .redirect_uri
+        .unwrap_or_else(|| format!("{scheme}://{}/oauth/callback", state.hostname));
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    state.oauth_store.insert(
+        state_nonce.clone(),
+        OAuthSessionState {
+            code_verifier: pkce.verifier.clone(),
+            handle: resolved.handle.to_string(),
+            did: Some(resolved.did.to_string()),
+            pds_url: resolved.pds_endpoint,
+            token_endpoint: resolved.token_endpoint,
+            redirect_uri: redirect_uri.clone(),
+            created_at_secs: now_secs,
+        },
+    );
+
+    let client_id = if is_localhost {
+        "http://127.0.0.1:3000/oauth/client-metadata.json".to_string()
+    } else {
+        format!("{scheme}://{}/oauth/client-metadata.json", state.hostname)
+    };
+
+    let auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope=atproto%20transition:generic&state={}&code_challenge={}&code_challenge_method=S256&login_hint={}",
+        resolved.auth_endpoint,
+        percent_encode_query_param(&client_id),
+        percent_encode_query_param(&redirect_uri),
+        percent_encode_query_param(&state_nonce),
+        percent_encode_query_param(&pkce.challenge),
+        percent_encode_query_param(&resolved.handle),
+    );
+
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        Json(OAuthLoginResponse {
+            status: CompactString::new("ok"),
+            authorization_url: auth_url,
+            state: state_nonce,
+        }),
+    )
+        .into_response()
+}
+
+/// Handler for `POST /api/oauth/callback`.
+pub async fn handle_post_oauth_callback(
+    State(state): State<AppState>,
+    Json(body): Json<OAuthCallbackRequest>,
+) -> impl IntoResponse {
+    let code = body.code.trim();
+    let state_nonce = body.state.trim();
+
+    if code.is_empty() || state_nonce.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "InvalidRequest",
+                "Missing required 'code' or 'state' parameter",
+            )),
+        )
+            .into_response();
+    }
+
+    // Atomically take session state for replay defense
+    let Some(session) = state.oauth_store.take(state_nonce) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "InvalidState",
+                "Invalid or already used OAuth state token",
+            )),
+        )
+            .into_response();
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if now_secs.saturating_sub(session.created_at_secs) > DEFAULT_OAUTH_STATE_TTL_SECS {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "OAuthExpired",
+                "OAuth authorization session has expired",
+            )),
+        )
+            .into_response();
+    }
+
+    let is_localhost = state.hostname.starts_with("localhost")
+        || state.hostname.starts_with("127.0.0.1")
+        || state.hostname.starts_with("0.0.0.0");
+    let scheme = if is_localhost { "http" } else { "https" };
+    let client_id = if is_localhost {
+        "http://127.0.0.1:3000/oauth/client-metadata.json".to_string()
+    } else {
+        format!("{scheme}://{}/oauth/client-metadata.json", state.hostname)
+    };
+
+    match exchange_oauth_code(code, &session, &client_id).await {
+        Ok(resp) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(resp),
+        )
+            .into_response(),
+        Err(FeedError::Auth(msg)) => (
+            StatusCode::UNAUTHORIZED,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new("AuthenticationFailed", msg)),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "TokenExchangeFailed",
+                err.to_string(),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+/// Handler for `POST /api/feed/publish`.
+pub async fn handle_post_feed_publish(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FeedPublishRequest>,
+) -> impl IntoResponse {
+    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "Unauthorized",
+                "Missing or invalid authorization token",
+            )),
+        )
+            .into_response();
+    };
+
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .or_else(|| auth_header.strip_prefix("bearer "))
+        .or_else(|| auth_header.strip_prefix("BEARER "))
+        .unwrap_or(auth_header)
+        .trim();
+
+    match publish_feed_generator_record(&viewer_did, token, &body, state.service_did.as_str(), None)
+        .await
+    {
+        Ok(resp) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(resp),
+        )
+            .into_response(),
+        Err(FeedError::InvalidInput(msg)) => (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new("InvalidInput", msg)),
+        )
+            .into_response(),
+        Err(FeedError::Auth(msg)) => (
+            StatusCode::UNAUTHORIZED,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new("Unauthorized", msg)),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new("PublishFailed", err.to_string())),
         )
             .into_response(),
     }

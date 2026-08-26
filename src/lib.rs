@@ -64,10 +64,13 @@ pub mod types;
 /// Convenient prelude re-exporting core data structures, algorithms, and graph primitives.
 pub mod prelude {
     pub use crate::auth::{
-        authenticate_pds_session, extract_session_did_from_headers, extract_viewer_did,
-        extract_viewer_did_from_headers, generate_session_token, is_valid_did,
-        parse_jwt_payload_unverified, validate_service_jwt, validate_session_token,
-        ServiceJwtPayload,
+        authenticate_pds_session, exchange_oauth_code, extract_session_did_from_headers,
+        extract_viewer_did, extract_viewer_did_from_headers, generate_pkce_pair,
+        generate_session_token, is_valid_did, parse_jwt_payload_unverified,
+        publish_feed_generator_record, resolve_identity_pds, validate_service_jwt,
+        validate_session_token, verify_pkce_challenge, OAuthSessionState, OAuthStateStore,
+        PkceChallengePair, ResolvedPdsIdentity, ServiceJwtPayload, DEFAULT_OAUTH_STATE_TTL_SECS,
+        OAUTH_STATE_SHARDS,
     };
     pub use crate::error::{FeedError, Result};
     pub use crate::graph::{
@@ -91,10 +94,12 @@ pub mod prelude {
         HARD_SUPPRESSION_WINDOW_SECS, IMPRESSION_SHARDS,
     };
     pub use crate::server::{
-        create_xrpc_router, handle_delete_preferences, handle_get_explain, handle_get_feed_preview,
-        handle_get_feed_skeleton, handle_get_healthz, handle_get_preferences,
-        handle_get_taste_twins, handle_get_telemetry, handle_post_auth_login,
-        handle_post_preferences, serve_xrpc, AppState, FeedSkeletonQuery, DEFAULT_FEED_RKEY,
+        create_xrpc_router, handle_delete_preferences, handle_get_client_metadata,
+        handle_get_explain, handle_get_feed_preview, handle_get_feed_skeleton, handle_get_healthz,
+        handle_get_oauth_login, handle_get_preferences, handle_get_taste_twins,
+        handle_get_telemetry, handle_post_auth_login, handle_post_feed_publish,
+        handle_post_oauth_callback, handle_post_preferences, serve_xrpc, AppState,
+        FeedSkeletonQuery, DEFAULT_FEED_RKEY,
     };
     pub use crate::snapshot::{
         load_snapshot, load_snapshot_with_preferences, save_snapshot,
@@ -104,19 +109,21 @@ pub mod prelude {
     };
     pub use crate::types::{
         ApiErrorResponse, CompactEdge, DeletePreferencesResponse, ExplainQuery, FeedPreviewItem,
-        FeedPreviewQuery, FeedPreviewResponse, FeedRecommendation, FeedSkeletonResponse,
-        GenericStatusResponse, GetPreferencesResponse, GraphProofChain, GraphTelemetryInfo,
-        ImpressionTelemetryInfo, IngestionVelocityInfo, InternerTelemetryInfo, LoginRequest,
-        LoginRequestBody, LoginResponse, LoginSuccessResponse, PostMeta, PreferencesPayloadDto,
-        PreferencesResponseDto, ProofChainStep, RecommendationDials, RecommendationSource,
-        SavePreferencesRequestBody, ScoreBreakdown, ScoredPost, SetPreferencesRequest,
-        SetPreferencesResponse, SharedPostInfo, SignalType, SkeletonFeedPost, SkeletonReason,
-        SnapshotStatusInfo, TasteTwinItem, TasteTwinsQuery, TasteTwinsResponse, TelemetryResponse,
-        TopicCategory, TopicWeights, UserDials, UserDialsResponse, BLUESKY_EPOCH_SECS,
-        DEFAULT_EXPLORE_RATIO, DEFAULT_PAGE_LIMIT, DISCOVERY_MAX, DISCOVERY_MIN,
-        FRESHNESS_MAX_HOURS, FRESHNESS_MIN_HOURS, MAX_FRESHNESS_SECS, MAX_PAGE_LIMIT,
-        MAX_SERENDIPITY_RATIO, MAX_TOPIC_MULTIPLIER, MIN_FRESHNESS_SECS, MIN_SERENDIPITY_RATIO,
-        MIN_TOPIC_MULTIPLIER, NUM_TOPIC_CATEGORIES, TOPIC_CATEGORIES, TOPIC_MAX, TOPIC_MIN,
+        FeedPreviewQuery, FeedPreviewResponse, FeedPublishRequest, FeedPublishResponse,
+        FeedRecommendation, FeedSkeletonResponse, GenericStatusResponse, GetPreferencesResponse,
+        GraphProofChain, GraphTelemetryInfo, ImpressionTelemetryInfo, IngestionVelocityInfo,
+        InternerTelemetryInfo, LoginRequest, LoginRequestBody, LoginResponse, LoginSuccessResponse,
+        OAuthCallbackRequest, OAuthCallbackResponse, OAuthClientMetadata, OAuthLoginQuery,
+        OAuthLoginResponse, PostMeta, PreferencesPayloadDto, PreferencesResponseDto,
+        ProofChainStep, RecommendationDials, RecommendationSource, SavePreferencesRequestBody,
+        ScoreBreakdown, ScoredPost, SetPreferencesRequest, SetPreferencesResponse, SharedPostInfo,
+        SignalType, SkeletonFeedPost, SkeletonReason, SnapshotStatusInfo, TasteTwinItem,
+        TasteTwinsQuery, TasteTwinsResponse, TelemetryResponse, TopicCategory, TopicWeights,
+        UserDials, UserDialsResponse, BLUESKY_EPOCH_SECS, DEFAULT_EXPLORE_RATIO,
+        DEFAULT_PAGE_LIMIT, DISCOVERY_MAX, DISCOVERY_MIN, FRESHNESS_MAX_HOURS, FRESHNESS_MIN_HOURS,
+        MAX_FRESHNESS_SECS, MAX_PAGE_LIMIT, MAX_SERENDIPITY_RATIO, MAX_TOPIC_MULTIPLIER,
+        MIN_FRESHNESS_SECS, MIN_SERENDIPITY_RATIO, MIN_TOPIC_MULTIPLIER, NUM_TOPIC_CATEGORIES,
+        TOPIC_CATEGORIES, TOPIC_MAX, TOPIC_MIN,
     };
 }
 

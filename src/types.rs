@@ -1265,6 +1265,143 @@ impl ApiErrorResponse {
     }
 }
 
+/// AT Protocol OAuth Client Metadata document adhering to RFC 7591 / RFC 8414 and `ATProto` OAuth specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthClientMetadata {
+    /// Canonical URL identifying the client (serves as the client's `client_id`).
+    pub client_id: CompactString,
+    /// Human-readable client name displayed on user consent screens.
+    pub client_name: CompactString,
+    /// Client homepage or landing page URL.
+    pub client_uri: CompactString,
+    /// Whitelist of allowed redirect URIs for OAuth authorization code callbacks.
+    pub redirect_uris: Vec<CompactString>,
+    /// Supported grant types (e.g. `["authorization_code", "refresh_token"]`).
+    pub grant_types: Vec<CompactString>,
+    /// Supported response types (e.g. `["code"]`).
+    pub response_types: Vec<CompactString>,
+    /// Requested OAuth scopes (e.g. `"atproto transition:generic"`).
+    pub scope: CompactString,
+    /// Authentication method for token endpoint (typically `"none"` for public web clients).
+    pub token_endpoint_auth_method: CompactString,
+    /// Client application type (e.g. `"web"` or `"native"`).
+    pub application_type: CompactString,
+    /// Whether access tokens must be bound to `DPoP` keys.
+    pub dpop_bound_access_tokens: bool,
+}
+
+impl OAuthClientMetadata {
+    /// Creates standard client metadata for a given hostname and optional service DID.
+    #[must_use]
+    pub fn new_for_host(hostname: &str) -> Self {
+        let clean_host = hostname.trim_end_matches('/');
+        let is_localhost = clean_host.starts_with("localhost")
+            || clean_host.starts_with("127.0.0.1")
+            || clean_host.starts_with("0.0.0.0");
+
+        let scheme = if is_localhost { "http" } else { "https" };
+        let client_id = if is_localhost {
+            CompactString::new("http://127.0.0.1:3000/oauth/client-metadata.json")
+        } else {
+            format!("{scheme}://{clean_host}/oauth/client-metadata.json").into()
+        };
+
+        let client_uri = format!("{scheme}://{clean_host}").into();
+
+        let redirect_uris = vec![
+            format!("{scheme}://{clean_host}/oauth/callback").into(),
+            "http://127.0.0.1:3000/oauth/callback".into(),
+            "http://localhost:3000/oauth/callback".into(),
+        ];
+
+        Self {
+            client_id,
+            client_name: CompactString::new("For Your Consideration"),
+            client_uri,
+            redirect_uris,
+            grant_types: vec![
+                CompactString::new("authorization_code"),
+                CompactString::new("refresh_token"),
+            ],
+            response_types: vec![CompactString::new("code")],
+            scope: CompactString::new("atproto transition:generic"),
+            token_endpoint_auth_method: CompactString::new("none"),
+            application_type: CompactString::new("web"),
+            dpop_bound_access_tokens: false,
+        }
+    }
+}
+
+/// Query parameters for `GET /api/oauth/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthLoginQuery {
+    /// Bluesky handle or DID identifier of the authenticating user (e.g. "alice.bsky.social").
+    pub handle: Option<String>,
+    /// Optional custom redirect URI for testing or alternative callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+}
+
+/// Response payload for `GET /api/oauth/login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthLoginResponse {
+    /// Operation status string (e.g. "ok").
+    pub status: CompactString,
+    /// Constructed PDS authorization URL for the user to visit.
+    pub authorization_url: String,
+    /// Secure single-use state nonce generated for this login session.
+    pub state: String,
+}
+
+/// Request body for `POST /api/oauth/callback`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCallbackRequest {
+    /// Authorization code returned from the PDS authorization server.
+    pub code: String,
+    /// Single-use state nonce returned from the PDS authorization server.
+    pub state: String,
+    /// Optional issuer identifier returned in the callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+}
+
+/// Response payload for `POST /api/oauth/callback`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCallbackResponse {
+    /// Operation status string (e.g. "ok").
+    pub status: CompactString,
+    /// Authenticated user DID (e.g. `did:plc:...`).
+    pub did: CompactString,
+    /// Authenticated user handle (e.g. `alice.bsky.social`).
+    pub handle: CompactString,
+    /// Scoped session JWT token for API calls.
+    pub token: String,
+}
+
+/// Request body for `POST /api/feed/publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedPublishRequest {
+    /// Human-readable display name for the custom feed generator (e.g. "For Your Consideration").
+    pub display_name: String,
+    /// Record key identifier for the feed (e.g. "for-your-consideration" or "fyc").
+    pub rkey: String,
+    /// Descriptive summary of the custom feed generator algorithm.
+    pub description: String,
+}
+
+/// Response payload for `POST /api/feed/publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedPublishResponse {
+    /// Operation status string (e.g. "ok").
+    pub status: CompactString,
+    /// Canonical AT-URI of the published `app.bsky.feed.generator` record.
+    pub uri: CompactString,
+    /// Content identifier (CID) of the committed record.
+    pub cid: CompactString,
+    /// Web share URL for adding the feed in the Bluesky app.
+    pub share_url: CompactString,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 mod tests {
@@ -1763,5 +1900,97 @@ mod tests {
         assert_eq!(resp.freshness_half_life_hours, 24.0);
         assert_eq!(resp.discovery_ratio, 0.20);
         assert_eq!(resp.updated_at_secs, 1_724_000_000);
+    }
+
+    #[test]
+    fn test_oauth_client_metadata_new_and_serialization() {
+        let meta = OAuthClientMetadata::new_for_host("feed.example.com");
+        assert_eq!(
+            meta.client_id,
+            "https://feed.example.com/oauth/client-metadata.json"
+        );
+        assert_eq!(meta.client_uri, "https://feed.example.com");
+        assert_eq!(meta.client_name, "For Your Consideration");
+        assert_eq!(meta.scope, "atproto transition:generic");
+        assert_eq!(meta.response_types, vec![CompactString::new("code")]);
+        assert_eq!(
+            meta.grant_types,
+            vec![
+                CompactString::new("authorization_code"),
+                CompactString::new("refresh_token")
+            ]
+        );
+        assert_eq!(meta.application_type, "web");
+        assert_eq!(meta.token_endpoint_auth_method, "none");
+        assert!(!meta.dpop_bound_access_tokens);
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: OAuthClientMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, meta);
+
+        // Localhost host variant
+        let local_meta = OAuthClientMetadata::new_for_host("localhost:3000");
+        assert_eq!(
+            local_meta.client_id,
+            "http://127.0.0.1:3000/oauth/client-metadata.json"
+        );
+    }
+
+    #[test]
+    fn test_oauth_dtos_serialization() {
+        let login_query = OAuthLoginQuery {
+            handle: Some("alice.bsky.social".to_string()),
+            redirect_uri: Some("https://example.com/callback".to_string()),
+        };
+        let lq_json = serde_json::to_string(&login_query).unwrap();
+        let lq_parsed: OAuthLoginQuery = serde_json::from_str(&lq_json).unwrap();
+        assert_eq!(lq_parsed, login_query);
+
+        let login_resp = OAuthLoginResponse {
+            status: "ok".into(),
+            authorization_url: "https://auth.example.com/oauth/authorize?foo=bar".to_string(),
+            state: "state_nonce_123".to_string(),
+        };
+        let lr_json = serde_json::to_string(&login_resp).unwrap();
+        let lr_parsed: OAuthLoginResponse = serde_json::from_str(&lr_json).unwrap();
+        assert_eq!(lr_parsed, login_resp);
+
+        let cb_req = OAuthCallbackRequest {
+            code: "auth_code_xyz".to_string(),
+            state: "state_nonce_123".to_string(),
+            iss: Some("https://pds.example.com".to_string()),
+        };
+        let cb_json = serde_json::to_string(&cb_req).unwrap();
+        let cb_parsed: OAuthCallbackRequest = serde_json::from_str(&cb_json).unwrap();
+        assert_eq!(cb_parsed, cb_req);
+
+        let cb_resp = OAuthCallbackResponse {
+            status: "ok".into(),
+            did: "did:plc:alice".into(),
+            handle: "alice.bsky.social".into(),
+            token: "jwt.token.val".to_string(),
+        };
+        let cbr_json = serde_json::to_string(&cb_resp).unwrap();
+        let cbr_parsed: OAuthCallbackResponse = serde_json::from_str(&cbr_json).unwrap();
+        assert_eq!(cbr_parsed, cb_resp);
+
+        let pub_req = FeedPublishRequest {
+            display_name: "For Your Consideration".to_string(),
+            rkey: "for-your-consideration".to_string(),
+            description: "Personalized recommendation feed".to_string(),
+        };
+        let pr_json = serde_json::to_string(&pub_req).unwrap();
+        let pr_parsed: FeedPublishRequest = serde_json::from_str(&pr_json).unwrap();
+        assert_eq!(pr_parsed, pub_req);
+
+        let pub_resp = FeedPublishResponse {
+            status: "ok".into(),
+            uri: "at://did:plc:alice/app.bsky.feed.generator/for-your-consideration".into(),
+            cid: "bafyreig123".into(),
+            share_url: "https://bsky.app/profile/did:plc:alice/feed/for-your-consideration".into(),
+        };
+        let presp_json = serde_json::to_string(&pub_resp).unwrap();
+        let presp_parsed: FeedPublishResponse = serde_json::from_str(&presp_json).unwrap();
+        assert_eq!(presp_parsed, pub_resp);
     }
 }
