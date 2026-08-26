@@ -260,8 +260,31 @@ pub fn create_xrpc_router(state: AppState) -> Router {
                 .delete(handle_delete_preferences),
         )
         .layer(cors)
+        .layer(axum::middleware::from_fn(security_headers_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
+}
+
+/// Middleware attaching standard HTTP defense-in-depth security headers.
+async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    response
 }
 
 /// Handler for `GET /` and `GET /dashboard` serving the embedded SPA dashboard.
