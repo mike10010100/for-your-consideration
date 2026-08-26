@@ -480,14 +480,8 @@ Publish an <code>app.bsky.feed.generator</code> record directly to your Bluesky 
 <label for="publish-service-did" class="dial-label">Service DID (Feed Host)</label>
 <input type="text" id="publish-service-did" class="search-input" readonly style="color: var(--text-muted); background: var(--bg-base);">
 </div>
-<div class="dial-control">
-<label for="publish-app-password" class="dial-label" style="display: flex; justify-content: space-between;">
-<span>Bluesky App Password</span>
-</label>
-<input type="password" id="publish-app-password" class="search-input" placeholder="xxxx-xxxx-xxxx-xxxx" autocomplete="current-password" required>
-<div style="font-size: 0.6875rem; color: var(--text-muted); margin-top: 0.25rem;">
-Required to authorize avatar upload &amp; feed record write on your PDS (Bluesky Settings &rarr; Advanced &rarr; App Passwords).
-</div>
+<div class="dial-control" id="publish-oauth-banner" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; padding: 0.75rem; font-size: 0.8125rem; color: var(--accent-blue);">
+✨ Signed in with Bluesky OAuth (<strong id="publish-oauth-handle">@user</strong>). Publishing uses your active OAuth session with <strong>zero passwords</strong> required.
 </div>
 <div id="publish-success-view" style="display: none; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 8px; padding: 1rem; flex-direction: column; gap: 0.75rem;">
 <div style="font-weight: 700; color: var(--accent-emerald);">🎉 Feed Published Successfully!</div>
@@ -617,7 +611,8 @@ publishFeedName: $('publish-feed-name'),
 publishFeedRkey: $('publish-feed-rkey'),
 publishFeedDesc: $('publish-feed-desc'),
 publishServiceDid: $('publish-service-did'),
-publishAppPassword: $('publish-app-password'),
+publishOauthBanner: $('publish-oauth-banner'),
+publishOauthHandle: $('publish-oauth-handle'),
 publishSuccessView: $('publish-success-view'),
 publishResultUri: $('publish-result-uri'),
 publishResultShareLink: $('publish-result-share-link'),
@@ -1519,6 +1514,12 @@ return;
 }
 if (elements.publishErrorAlert) elements.publishErrorAlert.style.display = 'none';
 if (elements.publishSuccessView) elements.publishSuccessView.style.display = 'none';
+if (elements.publishOauthBanner) {
+elements.publishOauthBanner.style.display = 'block';
+if (elements.publishOauthHandle) {
+elements.publishOauthHandle.textContent = `@${session.handle || session.did}`;
+}
+}
 if (elements.btnSubmitPublishFeed) {
 elements.btnSubmitPublishFeed.style.display = 'inline-flex';
 elements.btnSubmitPublishFeed.disabled = false;
@@ -1542,7 +1543,6 @@ return;
 const displayName = elements.publishFeedName ? elements.publishFeedName.value.trim() : 'For Your Consideration';
 const rkey = elements.publishFeedRkey ? elements.publishFeedRkey.value.trim() : 'for-your-consideration';
 const description = elements.publishFeedDesc ? elements.publishFeedDesc.value.trim() : '';
-const appPassword = elements.publishAppPassword ? elements.publishAppPassword.value.trim() : '';
 if (elements.publishErrorAlert) elements.publishErrorAlert.style.display = 'none';
 if (elements.btnSubmitPublishFeed) {
 elements.btnSubmitPublishFeed.disabled = true;
@@ -1558,8 +1558,7 @@ headers: {
 body: JSON.stringify({
 display_name: displayName,
 rkey,
-description,
-app_password: appPassword || undefined
+description
 })
 });
 const data = await res.json().catch(() => ({}));

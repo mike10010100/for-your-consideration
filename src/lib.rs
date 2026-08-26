@@ -70,8 +70,8 @@ pub mod prelude {
         parse_jwt_payload_unverified, percent_encode_query_param, publish_feed_generator_record,
         resolve_identity_pds, validate_outbound_url, validate_outbound_url_async,
         validate_service_jwt, validate_session_token, verify_pkce_challenge, OAuthSessionState,
-        OAuthStateStore, PkceChallengePair, ResolvedPdsIdentity, ServiceJwtPayload,
-        DEFAULT_OAUTH_STATE_TTL_SECS, OAUTH_STATE_SHARDS,
+        OAuthStateStore, OAuthUserSessionStore, PkceChallengePair, ResolvedPdsIdentity,
+        ServiceJwtPayload, UserOAuthSession, DEFAULT_OAUTH_STATE_TTL_SECS, OAUTH_STATE_SHARDS,
     };
     pub use crate::error::{FeedError, Result};
     pub use crate::graph::{

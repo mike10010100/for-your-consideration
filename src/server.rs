@@ -43,8 +43,8 @@ use crate::auth::{
     authenticate_pds_session_with_secret, build_secure_http_client,
     exchange_oauth_code_with_secret, extract_session_did_from_headers_with_secret,
     generate_pkce_pair, publish_feed_generator_record, resolve_identity_pds, validate_service_jwt,
-    DPoPKey, OAuthSessionState, OAuthStateStore, DEFAULT_OAUTH_STATE_TTL_SECS,
-    DEFAULT_SESSION_SECRET,
+    DPoPKey, OAuthSessionState, OAuthStateStore, OAuthUserSessionStore,
+    DEFAULT_OAUTH_STATE_TTL_SECS, DEFAULT_SESSION_SECRET,
 };
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
@@ -75,6 +75,8 @@ pub struct AppState {
     pub preferences_store: Arc<UserPreferencesStore>,
     /// Store for pending OAuth authorization PKCE session states.
     pub oauth_store: Arc<OAuthStateStore>,
+    /// Store for active authenticated user OAuth sessions (tokens + `DPoP` keys).
+    pub user_oauth_sessions: Arc<OAuthUserSessionStore>,
     /// Tracker for snapshot persistence status and metrics.
     pub snapshot_tracker: Arc<SnapshotStatusTracker>,
     /// Tracker for real-time Jetstream firehose ingestion velocity and statistics.
@@ -118,6 +120,7 @@ impl AppState {
             recommender,
             preferences_store: Arc::new(UserPreferencesStore::new()),
             oauth_store: Arc::new(OAuthStateStore::new()),
+            user_oauth_sessions: Arc::new(OAuthUserSessionStore::new()),
             snapshot_tracker: Arc::new(SnapshotStatusTracker::default()),
             ingestion_tracker: Arc::new(IngestionTracker::default()),
             service_did: service_did.into(),
@@ -825,15 +828,22 @@ pub async fn handle_post_oauth_callback(
     };
 
     match exchange_oauth_code_with_secret(code, &session, &client_id, &state.session_secret).await {
-        Ok(resp) => (
-            StatusCode::OK,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )],
-            Json(resp),
-        )
-            .into_response(),
+        Ok((resp, maybe_oauth_session)) => {
+            if let Some(user_session) = maybe_oauth_session {
+                state
+                    .user_oauth_sessions
+                    .insert(user_session.did.clone(), user_session);
+            }
+            (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(resp),
+            )
+                .into_response()
+        }
         Err(FeedError::Auth(msg)) => (
             StatusCode::UNAUTHORIZED,
             [(
@@ -913,8 +923,17 @@ pub async fn handle_post_feed_publish(
         }
     }
 
-    match publish_feed_generator_record(&viewer_did, token, &body, state.service_did.as_str(), None)
-        .await
+    let maybe_oauth_session = state.user_oauth_sessions.get(viewer_did.as_str());
+
+    match publish_feed_generator_record(
+        &viewer_did,
+        token,
+        &body,
+        state.service_did.as_str(),
+        None,
+        maybe_oauth_session.as_ref(),
+    )
+    .await
     {
         Ok(resp) => (
             StatusCode::OK,

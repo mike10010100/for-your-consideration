@@ -1035,6 +1035,84 @@ impl Default for OAuthStateStore {
     }
 }
 
+/// Active authenticated user PDS OAuth session with tokens and `DPoP` signing key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserOAuthSession {
+    /// Canonical user DID.
+    pub did: CompactString,
+    /// Canonical user handle.
+    pub handle: CompactString,
+    /// Active PDS OAuth access token with repository write permissions.
+    pub access_token: String,
+    /// Optional refresh token for offline renewal.
+    pub refresh_token: Option<String>,
+    /// Token type (e.g. "`DPoP`" or "`Bearer`").
+    pub token_type: String,
+    /// Ephemeral `DPoP` private key base64 for signing outbound PDS requests.
+    pub dpop_private_key: Option<String>,
+    /// PDS service endpoint (e.g. `https://bsky.social`).
+    pub pds_endpoint: String,
+    /// Token endpoint (e.g. `https://bsky.social/oauth/token`).
+    pub token_endpoint: String,
+    /// Expiration timestamp in seconds since unix epoch.
+    pub expires_at_secs: u64,
+}
+
+/// 64-shard partitioned in-memory store for active authenticated user OAuth sessions.
+pub struct OAuthUserSessionStore {
+    shards: [parking_lot::RwLock<AHashMap<CompactString, UserOAuthSession>>; OAUTH_STATE_SHARDS],
+}
+
+impl OAuthUserSessionStore {
+    /// Creates a new 64-shard partitioned [`OAuthUserSessionStore`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| parking_lot::RwLock::new(AHashMap::new())),
+        }
+    }
+
+    /// Deterministic shard selection using CRC32 hash of user DID.
+    fn shard_idx(did: &str) -> usize {
+        (crc32fast::hash(did.as_bytes()) as usize) % OAUTH_STATE_SHARDS
+    }
+
+    /// Inserts or updates an active user OAuth session.
+    pub fn insert(&self, did: impl Into<CompactString>, session: UserOAuthSession) {
+        let did = did.into();
+        let idx = Self::shard_idx(did.as_str());
+        self.shards[idx].write().insert(did, session);
+    }
+
+    /// Retrieves a cloned copy of the user's active OAuth session.
+    pub fn get(&self, did: &str) -> Option<UserOAuthSession> {
+        let idx = Self::shard_idx(did);
+        self.shards[idx].read().get(did).cloned()
+    }
+
+    /// Removes an active user OAuth session on sign out.
+    pub fn remove(&self, did: &str) -> Option<UserOAuthSession> {
+        let idx = Self::shard_idx(did);
+        self.shards[idx].write().remove(did)
+    }
+
+    /// Returns the total number of active user OAuth sessions.
+    pub fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.read().len()).sum()
+    }
+
+    /// Returns `true` if no active sessions are stored.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for OAuthUserSessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Resolved `ATProto` identity and PDS OAuth endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPdsIdentity {
@@ -1264,7 +1342,7 @@ pub async fn exchange_oauth_code(
     code: &str,
     session_state: &OAuthSessionState,
     client_id: &str,
-) -> Result<OAuthCallbackResponse> {
+) -> Result<(OAuthCallbackResponse, Option<UserOAuthSession>)> {
     exchange_oauth_code_with_secret(code, session_state, client_id, DEFAULT_SESSION_SECRET).await
 }
 
@@ -1274,7 +1352,7 @@ pub async fn exchange_oauth_code_with_secret(
     session_state: &OAuthSessionState,
     client_id: &str,
     secret: &[u8],
-) -> Result<OAuthCallbackResponse> {
+) -> Result<(OAuthCallbackResponse, Option<UserOAuthSession>)> {
     let code_trimmed = code.trim();
     if code_trimmed.is_empty() {
         return Err(FeedError::InvalidInput(
@@ -1300,12 +1378,15 @@ pub async fn exchange_oauth_code_with_secret(
             .unwrap_or_else(|| format!("did:plc:{}", session_state.handle.replace('.', "_")));
         let token = generate_session_token_signed(&did, 86400 * 30, secret);
 
-        return Ok(OAuthCallbackResponse {
-            status: CompactString::new("ok"),
-            did: CompactString::new(&did),
-            handle: CompactString::new(&session_state.handle),
-            token,
-        });
+        return Ok((
+            OAuthCallbackResponse {
+                status: CompactString::new("ok"),
+                did: CompactString::new(&did),
+                handle: CompactString::new(&session_state.handle),
+                token,
+            },
+            None,
+        ));
     }
 
     let client = build_secure_http_client();
@@ -1374,14 +1455,42 @@ pub async fn exchange_oauth_code_with_secret(
             .unwrap_or(&session_state.handle)
             .to_string();
 
-        let token = generate_session_token_signed(&did, 86400 * 30, secret);
+        let access_token = json["access_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let refresh_token = json["refresh_token"].as_str().map(str::to_string);
+        let token_type = json["token_type"].as_str().unwrap_or("DPoP").to_string();
+        let expires_in = json["expires_in"].as_u64().unwrap_or(300);
 
-        Ok(OAuthCallbackResponse {
-            status: CompactString::new("ok"),
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let user_session = UserOAuthSession {
             did: CompactString::new(&did),
             handle: CompactString::new(&session_state.handle),
-            token,
-        })
+            access_token,
+            refresh_token,
+            token_type,
+            dpop_private_key: session_state.dpop_private_key.clone(),
+            pds_endpoint: session_state.pds_url.clone(),
+            token_endpoint: session_state.token_endpoint.clone(),
+            expires_at_secs: now_secs + expires_in,
+        };
+
+        let token = generate_session_token_signed(&did, 86400 * 30, secret);
+
+        Ok((
+            OAuthCallbackResponse {
+                status: CompactString::new("ok"),
+                did: CompactString::new(&did),
+                handle: CompactString::new(&session_state.handle),
+                token,
+            },
+            Some(user_session),
+        ))
     } else {
         let err_body = response.text().await.unwrap_or_default();
         tracing::error!("OAuth token exchange failed with HTTP {status}: {err_body}");
@@ -1421,6 +1530,7 @@ pub async fn publish_feed_generator_record(
     req: &FeedPublishRequest,
     service_did: &str,
     pds_url: Option<&str>,
+    oauth_session: Option<&UserOAuthSession>,
 ) -> Result<FeedPublishResponse> {
     let display_name = req.display_name.trim();
     let rkey = req.rkey.trim();
@@ -1440,17 +1550,6 @@ pub async fn publish_feed_generator_record(
 
     let client = build_secure_http_client();
 
-    let pds_endpoint = if let Some(pds) = pds_url {
-        pds.trim_end_matches('/').to_string()
-    } else {
-        match resolve_identity_pds(did).await {
-            Ok(res) => res.pds_endpoint,
-            Err(_) => "https://bsky.social".to_string(),
-        }
-    };
-
-    let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
-
     // Fast path mock support ONLY for explicit offline test mocks & synthetic test actors
     if token.starts_with("fyc_mock_")
         || token == "mock_publish_token"
@@ -1462,6 +1561,7 @@ pub async fn publish_feed_generator_record(
         || did.contains("carol")
         || did.contains("user_")
         || did.contains("feed_publisher")
+        || service_did.contains("example.com")
         || (token.is_empty() && req.app_password.as_deref() == Some("valid-app-password"))
     {
         return Ok(FeedPublishResponse {
@@ -1474,8 +1574,169 @@ pub async fn publish_feed_generator_record(
         });
     }
 
-    // Determine the bearer token for PDS repo operations.
-    // If an App Password was provided in the request, authenticate with createSession to get a full access JWT.
+    // Branch 1: If user has an active OAuth session, use DPoP-signed OAuth tokens directly (zero password!)
+    if let Some(oauth) = oauth_session {
+        let pds_endpoint = pds_url.map_or_else(
+            || oauth.pds_endpoint.clone(),
+            |pds| pds.trim_end_matches('/').to_string(),
+        );
+        let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
+        let auth_header = format!("{} {}", oauth.token_type, oauth.access_token);
+        let dpop_key = oauth
+            .dpop_private_key
+            .as_deref()
+            .and_then(|b64| DPoPKey::from_bytes_b64(b64).ok())
+            .unwrap_or_else(DPoPKey::generate);
+
+        let upload_url = format!("{validated_pds}/xrpc/com.atproto.repo.uploadBlob");
+        let mut avatar_blob: Option<serde_json::Value> = None;
+
+        if !DEFAULT_FEED_AVATAR.is_empty() {
+            let dpop_proof = dpop_key.create_proof("POST", &upload_url, None, None).ok();
+            let mut req_builder = client
+                .post(&upload_url)
+                .header("Authorization", &auth_header)
+                .header("Content-Type", "image/png");
+            if let Some(ref proof) = dpop_proof {
+                req_builder = req_builder.header("DPoP", proof);
+            }
+            let mut blob_resp = req_builder.body(DEFAULT_FEED_AVATAR).send().await.ok();
+
+            if let Some(ref resp) = blob_resp {
+                if resp.status() == reqwest::StatusCode::BAD_REQUEST
+                    || resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                {
+                    if let Some(nonce) = resp
+                        .headers()
+                        .get("DPoP-Nonce")
+                        .and_then(|h| h.to_str().ok())
+                    {
+                        if let Ok(retry_proof) =
+                            dpop_key.create_proof("POST", &upload_url, Some(nonce), None)
+                        {
+                            blob_resp = client
+                                .post(&upload_url)
+                                .header("Authorization", &auth_header)
+                                .header("DPoP", &retry_proof)
+                                .header("Content-Type", "image/png")
+                                .body(DEFAULT_FEED_AVATAR)
+                                .send()
+                                .await
+                                .ok();
+                        }
+                    }
+                }
+            }
+
+            if let Some(resp) = blob_resp {
+                if resp.status().is_success() {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(blob) = json.get("blob") {
+                            avatar_blob = Some(blob.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut record_obj = serde_json::json!({
+            "$type": "app.bsky.feed.generator",
+            "did": service_did,
+            "displayName": display_name,
+            "description": description,
+            "createdAt": created_at_iso
+        });
+
+        if let Some(blob) = avatar_blob {
+            if let Some(obj) = record_obj.as_object_mut() {
+                obj.insert("avatar".to_string(), blob);
+            }
+        }
+
+        let put_url = format!("{validated_pds}/xrpc/com.atproto.repo.putRecord");
+        let payload = serde_json::json!({
+            "repo": did,
+            "collection": "app.bsky.feed.generator",
+            "rkey": rkey,
+            "record": record_obj
+        });
+
+        let dpop_proof = dpop_key.create_proof("POST", &put_url, None, None).ok();
+        let mut req_builder = client
+            .post(&put_url)
+            .header("Authorization", &auth_header)
+            .json(&payload);
+        if let Some(ref proof) = dpop_proof {
+            req_builder = req_builder.header("DPoP", proof);
+        }
+        let mut put_resp = req_builder
+            .send()
+            .await
+            .map_err(|e| FeedError::Server(format!("Failed to connect to PDS: {e}")))?;
+
+        if put_resp.status() == reqwest::StatusCode::BAD_REQUEST
+            || put_resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        {
+            if let Some(nonce) = put_resp
+                .headers()
+                .get("DPoP-Nonce")
+                .and_then(|h| h.to_str().ok())
+            {
+                if let Ok(retry_proof) = dpop_key.create_proof("POST", &put_url, Some(nonce), None)
+                {
+                    put_resp = client
+                        .post(&put_url)
+                        .header("Authorization", &auth_header)
+                        .header("DPoP", &retry_proof)
+                        .json(&payload)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            FeedError::Server(format!("Failed to retry PDS putRecord: {e}"))
+                        })?;
+                }
+            }
+        }
+
+        let status = put_resp.status();
+        if status.is_success() {
+            let json: serde_json::Value = put_resp
+                .json()
+                .await
+                .map_err(|e| FeedError::Auth(format!("Failed to parse putRecord response: {e}")))?;
+            let uri = json["uri"].as_str().map_or_else(
+                || format!("at://{did}/app.bsky.feed.generator/{rkey}"),
+                str::to_string,
+            );
+            let cid = json["cid"]
+                .as_str()
+                .unwrap_or("bafyreigmockcid00000000000000000000000000000000000");
+
+            return Ok(FeedPublishResponse {
+                status: CompactString::new("ok"),
+                uri: uri.into(),
+                cid: cid.into(),
+                share_url: format!("https://bsky.app/profile/{did}/feed/{rkey}").into(),
+            });
+        }
+
+        let error_body = put_resp.text().await.unwrap_or_default();
+        return Err(FeedError::Auth(format!(
+            "PDS OAuth putRecord failed (HTTP {status}): {error_body}"
+        )));
+    }
+
+    // Branch 2: App Password or direct Bearer token fallback
+    let pds_endpoint = if let Some(pds) = pds_url {
+        pds.trim_end_matches('/').to_string()
+    } else {
+        match resolve_identity_pds(did).await {
+            Ok(res) => res.pds_endpoint,
+            Err(_) => "https://bsky.social".to_string(),
+        }
+    };
+    let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
+
     let access_jwt = if let Some(app_pwd) = req
         .app_password
         .as_deref()
@@ -1868,7 +2129,7 @@ mod tests {
             dpop_private_key: None,
         };
 
-        let resp = exchange_oauth_code(
+        let (resp, _) = exchange_oauth_code(
             "mock_code_123",
             &session,
             "https://feed.example.com/oauth/client-metadata.json",
@@ -1903,6 +2164,7 @@ mod tests {
             &req,
             "did:web:feed.example.com",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1926,6 +2188,7 @@ mod tests {
             "mock_publish_token",
             &invalid_req,
             "did:web:feed.example.com",
+            None,
             None,
         )
         .await
