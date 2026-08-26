@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - language: rust
-            build-mode: manual
+            build-mode: none
           - language: javascript-typescript
             build-mode: none
           - language: actions
@@ -33,19 +33,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain
-        if: matrix.language == 'rust'
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-
-      - name: Build Rust code for CodeQL analysis
-        if: matrix.language == 'rust'
-        run: cargo check --all-targets
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
