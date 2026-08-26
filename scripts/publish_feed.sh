@@ -60,7 +60,41 @@ echo "OK (DID: $USER_DID)"
 # 2. Derive Service DID (did:web:<hostname>)
 SERVICE_DID="did:web:$FEED_HOSTNAME"
 CREATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+AVATAR_PATH="${AVATAR_PATH:-}"
 
+AVATAR_BLOB_JSON=""
+if [[ -n "$AVATAR_PATH" && -f "$AVATAR_PATH" ]]; then
+  echo -n "Uploading avatar blob ($AVATAR_PATH)... "
+  MIME_TYPE="image/jpeg"
+  if [[ "$AVATAR_PATH" == *.png ]]; then
+    MIME_TYPE="image/png"
+  fi
+  UPLOAD_RESP=$(curl -s -X POST "$PDS_URL/xrpc/com.atproto.repo.uploadBlob" \
+    -H "Authorization: Bearer $JWT" \
+    -H "Content-Type: $MIME_TYPE" \
+    --data-binary "@$AVATAR_PATH")
+  BLOB_LINK=$(echo "$UPLOAD_RESP" | jq -r '.blob.ref."$link" // empty')
+  if [[ -n "$BLOB_LINK" ]]; then
+    echo "OK (Blob: $BLOB_LINK)"
+    AVATAR_BLOB_JSON=$(echo "$UPLOAD_RESP" | jq '.blob')
+  else
+    echo "WARNING: Could not parse blob link, response: $UPLOAD_RESP" >&2
+  fi
+fi
+
+if [[ -n "$AVATAR_BLOB_JSON" ]]; then
+RECORD_PAYLOAD=$(cat <<EOF
+{
+  "\$type": "app.bsky.feed.generator",
+  "did": "$SERVICE_DID",
+  "displayName": "$FEED_DISPLAY_NAME",
+  "description": "$FEED_DESCRIPTION",
+  "avatar": $AVATAR_BLOB_JSON,
+  "createdAt": "$CREATED_AT"
+}
+EOF
+)
+else
 RECORD_PAYLOAD=$(cat <<EOF
 {
   "\$type": "app.bsky.feed.generator",
@@ -71,6 +105,7 @@ RECORD_PAYLOAD=$(cat <<EOF
 }
 EOF
 )
+fi
 
 # 3. Put Record into AT Protocol Repo
 echo -n "Publishing record at://$USER_DID/app.bsky.feed.generator/$FEED_RKEY... "
