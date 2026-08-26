@@ -507,6 +507,7 @@ async fn test_authenticated_preference_lifecycle() {
             news: 0.0,
             culture: 1.0,
         }),
+        include_replies: Some(false),
     };
     let req_save = Request::builder()
         .method(Method::POST)

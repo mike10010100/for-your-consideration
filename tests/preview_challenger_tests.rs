@@ -116,6 +116,7 @@ fn test_challenge_recommend_preview_high_candidate_load_latency_and_correctness(
             culture: 1.2,
         },
         explain: true,
+        include_replies: false,
         limit: 30,
         cursor: None,
     };
@@ -507,6 +508,7 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                         culture: 1.0,
                     },
                     explain: i.is_multiple_of(2),
+                    include_replies: false,
                     limit: 10 + (i % 40),
                     cursor: None,
                 };
@@ -983,7 +985,8 @@ fn test_read_only_impression_isolation_stress() {
                 culture: 1.5,
             },
             explain: step % 2 == 0,
-            limit: 10,
+            include_replies: false,
+            limit: 15,
             cursor: None,
         };
 

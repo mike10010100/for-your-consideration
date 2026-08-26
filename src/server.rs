@@ -192,6 +192,10 @@ pub struct FeedSkeletonQuery {
     pub freshness: Option<String>,
     /// Exploration serendipity dial (e.g. "familiar", "balanced", "`deep_dive`").
     pub discovery: Option<String>,
+    /// Whether to include reply posts (e.g. "true", "all") or restrict to root posts only (optional).
+    pub replies: Option<String>,
+    /// Alternative boolean flag for including replies.
+    pub include_replies: Option<bool>,
     /// Topic bias multiplier for Art category (0.0 to 5.0).
     pub art: Option<f32>,
     /// Topic bias multiplier for Tech category (0.0 to 5.0).
@@ -365,11 +369,18 @@ pub async fn handle_get_feed_skeleton(
         .clamp(1, MAX_PAGE_LIMIT);
     let explain = query.explain.unwrap_or(false);
 
+    let include_replies = match (query.replies.as_deref(), query.include_replies) {
+        (Some("true" | "all" | "include" | "1"), _) | (_, Some(true)) => true,
+        (Some("false" | "root_only" | "root" | "0"), _) | (_, Some(false)) => false,
+        _ => base_dials.include_replies,
+    };
+
     let dials = RecommendationDials {
         half_life_secs,
         explore_ratio,
         topic_weights,
         explain,
+        include_replies,
         limit,
         cursor: query.cursor,
     };
@@ -975,6 +986,7 @@ pub async fn handle_get_preferences(
             freshness_hours: dials.freshness_half_life_hours(),
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
+            include_replies: dials.include_replies,
         },
         is_custom,
         dials: Some(dials.into()),
@@ -1008,10 +1020,12 @@ pub async fn handle_post_preferences(
             .into_response();
     };
 
+    let include_replies = body.include_replies.unwrap_or(false);
     let dials = UserDials {
         freshness_half_life_secs: body.freshness_hours * 3600.0,
         serendipity_ratio: body.discovery_ratio,
         topic_weights: body.topic_weights.unwrap_or_default(),
+        include_replies,
         updated_at_secs: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1042,6 +1056,7 @@ pub async fn handle_post_preferences(
                 freshness_hours: dials.freshness_half_life_hours(),
                 discovery_ratio: dials.discovery_ratio(),
                 topic_weights: dials.topic_weights,
+                include_replies: dials.include_replies,
             }),
             dials: Some(dials.into()),
         }),
@@ -1799,6 +1814,7 @@ mod tests {
                 news: 0.5,
                 culture: 1.0,
             }),
+            include_replies: Some(true),
         };
         let req_post = Request::builder()
             .method(Method::POST)
@@ -1830,6 +1846,7 @@ mod tests {
         assert_eq!(prefs_custom.preferences.freshness_hours, 12.0);
         assert_eq!(prefs_custom.preferences.discovery_ratio, 0.35);
         assert_eq!(prefs_custom.preferences.topic_weights.art, 2.0);
+        assert!(prefs_custom.preferences.include_replies);
 
         // 5. Authenticated DELETE -> 200 resets to defaults
         let req_del = Request::builder()
@@ -1917,6 +1934,7 @@ mod tests {
                 news: 0.0,
                 culture: 0.0,
             },
+            include_replies: false,
             updated_at_secs: 0,
         };
         state

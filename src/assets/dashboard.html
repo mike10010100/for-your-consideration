@@ -325,6 +325,24 @@ Save Dials to My Bluesky Feed
 </div>
 </div>
 </div>
+<!-- Post Composition (Root Posts Only vs Include Replies) -->
+<div class="dial-control" style="margin-top: 0.875rem; padding-top: 0.75rem; border-top: 1px solid var(--border-light);">
+<div class="dial-label-row" style="margin-bottom: 0.45rem;">
+<label class="dial-label" style="display: flex; align-items: center; gap: 0.35rem;">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-sky);"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+Post Composition
+</label>
+<span id="badge-include-replies" class="dial-value-badge">Root Posts Only (Default)</span>
+</div>
+<div style="display: flex; gap: 0.5rem;">
+<button type="button" id="btn-composition-root" class="btn btn-sm btn-active-tab" style="flex: 1; padding: 0.35rem 0.5rem; font-size: 0.75rem; border-radius: 6px; font-weight: 500;">
+Root Posts Only
+</button>
+<button type="button" id="btn-composition-all" class="btn btn-sm" style="flex: 1; padding: 0.35rem 0.5rem; font-size: 0.75rem; border-radius: 6px; font-weight: 500; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">
+Include Replies
+</button>
+</div>
+</div>
 </section>
 <!-- Feed Preview Section -->
 <section id="feed-preview" class="card">
@@ -490,7 +508,8 @@ sparklineHistory: [],
 maxSparklineSamples: 25,
 previewDebounceTimer: null,
 currentViewer: 'did:plc:alice',
-serviceDid: ''
+serviceDid: '',
+includeReplies: false
 };
 const $ = id => document.getElementById(id);
 const elements = {
@@ -535,6 +554,9 @@ sliderTopicNews: $('slider-topic-news'),
 badgeTopicNews: $('badge-topic-news'),
 sliderTopicCulture: $('slider-topic-culture'),
 badgeTopicCulture: $('badge-topic-culture'),
+badgeIncludeReplies: $('badge-include-replies'),
+btnCompositionRoot: $('btn-composition-root'),
+btnCompositionAll: $('btn-composition-all'),
 btnResetDials: $('btn-reset-dials'),
 feedPreviewLatency: $('feed-preview-latency'),
 feedCandidateCount: $('feed-candidate-count'),
@@ -996,6 +1018,30 @@ elements.badgeTopicTech.textContent = `${Number(elements.sliderTopicTech.value).
 elements.badgeTopicScience.textContent = `${Number(elements.sliderTopicScience.value).toFixed(1)}x`;
 elements.badgeTopicNews.textContent = `${Number(elements.sliderTopicNews.value).toFixed(1)}x`;
 elements.badgeTopicCulture.textContent = `${Number(elements.sliderTopicCulture.value).toFixed(1)}x`;
+if (elements.badgeIncludeReplies) {
+elements.badgeIncludeReplies.textContent = state.includeReplies ? 'Include Replies' : 'Root Posts Only (Default)';
+}
+if (elements.btnCompositionRoot && elements.btnCompositionAll) {
+if (state.includeReplies) {
+elements.btnCompositionRoot.className = 'btn btn-sm';
+elements.btnCompositionRoot.style.background = 'var(--bg-surface)';
+elements.btnCompositionRoot.style.border = '1px solid var(--border-light)';
+elements.btnCompositionRoot.style.color = 'var(--text-secondary)';
+elements.btnCompositionAll.className = 'btn btn-sm btn-active-tab';
+elements.btnCompositionAll.style.background = '';
+elements.btnCompositionAll.style.border = '';
+elements.btnCompositionAll.style.color = '';
+} else {
+elements.btnCompositionRoot.className = 'btn btn-sm btn-active-tab';
+elements.btnCompositionRoot.style.background = '';
+elements.btnCompositionRoot.style.border = '';
+elements.btnCompositionRoot.style.color = '';
+elements.btnCompositionAll.className = 'btn btn-sm';
+elements.btnCompositionAll.style.background = 'var(--bg-surface)';
+elements.btnCompositionAll.style.border = '1px solid var(--border-light)';
+elements.btnCompositionAll.style.color = 'var(--text-secondary)';
+}
+}
 }
 function triggerFeedPreview() {
 updateDialBadges();
@@ -1024,6 +1070,8 @@ params.set('tech', tech);
 params.set('science', science);
 params.set('news', news);
 params.set('culture', culture);
+params.set('replies', state.includeReplies ? 'all' : 'root');
+params.set('include_replies', state.includeReplies ? 'true' : 'false');
 params.set('limit', '15');
 params.set('explain', 'true');
 const startTime = performance.now();
@@ -1203,6 +1251,7 @@ elements.sliderTopicTech.value = 1.0;
 elements.sliderTopicScience.value = 1.0;
 elements.sliderTopicNews.value = 1.0;
 elements.sliderTopicCulture.value = 1.0;
+state.includeReplies = false;
 elements.dialViewerInput.value = 'did:plc:alice';
 triggerFeedPreview();
 }
@@ -1602,7 +1651,8 @@ const data = await res.json();
 const prefs = data.preferences || (data.dials ? {
 freshness_hours: data.dials.freshness_half_life_hours,
 discovery_ratio: data.dials.discovery_ratio,
-topic_weights: data.dials.topics
+topic_weights: data.dials.topics,
+include_replies: data.dials.include_replies
 } : null);
 if (prefs) {
 if (prefs.freshness_hours !== undefined) {
@@ -1618,6 +1668,13 @@ if (topics.tech !== undefined) elements.sliderTopicTech.value = topics.tech;
 if (topics.science !== undefined) elements.sliderTopicScience.value = topics.science;
 if (topics.news !== undefined) elements.sliderTopicNews.value = topics.news;
 if (topics.culture !== undefined) elements.sliderTopicCulture.value = topics.culture;
+}
+if (prefs.include_replies !== undefined) {
+state.includeReplies = Boolean(prefs.include_replies);
+} else if (data.dials && data.dials.include_replies !== undefined) {
+state.includeReplies = Boolean(data.dials.include_replies);
+} else {
+state.includeReplies = false;
 }
 updateDialBadges();
 fetchFeedPreview();
@@ -1664,7 +1721,8 @@ tech: parseFloat(elements.sliderTopicTech.value),
 science: parseFloat(elements.sliderTopicScience.value),
 news: parseFloat(elements.sliderTopicNews.value),
 culture: parseFloat(elements.sliderTopicCulture.value)
-}
+},
+include_replies: state.includeReplies
 };
 try {
 const res = await fetch('/api/preferences', {
@@ -1762,6 +1820,18 @@ triggerFeedPreview();
 });
 });
 elements.btnResetDials.addEventListener('click', handleResetPreferences);
+if (elements.btnCompositionRoot) {
+elements.btnCompositionRoot.addEventListener('click', () => {
+state.includeReplies = false;
+triggerFeedPreview();
+});
+}
+if (elements.btnCompositionAll) {
+elements.btnCompositionAll.addEventListener('click', () => {
+state.includeReplies = true;
+triggerFeedPreview();
+});
+}
 if (elements.btnOpenLoginModal) {
 elements.btnOpenLoginModal.addEventListener('click', () => openLoginModal());
 }

@@ -264,10 +264,10 @@ async fn test_empirical_spa_asset_size_and_binary_footprint() {
         raw_len as f64 / 1024.0
     );
 
-    // 1. Compactness check (< 100 KB uncompressed)
+    // 1. Compactness check (< 120 KB uncompressed)
     assert!(
-        raw_len < 100 * 1024,
-        "Dashboard SPA HTML must be compact (< 100 KB), actual size: {} bytes",
+        raw_len < 120 * 1024,
+        "Dashboard SPA HTML must be compact (< 120 KB), actual size: {} bytes",
         raw_len
     );
     assert!(

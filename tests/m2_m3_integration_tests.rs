@@ -64,6 +64,7 @@ async fn test_xrpc_3_tier_precedence_hierarchy() {
             news: 1.0,
             culture: 1.0,
         },
+        include_replies: false,
         updated_at_secs: 100,
     };
     prefs_store.set_by_did(&interner, user_did, custom_dials);
@@ -155,6 +156,7 @@ async fn test_rest_auth_and_preferences_lifecycle() {
             news: 0.2,
             culture: 1.0,
         }),
+        include_replies: Some(false),
     };
     let save_req = Request::builder()
         .method(Method::POST)

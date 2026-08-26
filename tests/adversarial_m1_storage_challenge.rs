@@ -287,7 +287,6 @@ fn test_v2_snapshot_roundtrip_10000_profiles_exact_bit_fidelity() {
 
     assert_eq!(save_header.magic, SNAPSHOT_MAGIC);
     assert_eq!(save_header.format_version, SNAPSHOT_FORMAT_VERSION);
-    assert_eq!(save_header.format_version, 2);
     assert_eq!(save_header.num_preferences, PROFILE_COUNT as u32);
     assert_eq!(save_header.num_strings, PROFILE_COUNT as u32);
 
@@ -295,7 +294,7 @@ fn test_v2_snapshot_roundtrip_10000_profiles_exact_bit_fidelity() {
     let file_meta = std::fs::metadata(&snap_path).expect("Metadata lookup failed");
     assert!(
         file_meta.len() > 400_000,
-        "Snapshot file size should reflect 10,000 40-byte records"
+        "Snapshot file size should reflect 10,000 records"
     );
 
     // Load into fresh, independent structures
@@ -310,7 +309,7 @@ fn test_v2_snapshot_roundtrip_10000_profiles_exact_bit_fidelity() {
             .expect("Snapshot must exist");
     let load_duration = load_start.elapsed();
 
-    assert_eq!(load_res.header.format_version, 2);
+    assert_eq!(load_res.header.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(load_res.header.num_preferences, PROFILE_COUNT as u32);
     assert_eq!(loaded_prefs.len(), PROFILE_COUNT);
 

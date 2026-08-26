@@ -639,6 +639,7 @@ async fn test_service_jwt_get_feed_skeleton_integration_expired_degrades_gracefu
         freshness_half_life_secs: 6.0 * 3600.0,
         serendipity_ratio: 0.35,
         topic_weights: TopicWeights::default(),
+        include_replies: false,
         updated_at_secs: 100,
     };
     prefs_store.set_by_did(&interner, alice_did, alice_dials);

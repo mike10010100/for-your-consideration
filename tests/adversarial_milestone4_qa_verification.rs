@@ -302,6 +302,7 @@ fn test_adversarial_latency_scaling_across_candidate_pool_sizes() {
                         culture: 1.0,
                     },
                     explain: true,
+                    include_replies: false,
                     limit: 30,
                     cursor: None,
                 },

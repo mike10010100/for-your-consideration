@@ -221,6 +221,7 @@ fn test_mission_1_p99_latency_under_high_load_with_preferences() {
                 news: ((i + 3) % 5) as f32,
                 culture: ((i + 4) % 5) as f32,
             },
+            include_replies: false,
             updated_at_secs: now_secs - 100,
         };
         preferences_store.set_by_did(&interner, did, dials);
@@ -358,6 +359,7 @@ fn test_mission_1_latency_under_concurrent_preference_write_mutations() {
                         freshness_half_life_secs: 12.0 * 3600.0,
                         serendipity_ratio: 0.20,
                         topic_weights: TopicWeights::default(),
+                        include_replies: false,
                         updated_at_secs: now_secs,
                     };
                     preferences_store.set_by_did(&interner, did, dials);
@@ -981,6 +983,7 @@ async fn test_mission_4_get_feed_skeleton_applies_custom_dials_and_query_precede
                 news: 1.0,
                 culture: 1.0,
             },
+            include_replies: false,
             updated_at_secs: 1000,
         },
     );
@@ -999,6 +1002,7 @@ async fn test_mission_4_get_feed_skeleton_applies_custom_dials_and_query_precede
                 news: 1.0,
                 culture: 1.0,
             },
+            include_replies: false,
             updated_at_secs: 1000,
         },
     );
@@ -1214,6 +1218,7 @@ fn test_empirical_16_thread_mixed_stress_matrix() {
                 freshness_half_life_secs: 36.0 * 3600.0,
                 serendipity_ratio: 0.15,
                 topic_weights: TopicWeights::default(),
+                include_replies: false,
                 updated_at_secs: now_secs,
             },
         );
@@ -1244,6 +1249,7 @@ fn test_empirical_16_thread_mixed_stress_matrix() {
                             freshness_half_life_secs: (6 + (idx % 160)) as f32 * 3600.0,
                             serendipity_ratio: ((idx % 50) as f32) / 100.0,
                             topic_weights: TopicWeights::default(),
+                            include_replies: false,
                             updated_at_secs: now_secs,
                         };
                         preferences_store.set_by_did(&interner, did, dials);

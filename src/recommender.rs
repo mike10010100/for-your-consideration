@@ -483,10 +483,17 @@ impl Recommender {
             },
         );
 
-        // Phase 4: Anti-Fatigue Filtering
-        // 1. Seen / Liked deduplication & Self-post exclusion
+        // Phase 4: Anti-Fatigue & Feed Composition Filtering
+        // 1. Seen / Liked deduplication & Self-post exclusion & Root-only filtering
         let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
         candidates.retain(|c| {
+            if !dials.include_replies {
+                if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                    if meta.is_reply() {
+                        return false;
+                    }
+                }
+            }
             if let Some(ref seen) = seen_bitmap {
                 if seen.contains(c.post_id) {
                     return false;
@@ -1188,9 +1195,16 @@ impl Recommender {
 
         let total_candidates = candidate_evals.len();
 
-        // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter
+        // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter & Root-only filtering
         let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
         candidate_evals.retain(|c| {
+            if !dials.include_replies {
+                if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                    if meta.is_reply() {
+                        return false;
+                    }
+                }
+            }
             if let Some(ref seen) = seen_bitmap {
                 if seen.contains(c.post_id) {
                     return false;

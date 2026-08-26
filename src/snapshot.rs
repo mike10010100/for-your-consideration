@@ -37,10 +37,13 @@ use crate::types::{CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, User
 /// Magic 4-byte header identifier: `b"FYFD"` (For-You Feed).
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"FYFD";
 
-/// Current snapshot format version (2 includes Section 8 User Preferences).
-pub const SNAPSHOT_FORMAT_VERSION: u16 = 2;
+/// Current snapshot format version (3 includes Section 8 User Preferences with `include_replies`).
+pub const SNAPSHOT_FORMAT_VERSION: u16 = 3;
 
-/// Legacy snapshot format version without user preferences.
+/// Legacy snapshot format version 2 with user preferences.
+pub const SNAPSHOT_FORMAT_VERSION_V2: u16 = 2;
+
+/// Legacy snapshot format version 1 without user preferences.
 pub const SNAPSHOT_FORMAT_VERSION_V1: u16 = 1;
 
 /// Fixed header size in bytes.
@@ -446,7 +449,7 @@ pub fn save_snapshot_with_preferences(
         write_chunk(&ts.to_le_bytes())?;
     }
 
-    // Section 8: User Preferences
+    // Section 8: User Preferences (Version 3)
     let num_preferences = u32::try_from(pref_data.len())
         .map_err(|e| FeedError::Snapshot(format!("Too many user preferences for snapshot: {e}")))?;
     write_chunk(&num_preferences.to_le_bytes())?;
@@ -459,6 +462,7 @@ pub fn save_snapshot_with_preferences(
         write_chunk(&dials.topic_weights.science.to_le_bytes())?;
         write_chunk(&dials.topic_weights.news.to_le_bytes())?;
         write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
+        write_chunk(&[u8::from(dials.include_replies)])?;
         write_chunk(&dials.updated_at_secs.to_le_bytes())?;
     }
 
@@ -575,7 +579,10 @@ pub fn load_snapshot_with_preferences(
     }
 
     let version = u16::from_le_bytes([header_buf[4], header_buf[5]]);
-    if version != SNAPSHOT_FORMAT_VERSION_V1 && version != SNAPSHOT_FORMAT_VERSION {
+    if version != SNAPSHOT_FORMAT_VERSION_V1
+        && version != SNAPSHOT_FORMAT_VERSION_V2
+        && version != SNAPSHOT_FORMAT_VERSION
+    {
         return Err(FeedError::Snapshot(format!(
             "Unsupported snapshot version {version}, expected {SNAPSHOT_FORMAT_VERSION}"
         )));
@@ -776,8 +783,9 @@ pub fn load_snapshot_with_preferences(
         active_recent_posts.push((pid, ts));
     }
 
-    // Section 8: User Preferences (Version 2)
-    let num_preferences = if version == SNAPSHOT_FORMAT_VERSION
+    // Section 8: User Preferences (Version 2 / Version 3)
+    let num_preferences = if (version == SNAPSHOT_FORMAT_VERSION
+        || version == SNAPSHOT_FORMAT_VERSION_V2)
         && slice_reader.offset < payload.len()
     {
         let pref_count = slice_reader.read_u32()? as usize;
@@ -821,6 +829,11 @@ pub fn load_snapshot_with_preferences(
                 culture_bytes[2],
                 culture_bytes[3],
             ]);
+            let include_replies = if version >= 3 {
+                slice_reader.read_u8()? != 0
+            } else {
+                false
+            };
             let updated_at_secs = slice_reader.read_u64()?;
 
             let dials = UserDials {
@@ -833,6 +846,7 @@ pub fn load_snapshot_with_preferences(
                     news,
                     culture,
                 },
+                include_replies,
                 updated_at_secs,
             };
 

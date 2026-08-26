@@ -74,7 +74,6 @@ fn test_snapshot_v2_roundtrip_populated_preferences() {
 
     assert_eq!(save_header.magic, SNAPSHOT_MAGIC);
     assert_eq!(save_header.format_version, SNAPSHOT_FORMAT_VERSION);
-    assert_eq!(save_header.format_version, 2);
     assert_eq!(save_header.num_preferences, 2);
 
     // Load into fresh structures
@@ -88,10 +87,10 @@ fn test_snapshot_v2_roundtrip_populated_preferences() {
         &loaded_graph,
         &loaded_preferences,
     )
-    .expect("Load V2 snapshot failed")
+    .expect("Load snapshot failed")
     .expect("Snapshot must exist");
 
-    assert_eq!(loaded.header.format_version, 2);
+    assert_eq!(loaded.header.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(loaded.header.num_preferences, 2);
     assert_eq!(loaded_preferences.len(), 2);
     assert_eq!(loaded_preferences.get(u1), Some(dials1));
@@ -254,7 +253,7 @@ fn test_snapshot_v2_with_empty_preferences() {
     .expect("Load empty preferences V2 failed")
     .expect("Snapshot must exist");
 
-    assert_eq!(loaded.header.format_version, 2);
+    assert_eq!(loaded.header.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(loaded.header.num_preferences, 0);
     assert!(loaded_preferences.is_empty());
 
@@ -280,7 +279,7 @@ fn test_snapshot_v2_loaded_by_legacy_load_snapshot() {
         .expect("Legacy load must succeed on V2 snapshot")
         .expect("Snapshot must exist");
 
-    assert_eq!(loaded.header.format_version, 2);
+    assert_eq!(loaded.header.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(loaded_interner.lookup_id("did:plc:test"), Some(u));
 
     let _ = std::fs::remove_file(&snapshot_path);
@@ -374,6 +373,7 @@ fn test_snapshot_v2_corrupted_dial_record_rejected() {
     payload.extend_from_slice(&1.0f32.to_le_bytes()); // science
     payload.extend_from_slice(&1.0f32.to_le_bytes()); // news
     payload.extend_from_slice(&1.0f32.to_le_bytes()); // culture
+    payload.extend_from_slice(&[0u8]); // include_replies = false
     payload.extend_from_slice(&1000u64.to_le_bytes()); // updated_at
 
     let mut p_hasher = Hasher::new();

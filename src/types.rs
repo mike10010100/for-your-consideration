@@ -235,6 +235,9 @@ pub struct RecommendationDials {
     pub topic_weights: TopicWeights,
     /// Whether to generate structured explanation traces for each post.
     pub explain: bool,
+    /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
+    #[serde(default)]
+    pub include_replies: bool,
     /// Maximum number of posts to return per page.
     pub limit: usize,
     /// Opaque pagination cursor.
@@ -257,6 +260,7 @@ impl Default for RecommendationDials {
             explore_ratio: DEFAULT_EXPLORE_RATIO,
             topic_weights: TopicWeights::default(),
             explain: false,
+            include_replies: false,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
         }
@@ -303,6 +307,7 @@ impl RecommendationDials {
             explore_ratio,
             topic_weights: TopicWeights::default(),
             explain,
+            include_replies: false,
             limit,
             cursor,
         }
@@ -312,6 +317,13 @@ impl RecommendationDials {
     #[must_use]
     pub const fn with_topic_weights(mut self, topic_weights: TopicWeights) -> Self {
         self.topic_weights = topic_weights;
+        self
+    }
+
+    /// Sets whether to include replies or restrict to root posts only.
+    #[must_use]
+    pub const fn with_include_replies(mut self, include_replies: bool) -> Self {
+        self.include_replies = include_replies;
         self
     }
 }
@@ -351,6 +363,9 @@ pub struct UserDials {
     pub serendipity_ratio: f32,
     /// Topic bias multipliers for the 5 primary categories (range: 0.0x to 5.0x each, default: 1.0x).
     pub topic_weights: TopicWeights,
+    /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
+    #[serde(default)]
+    pub include_replies: bool,
     /// Unix timestamp in seconds when preferences were last saved or updated.
     pub updated_at_secs: u64,
 }
@@ -361,6 +376,7 @@ impl Default for UserDials {
             freshness_half_life_secs: DEFAULT_HALF_LIFE_SECS,
             serendipity_ratio: DEFAULT_EXPLORE_RATIO,
             topic_weights: TopicWeights::default(),
+            include_replies: false,
             updated_at_secs: 0,
         }
     }
@@ -441,8 +457,16 @@ impl UserDials {
             freshness_half_life_secs: freshness_half_life_hours * 3600.0,
             serendipity_ratio: discovery_ratio,
             topic_weights,
+            include_replies: false,
             updated_at_secs,
         }
+    }
+
+    /// Sets whether to include replies or restrict to root posts only.
+    #[must_use]
+    pub const fn with_include_replies(mut self, include_replies: bool) -> Self {
+        self.include_replies = include_replies;
+        self
     }
 
     /// Converts [`UserDials`] into [`RecommendationDials`] with default page limits and cursor.
@@ -453,6 +477,7 @@ impl UserDials {
             explore_ratio: self.serendipity_ratio,
             topic_weights: self.topic_weights,
             explain: false,
+            include_replies: self.include_replies,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
         }
@@ -468,6 +493,7 @@ impl UserDials {
             freshness_half_life_secs: dials.half_life_secs,
             serendipity_ratio: dials.explore_ratio,
             topic_weights: dials.topic_weights,
+            include_replies: dials.include_replies,
             updated_at_secs,
         }
     }
@@ -477,6 +503,7 @@ impl UserDials {
         dials.half_life_secs = self.freshness_half_life_secs;
         dials.explore_ratio = self.serendipity_ratio;
         dials.topic_weights = self.topic_weights;
+        dials.include_replies = self.include_replies;
     }
 }
 
@@ -522,6 +549,9 @@ pub struct UserDialsResponse {
     pub discovery_ratio: f32,
     /// Granular topic category multipliers.
     pub topics: TopicWeights,
+    /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
+    #[serde(default)]
+    pub include_replies: bool,
     /// Timestamp in seconds since unix epoch when dials were last updated.
     pub updated_at_secs: u64,
 }
@@ -532,6 +562,7 @@ impl From<UserDials> for UserDialsResponse {
             freshness_half_life_hours: dials.freshness_half_life_hours(),
             discovery_ratio: dials.discovery_ratio(),
             topics: dials.topic_weights,
+            include_replies: dials.include_replies,
             updated_at_secs: dials.updated_at_secs,
         }
     }
@@ -548,6 +579,9 @@ pub struct PreferencesPayloadDto {
     /// 5-channel topic weight multipliers.
     #[serde(alias = "topics")]
     pub topic_weights: TopicWeights,
+    /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
+    #[serde(default)]
+    pub include_replies: bool,
 }
 
 impl From<UserDials> for PreferencesPayloadDto {
@@ -556,6 +590,7 @@ impl From<UserDials> for PreferencesPayloadDto {
             freshness_hours: dials.freshness_half_life_hours(),
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
+            include_replies: dials.include_replies,
         }
     }
 }
@@ -588,6 +623,9 @@ pub struct SavePreferencesRequestBody {
     /// Optional topic weight multipliers (0.0 to 5.0).
     #[serde(alias = "topics", default)]
     pub topic_weights: Option<TopicWeights>,
+    /// Whether to include reply posts or restrict exclusively to top-level root posts (optional, default: false).
+    #[serde(default)]
+    pub include_replies: Option<bool>,
 }
 
 /// Alias for [`SavePreferencesRequestBody`].
@@ -1161,6 +1199,10 @@ pub struct FeedPreviewQuery {
     pub freshness: Option<String>,
     /// Discovery / serendipity exploration dial (e.g. "familiar", "balanced", "`deep_dive`").
     pub discovery: Option<String>,
+    /// Whether to include reply posts (e.g. "true", "all") or root posts only.
+    pub replies: Option<String>,
+    /// Alternative boolean flag for including replies.
+    pub include_replies: Option<bool>,
 
     /// Topic bias multiplier for Art domain.
     pub art: Option<f32>,
@@ -1193,13 +1235,19 @@ impl FeedPreviewQuery {
     /// Converts this query into [`RecommendationDials`] with custom topic weights.
     #[must_use]
     pub fn to_dials(&self) -> RecommendationDials {
-        let base_dials = RecommendationDials::from_query(
+        let mut base_dials = RecommendationDials::from_query(
             self.freshness.as_deref(),
             self.discovery.as_deref(),
             self.explain,
             self.limit,
             None,
         );
+
+        let include_replies = matches!(
+            (self.replies.as_deref(), self.include_replies),
+            (Some("true" | "all" | "include" | "1"), _) | (_, Some(true))
+        );
+        base_dials.include_replies = include_replies;
 
         let topic_weights = TopicWeights {
             art: self.art.unwrap_or(1.0).max(0.0),
@@ -1757,6 +1805,8 @@ mod tests {
             handle: None,
             freshness: Some("realtime".to_string()),
             discovery: Some("deep_dive".to_string()),
+            replies: Some("true".to_string()),
+            include_replies: None,
             art: Some(2.5),
             tech: Some(0.5),
             science: None,
@@ -1772,6 +1822,7 @@ mod tests {
         assert_eq!(dials.explore_ratio, 0.35);
         assert_eq!(dials.limit, 20);
         assert!(dials.explain);
+        assert!(dials.include_replies);
         assert_eq!(dials.topic_weights.art, 2.5);
         assert_eq!(dials.topic_weights.tech, 0.5);
         assert_eq!(dials.topic_weights.science, 1.0);

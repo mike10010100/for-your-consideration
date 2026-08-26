@@ -153,6 +153,7 @@ async fn test_adversarial_extreme_concurrency_mixed_rest_snapshots_and_xrpc_read
                                 news: ((iter + 3) % 5) as f32,
                                 culture: ((iter + 4) % 5) as f32,
                             }),
+                            include_replies: Some(iter % 2 == 0),
                         };
                         let req = Request::builder()
                             .method(Method::POST)
@@ -314,6 +315,7 @@ async fn test_adversarial_hot_viewer_rapid_mutation_and_read_isolation() {
                         news: 1.0,
                         culture: 1.0,
                     }),
+                    include_replies: Some(false),
                 };
                 let req = Request::builder()
                     .method(Method::POST)
@@ -392,6 +394,7 @@ async fn test_adversarial_all_zero_topic_weights_and_edge_multipliers() {
         freshness_hours: 24.0,
         discovery_ratio: 0.15,
         topic_weights: Some(zero_topics),
+        include_replies: Some(false),
     };
     let req_post = Request::builder()
         .method(Method::POST)
@@ -461,6 +464,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 1.0,
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req1 = Request::builder()
         .method(Method::POST)
@@ -477,6 +481,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 168.0,
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req2 = Request::builder()
         .method(Method::POST)
@@ -493,6 +498,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 0.99,
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req3 = Request::builder()
         .method(Method::POST)
@@ -511,6 +517,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 168.01,
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req4 = Request::builder()
         .method(Method::POST)
@@ -529,6 +536,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 24.0,
         discovery_ratio: 0.00,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req5 = Request::builder()
         .method(Method::POST)
@@ -545,6 +553,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 24.0,
         discovery_ratio: 0.50,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req6 = Request::builder()
         .method(Method::POST)
@@ -561,6 +570,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         freshness_hours: 24.0,
         discovery_ratio: 0.51,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req7 = Request::builder()
         .method(Method::POST)
@@ -601,6 +611,7 @@ async fn test_adversarial_precedence_hierarchy_mixed_query_overrides() {
             news: 1.0,
             culture: 1.0,
         },
+        include_replies: false,
         updated_at_secs: 500,
     };
     prefs_store.set_by_did(&interner, user_did, saved_dials);
@@ -780,6 +791,7 @@ async fn test_adversarial_token_forgery_tampering_and_replay() {
         freshness_hours: 10.0,
         discovery_ratio: 0.20,
         topic_weights: Some(TopicWeights::default()),
+        include_replies: Some(false),
     };
     let req_r2 = Request::builder()
         .method(Method::POST)
