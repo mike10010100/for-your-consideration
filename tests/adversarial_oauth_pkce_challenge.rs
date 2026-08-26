@@ -701,6 +701,7 @@ async fn test_challenge_publish_feed_genuine_record_structure() {
         display_name: "For Your Consideration - Science".to_string(),
         rkey: "fyc-science".to_string(),
         description: "Personalized science & discovery feed powered by FYC".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -885,6 +886,7 @@ async fn test_challenge_100_concurrent_users_full_lifecycle_and_replay_assault()
                         display_name: format!("Feed {user_idx}"),
                         rkey: format!("feed-{user_idx}"),
                         description: format!("Feed description {user_idx}"),
+                        app_password: None,
                     })
                     .unwrap(),
                 ))

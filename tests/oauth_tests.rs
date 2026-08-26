@@ -969,6 +969,7 @@ async fn test_t1_f7_01_publish_feed_with_bearer_token() {
         display_name: "For Your Consideration".to_string(),
         rkey: "for-your-consideration".to_string(),
         description: "Personalized recommendation feed generator".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1000,6 +1001,7 @@ async fn test_t1_f7_02_publish_feed_uri_format() {
         display_name: "My Custom Feed".to_string(),
         rkey: "my-custom-feed".to_string(),
         description: "Curated posts".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1030,6 +1032,7 @@ async fn test_t1_f7_03_publish_feed_share_url_format() {
         display_name: "Discover AI".to_string(),
         rkey: "discover-ai".to_string(),
         description: "AI research feed".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1060,6 +1063,7 @@ async fn test_t1_f7_04_publish_feed_custom_rkey_and_metadata() {
         display_name: "Art & Design".to_string(),
         rkey: "art-and-design-v2".to_string(),
         description: "Visual art from across the network".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1086,6 +1090,7 @@ async fn test_t1_f7_05_publish_feed_unauthorized_rejection() {
         display_name: "Test Feed".to_string(),
         rkey: "test-feed".to_string(),
         description: "Description".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1434,6 +1439,7 @@ async fn test_t2_f2_04_publish_with_expired_jwt_returns_401() {
         display_name: "Feed".to_string(),
         rkey: "feed".to_string(),
         description: "Desc".to_string(),
+        app_password: None,
     };
 
     let req = Request::builder()
@@ -1976,6 +1982,7 @@ async fn test_t3_c3_login_callback_publish_feed_and_verify_record() {
                 display_name: "Carol's Feed".to_string(),
                 rkey: "carols-feed".to_string(),
                 description: "Carol's personal feed".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))
@@ -2217,6 +2224,7 @@ async fn test_t4_s1_first_time_user_journey() {
                 display_name: "For Your Consideration".to_string(),
                 rkey: "for-your-consideration".to_string(),
                 description: "My personalized FYC feed".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))
@@ -2378,6 +2386,7 @@ async fn test_t4_s4_session_expiry_reauth_recovery() {
                 display_name: "Fresh Feed".to_string(),
                 rkey: "fresh-feed".to_string(),
                 description: "Published after reauth".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))
@@ -2506,6 +2515,7 @@ async fn test_t4_s6_self_hosted_pds_custom_domain_integration() {
                 display_name: "Self-Hosted Custom Feed".to_string(),
                 rkey: "self-hosted-feed".to_string(),
                 description: "Published from self-hosted domain".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))
@@ -2537,6 +2547,7 @@ async fn test_admin_did_enforcement_blocks_non_admin_with_403() {
                 display_name: "Unauthorized Feed".to_string(),
                 rkey: "unauthorized-feed".to_string(),
                 description: "Should fail with 403".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))
@@ -2569,6 +2580,7 @@ async fn test_admin_did_enforcement_allows_admin_user() {
                 display_name: "Official Feed".to_string(),
                 rkey: "for-your-consideration".to_string(),
                 description: "Published by verified admin".to_string(),
+                app_password: None,
             })
             .unwrap(),
         ))

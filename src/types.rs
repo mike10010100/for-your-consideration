@@ -1430,7 +1430,7 @@ pub struct OAuthCallbackResponse {
 }
 
 /// Request body for `POST /api/feed/publish`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FeedPublishRequest {
     /// Human-readable display name for the custom feed generator (e.g. "For Your Consideration").
     pub display_name: String,
@@ -1438,6 +1438,33 @@ pub struct FeedPublishRequest {
     pub rkey: String,
     /// Descriptive summary of the custom feed generator algorithm.
     pub description: String,
+    /// Optional Bluesky App Password for authenticating repository write operations on PDS.
+    #[serde(default)]
+    pub app_password: Option<String>,
+}
+
+impl FeedPublishRequest {
+    /// Creates a new [`FeedPublishRequest`] with default `None` app password.
+    #[must_use]
+    pub fn new(
+        display_name: impl Into<String>,
+        rkey: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            display_name: display_name.into(),
+            rkey: rkey.into(),
+            description: description.into(),
+            app_password: None,
+        }
+    }
+
+    /// Sets the optional app password for PDS authentication.
+    #[must_use]
+    pub fn with_app_password(mut self, app_password: impl Into<String>) -> Self {
+        self.app_password = Some(app_password.into());
+        self
+    }
 }
 
 /// Response payload for `POST /api/feed/publish`.
@@ -2033,6 +2060,7 @@ mod tests {
             display_name: "For Your Consideration".to_string(),
             rkey: "for-your-consideration".to_string(),
             description: "Personalized recommendation feed".to_string(),
+            app_password: None,
         };
         let pr_json = serde_json::to_string(&pub_req).unwrap();
         let pr_parsed: FeedPublishRequest = serde_json::from_str(&pr_json).unwrap();
