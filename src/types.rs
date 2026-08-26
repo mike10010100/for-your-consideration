@@ -1044,6 +1044,13 @@ pub struct IngestionVelocityInfo {
     pub eta_seconds: Option<u64>,
     /// Speedup factor relative to real-time (e.g. 45.2x).
     pub speedup_factor: f32,
+    /// Number of active parallel stream slices currently ingesting.
+    #[serde(default = "default_active_streams")]
+    pub active_streams: u64,
+}
+
+const fn default_active_streams() -> u64 {
+    1
 }
 
 impl Default for IngestionVelocityInfo {
@@ -1063,6 +1070,7 @@ impl Default for IngestionVelocityInfo {
             is_live: true,
             eta_seconds: None,
             speedup_factor: 1.0,
+            active_streams: 1,
         }
     }
 }
@@ -1766,6 +1774,7 @@ mod tests {
                 is_live: true,
                 eta_seconds: Some(0),
                 speedup_factor: 35.0,
+                active_streams: 4,
             },
             snapshot: SnapshotStatusInfo {
                 status: "persisted".to_string(),

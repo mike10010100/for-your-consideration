@@ -198,11 +198,52 @@ async fn main() -> Result<()> {
         }
     };
 
+    let parallel_slicing = std::env::var("PARALLEL_SLICING")
+        .or_else(|_| std::env::var("PARALLEL_STREAMS"))
+        .or_else(|_| std::env::var("ENABLE_PARALLEL_SLICING"))
+        .map_or(true, |v| v != "false" && v != "0");
+
+    let jetstream_endpoints: Vec<CompactString> = std::env::var("JETSTREAM_ENDPOINTS").map_or_else(
+        |_| {
+            if std::env::var("JETSTREAM_URL").is_ok() {
+                vec![CompactString::new(&jetstream_url)]
+            } else {
+                DEFAULT_JETSTREAM_ENDPOINTS
+                    .iter()
+                    .map(|&ep| CompactString::new(ep))
+                    .collect()
+            }
+        },
+        |eps| {
+            eps.split(',')
+                .map(|s| CompactString::new(s.trim()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        },
+    );
+
     let ingester_config = IngesterConfig {
         jetstream_url: CompactString::new(&jetstream_url),
+        jetstream_endpoints,
+        parallel_slicing,
         initial_cursor: effective_cursor,
         ..IngesterConfig::default()
     };
+
+    if ingester_config.parallel_slicing && ingester_config.wanted_collections.len() > 1 {
+        info!(
+            endpoints = ?ingester_config.jetstream_endpoints,
+            collections = ?ingester_config.wanted_collections,
+            "Jetstream ingestion configured with parallel multi-stream collection slicing"
+        );
+    } else {
+        info!(
+            url = %ingester_config.jetstream_url,
+            collections = ?ingester_config.wanted_collections,
+            "Jetstream ingestion configured with single-stream fallback"
+        );
+    }
+
     let ingester =
         JetstreamIngester::new(ingester_config, Arc::clone(&interner), Arc::clone(&graph));
     let ingestion_tracker = Arc::new(IngestionTracker::new(Arc::clone(ingester.stats())));

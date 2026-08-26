@@ -271,6 +271,10 @@ impl<'a> ByteSliceReader<'a> {
         self.offset = end;
         Ok(slice)
     }
+
+    const fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.offset)
+    }
 }
 
 /// Atomically saves the interner, graph, and Jetstream cursor to disk with empty user preferences.
@@ -673,7 +677,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 1: Strings
     let string_count = slice_reader.read_u32()? as usize;
-    let mut interned_strings = Vec::with_capacity(string_count);
+    let mut interned_strings = Vec::with_capacity(string_count.min(slice_reader.remaining() / 4));
 
     for _ in 0..string_count {
         let len = slice_reader.read_u32()? as usize;
@@ -686,12 +690,12 @@ pub fn load_snapshot_with_preferences(
 
     // Section 2: User Interactions
     let user_count = slice_reader.read_u32()? as usize;
-    let mut user_interactions = Vec::with_capacity(user_count);
+    let mut user_interactions = Vec::with_capacity(user_count.min(slice_reader.remaining() / 8));
 
     for _ in 0..user_count {
         let uid = slice_reader.read_u32()?;
         let edge_count = slice_reader.read_u32()? as usize;
-        let mut edges = Vec::with_capacity(edge_count);
+        let mut edges = Vec::with_capacity(edge_count.min(slice_reader.remaining() / 8));
         for _ in 0..edge_count {
             let target = slice_reader.read_u32()?;
             let packed = slice_reader.read_u32()?;
@@ -702,12 +706,12 @@ pub fn load_snapshot_with_preferences(
 
     // Section 3: Post Interactions
     let post_count = slice_reader.read_u32()? as usize;
-    let mut post_interactions = Vec::with_capacity(post_count);
+    let mut post_interactions = Vec::with_capacity(post_count.min(slice_reader.remaining() / 8));
 
     for _ in 0..post_count {
         let pid = slice_reader.read_u32()?;
         let edge_count = slice_reader.read_u32()? as usize;
-        let mut edges = Vec::with_capacity(edge_count);
+        let mut edges = Vec::with_capacity(edge_count.min(slice_reader.remaining() / 8));
         for _ in 0..edge_count {
             let target = slice_reader.read_u32()?;
             let packed = slice_reader.read_u32()?;
@@ -718,7 +722,8 @@ pub fn load_snapshot_with_preferences(
 
     // Section 4: Roaring Bitmaps
     let bm_user_count = slice_reader.read_u32()? as usize;
-    let mut user_likes_bitmaps = Vec::with_capacity(bm_user_count);
+    let mut user_likes_bitmaps =
+        Vec::with_capacity(bm_user_count.min(slice_reader.remaining() / 8));
 
     for _ in 0..bm_user_count {
         let uid = slice_reader.read_u32()?;
@@ -732,12 +737,12 @@ pub fn load_snapshot_with_preferences(
 
     // Section 5: Follows
     let follower_count = slice_reader.read_u32()? as usize;
-    let mut follows = Vec::with_capacity(follower_count);
+    let mut follows = Vec::with_capacity(follower_count.min(slice_reader.remaining() / 8));
 
     for _ in 0..follower_count {
         let fid = slice_reader.read_u32()?;
         let count = slice_reader.read_u32()? as usize;
-        let mut list = Vec::with_capacity(count);
+        let mut list = Vec::with_capacity(count.min(slice_reader.remaining() / 4));
         for _ in 0..count {
             list.push(slice_reader.read_u32()?);
         }
@@ -746,7 +751,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 6: Post Metadata
     let meta_count = slice_reader.read_u32()? as usize;
-    let mut post_metadata = Vec::with_capacity(meta_count);
+    let mut post_metadata = Vec::with_capacity(meta_count.min(slice_reader.remaining() / 16));
 
     for _ in 0..meta_count {
         let pid = slice_reader.read_u32()?;
@@ -775,7 +780,8 @@ pub fn load_snapshot_with_preferences(
 
     // Section 7: Active Recent Posts
     let recent_count = slice_reader.read_u32()? as usize;
-    let mut active_recent_posts = Vec::with_capacity(recent_count);
+    let mut active_recent_posts =
+        Vec::with_capacity(recent_count.min(slice_reader.remaining() / 12));
 
     for _ in 0..recent_count {
         let pid = slice_reader.read_u32()?;
@@ -789,7 +795,8 @@ pub fn load_snapshot_with_preferences(
         && slice_reader.offset < payload.len()
     {
         let pref_count = slice_reader.read_u32()? as usize;
-        let mut user_preferences = Vec::with_capacity(pref_count);
+        let mut user_preferences =
+            Vec::with_capacity(pref_count.min(slice_reader.remaining() / 32));
 
         for _ in 0..pref_count {
             let uid = slice_reader.read_u32()?;

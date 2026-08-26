@@ -80,12 +80,14 @@ pub mod prelude {
         GraphStore, DEFAULT_HALF_LIFE_SECS, NUM_SHARDS, SIX_HOURS_SECS,
     };
     pub use crate::ingest::{
-        apply_event_to_graph, build_jetstream_url, build_subscription_url, parse_jetstream_frame,
-        parse_jetstream_json, BackoffManager, BackoffPolicy, CursorTracker, IngestEvent,
-        IngesterConfig, IngestionStats, IngestionStatsSnapshot, IngestionTracker, JetstreamClient,
-        JetstreamConfig, JetstreamEvent, JetstreamIngester, DEFAULT_CHANNEL_CAPACITY,
-        DEFAULT_INACTIVITY_TIMEOUT_SECS, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_JETSTREAM_URL,
-        DEFAULT_MAX_BACKOFF_SECS, DEFAULT_PING_INTERVAL_SECS,
+        apply_event_to_graph, build_jetstream_url, build_subscription_url,
+        is_event_matching_collections, normalize_jetstream_endpoint, parse_jetstream_frame,
+        parse_jetstream_json, run_reader_reconnect_loop, run_slice_reader_reconnect_loop,
+        BackoffManager, BackoffPolicy, CursorTracker, IngestEvent, IngesterConfig, IngestionStats,
+        IngestionStatsSnapshot, IngestionTracker, JetstreamClient, JetstreamConfig, JetstreamEvent,
+        JetstreamIngester, DEFAULT_CHANNEL_CAPACITY, DEFAULT_INACTIVITY_TIMEOUT_SECS,
+        DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_JETSTREAM_ENDPOINTS, DEFAULT_JETSTREAM_URL,
+        DEFAULT_MAX_BACKOFF_SECS, DEFAULT_PING_INTERVAL_SECS, MAX_STREAM_SLICES,
     };
     pub use crate::interner::StringInterner;
     pub use crate::preferences::{shard_idx, UserPreferencesStore, PREFERENCE_SHARDS};

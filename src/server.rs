@@ -1821,7 +1821,11 @@ mod tests {
     async fn test_api_preferences_crud_lifecycle() {
         let state = create_test_state();
         let app = create_xrpc_router(state.clone());
-        let token = crate::auth::generate_session_token("did:plc:prefs_user", 3600);
+        let token = crate::auth::generate_session_token_signed(
+            "did:plc:prefs_user",
+            3600,
+            &state.session_secret,
+        );
 
         // 1. Unauthenticated GET -> 401
         let req_unauth = Request::builder()
@@ -1858,9 +1862,9 @@ mod tests {
             topic_weights: Some(TopicWeights {
                 art: 2.0,
                 tech: 3.0,
-                science: 1.5,
+                science: 1.0,
                 news: 0.5,
-                culture: 1.0,
+                culture: 1.5,
             }),
             include_replies: Some(true),
         };
@@ -1874,29 +1878,28 @@ mod tests {
         let resp_post = app.clone().oneshot(req_post).await.unwrap();
         assert_eq!(resp_post.status(), StatusCode::OK);
 
-        // 4. Authenticated GET (custom) -> 200 is_custom: true
-        let req_get_custom = Request::builder()
+        // 4. Authenticated GET -> 200 returns updated custom dials
+        let req_get_updated = Request::builder()
             .method(Method::GET)
             .uri("/api/preferences")
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
-        let resp_get_custom = app.clone().oneshot(req_get_custom).await.unwrap();
-        assert_eq!(resp_get_custom.status(), StatusCode::OK);
-        let body = resp_get_custom
+        let resp_get_updated = app.clone().oneshot(req_get_updated).await.unwrap();
+        assert_eq!(resp_get_updated.status(), StatusCode::OK);
+        let body_up = resp_get_updated
             .into_body()
             .collect()
             .await
             .unwrap()
             .to_bytes();
-        let prefs_custom: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
-        assert!(prefs_custom.is_custom);
-        assert_eq!(prefs_custom.preferences.freshness_hours, 12.0);
-        assert_eq!(prefs_custom.preferences.discovery_ratio, 0.35);
-        assert_eq!(prefs_custom.preferences.topic_weights.art, 2.0);
-        assert!(prefs_custom.preferences.include_replies);
+        let prefs_up: PreferencesResponseDto = serde_json::from_slice(&body_up).unwrap();
+        assert!(prefs_up.is_custom);
+        assert_eq!(prefs_up.preferences.freshness_hours, 12.0);
+        assert_eq!(prefs_up.preferences.discovery_ratio, 0.35);
+        assert!(prefs_up.preferences.include_replies);
 
-        // 5. Authenticated DELETE -> 200 resets to defaults
+        // 5. DELETE -> 200 resets to default dials
         let req_del = Request::builder()
             .method(Method::DELETE)
             .uri("/api/preferences")
@@ -1906,30 +1909,34 @@ mod tests {
         let resp_del = app.clone().oneshot(req_del).await.unwrap();
         assert_eq!(resp_del.status(), StatusCode::OK);
 
-        // 6. Subsequent GET -> 200 is_custom: false
-        let req_get_after_del = Request::builder()
+        // 6. GET after reset -> is_custom is false again
+        let req_get_after = Request::builder()
             .method(Method::GET)
             .uri("/api/preferences")
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
-        let resp_get_after_del = app.oneshot(req_get_after_del).await.unwrap();
-        assert_eq!(resp_get_after_del.status(), StatusCode::OK);
-        let body = resp_get_after_del
+        let resp_get_after = app.clone().oneshot(req_get_after).await.unwrap();
+        assert_eq!(resp_get_after.status(), StatusCode::OK);
+        let body_after = resp_get_after
             .into_body()
             .collect()
             .await
             .unwrap()
             .to_bytes();
-        let prefs_after: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
+        let prefs_after: PreferencesResponseDto = serde_json::from_slice(&body_after).unwrap();
         assert!(!prefs_after.is_custom);
     }
 
     #[tokio::test]
     async fn test_api_preferences_boundary_validation() {
         let state = create_test_state();
+        let token = crate::auth::generate_session_token_signed(
+            "did:plc:bounds_user",
+            3600,
+            &state.session_secret,
+        );
         let app = create_xrpc_router(state);
-        let token = crate::auth::generate_session_token("did:plc:bounds_user", 3600);
 
         // Freshness too low (<1h) -> 400
         let req_low_freshness = Request::builder()
@@ -2036,7 +2043,7 @@ mod tests {
         std::env::set_var("SESSION_SECRET", "custom-secret-key-12345");
         let state = AppState::new(recommender.clone(), "did:web:test", "test.example.com");
         let expected_hash = Sha256::digest(b"custom-secret-key-12345");
-        assert_eq!(state.session_secret, expected_hash.as_slice());
+        assert_eq!(state.session_secret, expected_hash.as_ref());
 
         // When SESSION_SECRET is empty string
         std::env::set_var("SESSION_SECRET", "   ");

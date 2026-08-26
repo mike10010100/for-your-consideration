@@ -793,12 +793,8 @@ fn test_hmac_session_token_signature_and_payload_tampering_rejection() {
     assert_eq!(parts.len(), 3);
 
     // 1. Tampered signature (flip 1 char)
-    let tampered_sig = format!(
-        "{}.{}.{}",
-        parts[0],
-        parts[1],
-        "A".to_string() + &parts[2][1..]
-    );
+    let flip_char = if parts[2].starts_with('A') { "B" } else { "A" };
+    let tampered_sig = format!("{}.{}.{}{}", parts[0], parts[1], flip_char, &parts[2][1..]);
     assert!(
         validate_session_token_signed(&tampered_sig, secret, now).is_err(),
         "Tampered signature must be rejected"

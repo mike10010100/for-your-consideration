@@ -59,6 +59,17 @@ use crate::types::{IngestionVelocityInfo, SignalType, BLUESKY_EPOCH_SECS};
 /// Default production Jetstream WebSocket endpoint.
 pub const DEFAULT_JETSTREAM_URL: &str = "wss://jetstream1.us-east.bsky.network/subscribe";
 
+/// Default production Jetstream WebSocket endpoints distributed for parallel multi-stream slicing.
+pub const DEFAULT_JETSTREAM_ENDPOINTS: &[&str] = &[
+    "wss://jetstream1.us-east.bsky.network/subscribe",
+    "wss://jetstream2.us-east.bsky.network/subscribe",
+    "wss://jetstream1.us-west.bsky.network/subscribe",
+    "wss://jetstream2.us-west.bsky.network/subscribe",
+];
+
+/// Maximum number of tracked parallel stream slices.
+pub const MAX_STREAM_SLICES: usize = 16;
+
 /// Default capacity for the bounded backpressure event channel (50,000 events).
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 50_000;
 
@@ -79,6 +90,10 @@ pub const DEFAULT_PING_INTERVAL_SECS: u64 = 30;
 pub struct IngesterConfig {
     /// Base WebSocket endpoint URL (e.g. `wss://jetstream1.us-east.bsky.network/subscribe`).
     pub jetstream_url: CompactString,
+    /// List of Jetstream endpoint URLs distributed across parallel collection slices.
+    pub jetstream_endpoints: Vec<CompactString>,
+    /// Whether parallel multi-connection collection slicing is enabled (default: true).
+    pub parallel_slicing: bool,
     /// List of NSID collection filters to subscribe to.
     pub wanted_collections: Vec<CompactString>,
     /// Optional starting cursor timestamp in microseconds (`time_us`).
@@ -102,6 +117,11 @@ impl Default for IngesterConfig {
     fn default() -> Self {
         Self {
             jetstream_url: CompactString::new(DEFAULT_JETSTREAM_URL),
+            jetstream_endpoints: DEFAULT_JETSTREAM_ENDPOINTS
+                .iter()
+                .map(|&ep| CompactString::new(ep))
+                .collect(),
+            parallel_slicing: true,
             wanted_collections: vec![
                 CompactString::new("app.bsky.feed.like"),
                 CompactString::new("app.bsky.feed.repost"),
@@ -122,10 +142,36 @@ impl IngesterConfig {
     /// Creates a new configuration with a custom Jetstream URL and default settings.
     #[must_use]
     pub fn new(jetstream_url: impl Into<CompactString>) -> Self {
+        let url = jetstream_url.into();
         Self {
-            jetstream_url: jetstream_url.into(),
+            jetstream_url: url.clone(),
+            jetstream_endpoints: vec![url],
+            parallel_slicing: false,
             ..Self::default()
         }
+    }
+
+    /// Sets whether parallel multi-connection collection slicing is enabled.
+    #[must_use]
+    pub const fn with_parallel_slicing(mut self, enabled: bool) -> Self {
+        self.parallel_slicing = enabled;
+        self
+    }
+
+    /// Sets the list of Jetstream endpoint URLs for round-robin slice distribution.
+    #[must_use]
+    pub fn with_endpoints(mut self, endpoints: Vec<CompactString>) -> Self {
+        self.jetstream_endpoints = endpoints
+            .into_iter()
+            .map(|ep| CompactString::new(normalize_jetstream_endpoint(ep.as_str())))
+            .collect();
+        self
+    }
+
+    /// Alias for [`with_endpoints`](Self::with_endpoints).
+    #[must_use]
+    pub fn with_jetstream_endpoints(self, endpoints: Vec<CompactString>) -> Self {
+        self.with_endpoints(endpoints)
     }
 
     /// Sets the list of wanted collections to subscribe to.
@@ -222,7 +268,7 @@ pub enum JetstreamEvent {
 pub type IngestEvent = JetstreamEvent;
 
 /// Lock-free atomic runtime metrics and health counters for the ingestion pipeline.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct IngestionStats {
     /// Total raw events / frames received over the WebSocket stream.
     pub events_received: AtomicU64,
@@ -232,7 +278,7 @@ pub struct IngestionStats {
     pub bytes_received: AtomicU64,
     /// Total number of reconnection attempts triggered.
     pub reconnect_count: AtomicU64,
-    /// Highest monotonic Jetstream cursor (`time_us`) processed.
+    /// Monotonic Jetstream cursor watermark (`time_us`) representing the safe low watermark across all active stream slices.
     pub latest_cursor_us: AtomicU64,
     /// Timestamp (unix seconds) of the most recent event or heartbeat.
     pub last_activity_timestamp: AtomicU64,
@@ -242,6 +288,45 @@ pub struct IngestionStats {
     pub backfill_target_cursor_us: AtomicU64,
     /// Real-time wall-clock start timestamp (`time_us`) when ingestion started.
     pub backfill_start_wall_time_us: AtomicU64,
+    /// Number of active parallel stream slices.
+    pub active_slices: AtomicU64,
+    /// Per-slice monotonic cursor timestamps in microseconds (`time_us`).
+    pub slice_cursors: [AtomicU64; MAX_STREAM_SLICES],
+}
+
+impl Default for IngestionStats {
+    fn default() -> Self {
+        Self {
+            events_received: AtomicU64::new(0),
+            events_processed: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            reconnect_count: AtomicU64::new(0),
+            latest_cursor_us: AtomicU64::new(0),
+            last_activity_timestamp: AtomicU64::new(0),
+            initial_cursor_us: AtomicU64::new(0),
+            backfill_target_cursor_us: AtomicU64::new(0),
+            backfill_start_wall_time_us: AtomicU64::new(0),
+            active_slices: AtomicU64::new(1),
+            slice_cursors: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+        }
+    }
 }
 
 impl IngestionStats {
@@ -263,8 +348,60 @@ impl IngestionStats {
             stats
                 .backfill_target_cursor_us
                 .store(now_us, Ordering::Relaxed);
+            for s in &stats.slice_cursors {
+                s.store(cur, Ordering::Relaxed);
+            }
         }
         stats
+    }
+
+    /// Sets the number of active parallel stream slices.
+    pub fn set_slice_count(&self, count: usize) {
+        let bounded = count.clamp(1, MAX_STREAM_SLICES);
+        self.active_slices.store(bounded as u64, Ordering::Relaxed);
+    }
+
+    /// Atomically updates a specific stream slice's cursor timestamp and refreshes the unified safe low watermark.
+    pub fn update_slice_cursor(&self, slice_idx: usize, time_us: u64) {
+        if time_us == 0 {
+            return;
+        }
+        if slice_idx < MAX_STREAM_SLICES {
+            self.slice_cursors[slice_idx].fetch_max(time_us, Ordering::Relaxed);
+        }
+        let count =
+            (self.active_slices.load(Ordering::Relaxed) as usize).clamp(1, MAX_STREAM_SLICES);
+
+        let safe_watermark = if count <= 1 {
+            if slice_idx < MAX_STREAM_SLICES {
+                self.slice_cursors[slice_idx]
+                    .load(Ordering::Relaxed)
+                    .max(time_us)
+            } else {
+                time_us
+            }
+        } else {
+            let mut min_val = u64::MAX;
+            let mut all_started = true;
+            for i in 0..count {
+                let val = self.slice_cursors[i].load(Ordering::Relaxed);
+                if val == 0 {
+                    all_started = false;
+                } else if val < min_val {
+                    min_val = val;
+                }
+            }
+            if !all_started || min_val == u64::MAX {
+                0
+            } else {
+                min_val
+            }
+        };
+
+        if safe_watermark > 0 {
+            self.latest_cursor_us
+                .fetch_max(safe_watermark, Ordering::Relaxed);
+        }
     }
 
     /// Returns a frozen point-in-time snapshot of current ingestion metrics.
@@ -280,6 +417,7 @@ impl IngestionStats {
             initial_cursor_us: self.initial_cursor_us.load(Ordering::Relaxed),
             backfill_target_cursor_us: self.backfill_target_cursor_us.load(Ordering::Relaxed),
             backfill_start_wall_time_us: self.backfill_start_wall_time_us.load(Ordering::Relaxed),
+            active_slices: self.active_slices.load(Ordering::Relaxed),
         }
     }
 }
@@ -305,6 +443,13 @@ pub struct IngestionStatsSnapshot {
     pub backfill_target_cursor_us: u64,
     /// Real-time wall-clock start timestamp (`time_us`) when ingestion started.
     pub backfill_start_wall_time_us: u64,
+    /// Number of active parallel stream slices.
+    #[serde(default = "default_active_slices")]
+    pub active_slices: u64,
+}
+
+const fn default_active_slices() -> u64 {
+    1
 }
 
 /// Thread-safe tracker computing real-time event ingestion velocity and statistics.
@@ -438,6 +583,7 @@ impl IngestionTracker {
             is_live,
             eta_seconds,
             speedup_factor,
+            active_streams: snap.active_slices,
         }
     }
 }
@@ -516,31 +662,105 @@ impl BackoffManager {
     }
 }
 
-/// Lock-free monotonic cursor tracker.
-#[derive(Debug, Default)]
+/// Lock-free monotonic cursor tracker with support for multi-stream slice low-watermarks.
+#[derive(Debug)]
 pub struct CursorTracker {
     latest_time_us: AtomicU64,
+    slice_cursors: [AtomicU64; MAX_STREAM_SLICES],
+    slice_count: AtomicU64,
+}
+
+impl Default for CursorTracker {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl CursorTracker {
     /// Creates a new [`CursorTracker`] with an optional initial timestamp.
     #[must_use]
-    pub const fn new(initial: Option<u64>) -> Self {
-        let val = match initial {
-            Some(v) => v,
-            None => 0,
-        };
+    pub fn new(initial: Option<u64>) -> Self {
+        let val = initial.unwrap_or(0);
+        let slice_cursors = [
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+            AtomicU64::new(val),
+        ];
         Self {
             latest_time_us: AtomicU64::new(val),
+            slice_cursors,
+            slice_count: AtomicU64::new(1),
         }
     }
 
-    /// Updates the cursor if `time_us` is greater than the current recorded value.
-    pub fn update(&self, time_us: u64) {
-        self.latest_time_us.fetch_max(time_us, Ordering::Relaxed);
+    /// Sets the number of active stream slices being tracked.
+    pub fn set_slice_count(&self, count: usize) {
+        let bounded = count.clamp(1, MAX_STREAM_SLICES);
+        self.slice_count.store(bounded as u64, Ordering::Relaxed);
     }
 
-    /// Returns the current cursor timestamp, or `None` if zero.
+    /// Updates the single-stream cursor if `time_us` is greater than the current recorded value.
+    pub fn update(&self, time_us: u64) {
+        self.latest_time_us.fetch_max(time_us, Ordering::Relaxed);
+        self.slice_cursors[0].fetch_max(time_us, Ordering::Relaxed);
+    }
+
+    /// Updates a specific stream slice cursor and recalculates the safe low watermark across all slices.
+    pub fn update_slice(&self, slice_idx: usize, time_us: u64) {
+        if time_us == 0 {
+            return;
+        }
+        if slice_idx < MAX_STREAM_SLICES {
+            self.slice_cursors[slice_idx].fetch_max(time_us, Ordering::Relaxed);
+        }
+        let count = (self.slice_count.load(Ordering::Relaxed) as usize).clamp(1, MAX_STREAM_SLICES);
+
+        let safe_watermark = if count <= 1 {
+            if slice_idx < MAX_STREAM_SLICES {
+                self.slice_cursors[slice_idx]
+                    .load(Ordering::Relaxed)
+                    .max(time_us)
+            } else {
+                time_us
+            }
+        } else {
+            let mut min_val = u64::MAX;
+            let mut all_started = true;
+            for i in 0..count {
+                let val = self.slice_cursors[i].load(Ordering::Relaxed);
+                if val == 0 {
+                    all_started = false;
+                } else if val < min_val {
+                    min_val = val;
+                }
+            }
+            if !all_started || min_val == u64::MAX {
+                0
+            } else {
+                min_val
+            }
+        };
+
+        if safe_watermark > 0 {
+            self.latest_time_us
+                .fetch_max(safe_watermark, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the current safe cursor timestamp, or `None` if zero.
     #[must_use]
     pub fn get(&self) -> Option<u64> {
         let val = self.latest_time_us.load(Ordering::Relaxed);
@@ -551,10 +771,53 @@ impl CursorTracker {
         }
     }
 
-    /// Returns the raw `u64` cursor value.
+    /// Returns the raw `u64` safe cursor value.
     #[must_use]
     pub fn get_raw(&self) -> u64 {
         self.latest_time_us.load(Ordering::Relaxed)
+    }
+
+    /// Returns the recorded cursor timestamp for a specific slice index.
+    #[must_use]
+    pub fn get_slice(&self, slice_idx: usize) -> u64 {
+        if slice_idx < MAX_STREAM_SLICES {
+            self.slice_cursors[slice_idx].load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+}
+
+/// Normalizes an endpoint string into a full WebSocket subscription URL if a bare host is supplied.
+#[must_use]
+pub fn normalize_jetstream_endpoint(endpoint: &str) -> String {
+    let ep = endpoint.trim();
+    if !ep.starts_with("ws://")
+        && !ep.starts_with("wss://")
+        && !ep.starts_with("http://")
+        && !ep.starts_with("https://")
+    {
+        format!("wss://{ep}/subscribe")
+    } else {
+        ep.to_string()
+    }
+}
+
+/// Returns whether a [`JetstreamEvent`] matches any of the given wanted collection NSID filters.
+#[must_use]
+pub fn is_event_matching_collections(event: &JetstreamEvent, wanted: &[CompactString]) -> bool {
+    if wanted.is_empty() {
+        return true;
+    }
+    match event {
+        JetstreamEvent::Interaction { signal, .. } => match signal {
+            SignalType::Like => wanted.iter().any(|w| w == "app.bsky.feed.like"),
+            SignalType::Repost => wanted.iter().any(|w| w == "app.bsky.feed.repost"),
+            SignalType::Quote => wanted.iter().any(|w| w == "app.bsky.feed.post"),
+        },
+        JetstreamEvent::PostMeta { .. } => wanted.iter().any(|w| w == "app.bsky.feed.post"),
+        JetstreamEvent::Follow { .. } => wanted.iter().any(|w| w == "app.bsky.graph.follow"),
+        JetstreamEvent::Delete { collection, .. } => wanted.iter().any(|w| w == collection),
     }
 }
 
@@ -882,6 +1145,13 @@ impl JetstreamIngester {
         graph: Arc<GraphStore>,
     ) -> Self {
         let stats = Arc::new(IngestionStats::new(config.initial_cursor));
+        let slice_count = if config.parallel_slicing && config.wanted_collections.len() > 1 {
+            config.wanted_collections.len()
+        } else {
+            1
+        };
+        stats.set_slice_count(slice_count);
+
         Self {
             config,
             interner,
@@ -929,6 +1199,73 @@ impl JetstreamIngester {
         self.start_pipeline(join_set, cancel_token);
     }
 
+    fn spawn_readers(
+        &self,
+        join_set: &mut JoinSet<Result<()>>,
+        tx: &mpsc::Sender<JetstreamEvent>,
+        cancel_token: &CancellationToken,
+    ) {
+        if self.config.parallel_slicing && self.config.wanted_collections.len() > 1 {
+            let slice_count = self.config.wanted_collections.len().min(MAX_STREAM_SLICES);
+            self.stats.set_slice_count(slice_count);
+
+            for (slice_idx, collection) in self
+                .config
+                .wanted_collections
+                .iter()
+                .take(slice_count)
+                .enumerate()
+            {
+                let endpoint = if self.config.jetstream_endpoints.is_empty() {
+                    self.config.jetstream_url.clone()
+                } else {
+                    self.config.jetstream_endpoints
+                        [slice_idx % self.config.jetstream_endpoints.len()]
+                    .clone()
+                };
+
+                let slice_config = IngesterConfig {
+                    jetstream_url: endpoint.clone(),
+                    jetstream_endpoints: vec![endpoint],
+                    parallel_slicing: false,
+                    wanted_collections: vec![collection.clone()],
+                    initial_cursor: self.config.initial_cursor,
+                    channel_capacity: self.config.channel_capacity,
+                    initial_backoff: self.config.initial_backoff,
+                    max_backoff: self.config.max_backoff,
+                    inactivity_timeout: self.config.inactivity_timeout,
+                    ping_interval: self.config.ping_interval,
+                };
+
+                let tx_slice = tx.clone();
+                let stats_slice = Arc::clone(&self.stats);
+                let cancel_slice = cancel_token.child_token();
+
+                join_set.spawn(async move {
+                    run_slice_reader_reconnect_loop(
+                        slice_idx,
+                        slice_config,
+                        tx_slice,
+                        stats_slice,
+                        cancel_slice,
+                    )
+                    .await
+                });
+            }
+        } else {
+            self.stats.set_slice_count(1);
+            let tx_slice = tx.clone();
+            let stats_slice = Arc::clone(&self.stats);
+            let cancel_slice = cancel_token.child_token();
+            let config = self.config.clone();
+
+            join_set.spawn(async move {
+                run_slice_reader_reconnect_loop(0, config, tx_slice, stats_slice, cancel_slice)
+                    .await
+            });
+        }
+    }
+
     /// Runs the ingester pipeline to completion, listening to `cancel_token` for graceful shutdown.
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
         if cancel_token.is_cancelled() {
@@ -949,14 +1286,9 @@ impl JetstreamIngester {
             Ok(())
         });
 
-        // 2. Spawn reader reconnect loop task
-        let config = self.config.clone();
-        let stats_reader = Arc::clone(&self.stats);
-        let reader_token = cancel_token.child_token();
-
-        join_set.spawn(async move {
-            run_reader_reconnect_loop(config, tx, stats_reader, reader_token).await
-        });
+        // 2. Spawn reader reconnect loop task(s)
+        self.spawn_readers(&mut join_set, &tx, &cancel_token);
+        drop(tx); // Drop master sender so consumer terminates when all readers exit
 
         // 3. Await tasks
         while let Some(join_res) = join_set.join_next().await {
@@ -981,7 +1313,33 @@ impl JetstreamIngester {
         tx: mpsc::Sender<JetstreamEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        run_reader_reconnect_loop(self.config.clone(), tx, Arc::clone(&self.stats), cancel).await
+        if self.config.parallel_slicing && self.config.wanted_collections.len() > 1 {
+            let mut join_set = JoinSet::new();
+            self.spawn_readers(&mut join_set, &tx, &cancel);
+            drop(tx);
+            while let Some(join_res) = join_set.join_next().await {
+                match join_res {
+                    Ok(task_res) => task_res?,
+                    Err(join_err) => {
+                        if !join_err.is_cancelled() {
+                            return Err(FeedError::Ingest(format!(
+                                "Ingestion reader task failed: {join_err}"
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            run_slice_reader_reconnect_loop(
+                0,
+                self.config.clone(),
+                tx,
+                Arc::clone(&self.stats),
+                cancel,
+            )
+            .await
+        }
     }
 
     /// Runs the consumer worker loop draining [`JetstreamEvent`]s into [`GraphStore`].
@@ -1031,9 +1389,26 @@ async fn run_consumer_worker(
     debug!("Ingestion channel drained and closed successfully.");
 }
 
-/// Internal loop for the WebSocket reader with reconnect backoff and watchdog.
+#[derive(Deserialize)]
+struct RawJetstreamTimeOnly {
+    #[serde(default)]
+    time_us: u64,
+}
+
+/// Internal loop for a single WebSocket reader with reconnect backoff and watchdog.
+pub async fn run_reader_reconnect_loop(
+    config: IngesterConfig,
+    tx: mpsc::Sender<JetstreamEvent>,
+    stats: Arc<IngestionStats>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    run_slice_reader_reconnect_loop(0, config, tx, stats, cancel).await
+}
+
+/// Internal loop for a single slice WebSocket reader with reconnect backoff and watchdog.
 #[allow(clippy::too_many_lines)]
-async fn run_reader_reconnect_loop(
+pub async fn run_slice_reader_reconnect_loop(
+    slice_idx: usize,
     config: IngesterConfig,
     tx: mpsc::Sender<JetstreamEvent>,
     stats: Arc<IngestionStats>,
@@ -1042,11 +1417,21 @@ async fn run_reader_reconnect_loop(
     let mut backoff = BackoffManager::new(config.initial_backoff, config.max_backoff);
 
     while !cancel.is_cancelled() {
-        let cursor_val = stats.latest_cursor_us.load(Ordering::Relaxed);
-        let cursor_opt = if cursor_val > 0 {
-            Some(cursor_val)
+        let slice_cursor = if slice_idx < MAX_STREAM_SLICES {
+            stats.slice_cursors[slice_idx].load(Ordering::Relaxed)
         } else {
-            None
+            stats.latest_cursor_us.load(Ordering::Relaxed)
+        };
+
+        let cursor_opt = if slice_cursor > 0 {
+            Some(slice_cursor)
+        } else {
+            let init = stats.initial_cursor_us.load(Ordering::Relaxed);
+            if init > 0 {
+                Some(init)
+            } else {
+                None
+            }
         };
 
         let url = build_subscription_url(
@@ -1055,12 +1440,15 @@ async fn run_reader_reconnect_loop(
             cursor_opt,
         );
 
-        debug!("Connecting to Jetstream WebSocket: {url}");
+        debug!(
+            slice_idx = slice_idx,
+            "Connecting to Jetstream WebSocket: {url}"
+        );
 
         let connect_fut = tokio_tungstenite::connect_async(&url);
         let (mut ws_stream, _) = tokio::select! {
             () = cancel.cancelled() => {
-                debug!("Ingestion reader cancelled during connect.");
+                debug!(slice_idx = slice_idx, "Ingestion reader cancelled during connect.");
                 break;
             }
             res = connect_fut => {
@@ -1069,7 +1457,7 @@ async fn run_reader_reconnect_loop(
                     Err(err) => {
                         stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
                         let delay = backoff.next_backoff();
-                        warn!("Jetstream connection to {url} failed: {err}. Retrying in {delay:?}");
+                        warn!(slice_idx = slice_idx, "Jetstream connection to {url} failed: {err}. Retrying in {delay:?}");
                         tokio::select! {
                             () = cancel.cancelled() => break,
                             () = tokio::time::sleep(delay) => continue,
@@ -1079,7 +1467,10 @@ async fn run_reader_reconnect_loop(
             }
         };
 
-        info!("Connected to Jetstream WebSocket: {url}");
+        info!(
+            slice_idx = slice_idx,
+            "Connected to Jetstream WebSocket: {url}"
+        );
         let mut last_activity = Instant::now();
         let mut ping_interval = config
             .ping_interval
@@ -1091,7 +1482,7 @@ async fn run_reader_reconnect_loop(
 
             tokio::select! {
                 () = cancel.cancelled() => {
-                    info!("Reader received cancellation signal, cleanly closing WebSocket.");
+                    info!(slice_idx = slice_idx, "Reader received cancellation signal, cleanly closing WebSocket.");
                     let _ = ws_stream.close(Some(CloseFrame {
                         code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
                         reason: "Graceful shutdown".into(),
@@ -1100,7 +1491,7 @@ async fn run_reader_reconnect_loop(
                 }
                 () = sleep_watchdog => {
                     stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
-                    warn!("Jetstream inactivity timeout ({timeout_duration:?}) elapsed without frames. Reconnecting.");
+                    warn!(slice_idx = slice_idx, "Jetstream inactivity timeout ({timeout_duration:?}) elapsed without frames. Reconnecting.");
                     let _ = ws_stream.close(None).await;
                     break;
                 }
@@ -1111,9 +1502,9 @@ async fn run_reader_reconnect_loop(
                         futures_util::future::pending().await
                     }
                 } => {
-                    trace!("Sending keepalive WebSocket ping.");
+                    trace!(slice_idx = slice_idx, "Sending keepalive WebSocket ping.");
                     if ws_stream.send(Message::Ping(Vec::new())).await.is_err() {
-                        warn!("Failed to send keepalive ping, reconnecting.");
+                        warn!(slice_idx = slice_idx, "Failed to send keepalive ping, reconnecting.");
                         break;
                     }
                 }
@@ -1133,30 +1524,39 @@ async fn run_reader_reconnect_loop(
 
                                     if let Some((events, time_us)) = parse_jetstream_frame(&text) {
                                         if time_us > 0 {
-                                            stats.latest_cursor_us.fetch_max(time_us, Ordering::Relaxed);
+                                            stats.update_slice_cursor(slice_idx, time_us);
                                         }
 
                                         for event in events {
+                                            if !config.wanted_collections.is_empty() && !is_event_matching_collections(&event, &config.wanted_collections) {
+                                                continue;
+                                            }
+
                                             if tx.send(event).await.is_err() {
-                                                info!("Consumer channel closed, terminating reader.");
+                                                info!(slice_idx = slice_idx, "Consumer channel closed, terminating reader.");
                                                 return Ok(());
                                             }
                                         }
 
                                         // Valid frame received: reset exponential backoff
                                         backoff.reset();
+                                    } else if let Ok(raw) = serde_json::from_str::<RawJetstreamTimeOnly>(&text) {
+                                        if raw.time_us > 0 {
+                                            stats.update_slice_cursor(slice_idx, raw.time_us);
+                                            backoff.reset();
+                                        }
                                     }
                                 }
                                 Message::Ping(data) => {
-                                    trace!("Received WebSocket Ping, replying with Pong.");
+                                    trace!(slice_idx = slice_idx, "Received WebSocket Ping, replying with Pong.");
                                     let _ = ws_stream.send(Message::Pong(data)).await;
                                 }
                                 Message::Pong(_) => {
-                                    trace!("Received WebSocket Pong.");
+                                    trace!(slice_idx = slice_idx, "Received WebSocket Pong.");
                                 }
                                 Message::Close(close_frame) => {
                                     stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
-                                    warn!("Jetstream server sent Close frame: {close_frame:?}. Reconnecting.");
+                                    warn!(slice_idx = slice_idx, "Jetstream server sent Close frame: {close_frame:?}. Reconnecting.");
                                     break;
                                 }
                                 Message::Binary(bin) => {
@@ -1167,12 +1567,12 @@ async fn run_reader_reconnect_loop(
                         }
                         Some(Err(err)) => {
                             stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
-                            warn!("WebSocket stream error: {err}. Reconnecting.");
+                            warn!(slice_idx = slice_idx, "WebSocket stream error: {err}. Reconnecting.");
                             break;
                         }
                         None => {
                             stats.reconnect_count.fetch_add(1, Ordering::Relaxed);
-                            warn!("WebSocket stream closed by remote host. Reconnecting.");
+                            warn!(slice_idx = slice_idx, "WebSocket stream closed by remote host. Reconnecting.");
                             break;
                         }
                     }
@@ -1657,6 +2057,66 @@ mod tests {
             let _ = self.event_tx.send(payload.to_string()).await;
         }
 
+        async fn send_repost(&self, user_did: &str, post_uri: &str, time_us: u64) {
+            let payload = serde_json::json!({
+                "did": user_did,
+                "time_us": time_us,
+                "kind": "commit",
+                "commit": {
+                    "collection": "app.bsky.feed.repost",
+                    "rkey": "3krepost123",
+                    "operation": "create",
+                    "record": {
+                        "$type": "app.bsky.feed.repost",
+                        "subject": {
+                            "uri": post_uri,
+                            "cid": "bafyreirepost..."
+                        },
+                        "createdAt": "2026-08-21T18:00:00Z"
+                    }
+                }
+            });
+            let _ = self.event_tx.send(payload.to_string()).await;
+        }
+
+        async fn send_post(&self, author_did: &str, rkey: &str, time_us: u64) {
+            let payload = serde_json::json!({
+                "did": author_did,
+                "time_us": time_us,
+                "kind": "commit",
+                "commit": {
+                    "collection": "app.bsky.feed.post",
+                    "rkey": rkey,
+                    "operation": "create",
+                    "record": {
+                        "$type": "app.bsky.feed.post",
+                        "text": "Hello bluesky firehose parallel slicing!",
+                        "createdAt": "2026-08-21T18:00:00Z"
+                    }
+                }
+            });
+            let _ = self.event_tx.send(payload.to_string()).await;
+        }
+
+        async fn send_follow(&self, follower_did: &str, subject_did: &str, time_us: u64) {
+            let payload = serde_json::json!({
+                "did": follower_did,
+                "time_us": time_us,
+                "kind": "commit",
+                "commit": {
+                    "collection": "app.bsky.graph.follow",
+                    "rkey": "3kfollow123",
+                    "operation": "create",
+                    "record": {
+                        "$type": "app.bsky.graph.follow",
+                        "subject": subject_did,
+                        "createdAt": "2026-08-21T18:00:00Z"
+                    }
+                }
+            });
+            let _ = self.event_tx.send(payload.to_string()).await;
+        }
+
         fn shutdown(&self) {
             let _ = self.shutdown_tx.send(true);
         }
@@ -1706,6 +2166,192 @@ mod tests {
         assert_eq!(stats.latest_cursor_us, 1_700_000_000_000_000);
 
         server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_parallel_multi_stream_slicing_with_mock_endpoints() {
+        let server0 = TestMockJetstreamServer::start().await; // like
+        let server1 = TestMockJetstreamServer::start().await; // repost
+        let server2 = TestMockJetstreamServer::start().await; // post
+        let server3 = TestMockJetstreamServer::start().await; // follow
+
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+
+        let endpoints = vec![
+            CompactString::new(server0.ws_url()),
+            CompactString::new(server1.ws_url()),
+            CompactString::new(server2.ws_url()),
+            CompactString::new(server3.ws_url()),
+        ];
+
+        let config = IngesterConfig::default()
+            .with_endpoints(endpoints)
+            .with_parallel_slicing(true)
+            .with_initial_cursor(Some(1_700_000_000_000_000))
+            .with_channel_capacity(100)
+            .with_inactivity_timeout(Duration::from_secs(10));
+
+        let ingester = JetstreamIngester::new(config, Arc::clone(&interner), Arc::clone(&graph));
+        let cancel = CancellationToken::new();
+
+        let mut join_set = JoinSet::new();
+        ingester.start_pipeline(&mut join_set, cancel.clone());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send an event from each dedicated collection endpoint
+        server0
+            .send_like(
+                "did:plc:alice",
+                "at://did:plc:target/app.bsky.feed.post/p1",
+                1_700_000_000_100_000,
+            )
+            .await;
+        server1
+            .send_repost(
+                "did:plc:bob",
+                "at://did:plc:target/app.bsky.feed.post/p2",
+                1_700_000_000_150_000,
+            )
+            .await;
+        server2
+            .send_post("did:plc:charlie", "p3", 1_700_000_000_120_000)
+            .await;
+        server3
+            .send_follow("did:plc:dan", "did:plc:elena", 1_700_000_000_110_000)
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        cancel.cancel();
+
+        while let Some(res) = join_set.join_next().await {
+            assert!(res.unwrap().is_ok());
+        }
+
+        // Verify all 4 types of events were processed into graph
+        let alice_id = interner.lookup_id("did:plc:alice").unwrap();
+        let bob_id = interner.lookup_id("did:plc:bob").unwrap();
+        let charlie_id = interner.lookup_id("did:plc:charlie").unwrap();
+        let dan_id = interner.lookup_id("did:plc:dan").unwrap();
+        let elena_id = interner.lookup_id("did:plc:elena").unwrap();
+
+        assert_eq!(graph.get_user_interactions(alice_id).len(), 1);
+        assert_eq!(graph.get_user_interactions(bob_id).len(), 1);
+        let p3_id = interner
+            .lookup_id("at://did:plc:charlie/app.bsky.feed.post/p3")
+            .unwrap();
+        assert_eq!(graph.get_post_meta(p3_id).unwrap().author_id, charlie_id);
+        assert_eq!(graph.get_user_follows(dan_id), vec![elena_id]);
+
+        let stats = ingester.stats_snapshot();
+        assert_eq!(stats.active_slices, 4);
+        assert!(stats.events_received >= 4);
+        assert!(stats.events_processed >= 4);
+        // Unified low watermark should be min across all 4 slices (1_700_000_000_100_000)
+        assert_eq!(stats.latest_cursor_us, 1_700_000_000_100_000);
+
+        server0.shutdown();
+        server1.shutdown();
+        server2.shutdown();
+        server3.shutdown();
+    }
+
+    #[test]
+    fn test_multi_stream_cursor_tracker_watermarking() {
+        let tracker = CursorTracker::new(Some(1000));
+        tracker.set_slice_count(4);
+
+        assert_eq!(tracker.get(), Some(1000));
+
+        // Advance slice 0 to 1100 -> min across all 4 is still 1000
+        tracker.update_slice(0, 1100);
+        assert_eq!(tracker.get(), Some(1000));
+        assert_eq!(tracker.get_slice(0), 1100);
+
+        // Advance slice 1 to 1080 -> min is still 1000
+        tracker.update_slice(1, 1080);
+        assert_eq!(tracker.get(), Some(1000));
+
+        // Advance slice 2 to 1050 -> min is still 1000
+        tracker.update_slice(2, 1050);
+        assert_eq!(tracker.get(), Some(1000));
+
+        // Advance slice 3 to 1040 -> min across 0..4 is now 1040!
+        tracker.update_slice(3, 1040);
+        assert_eq!(tracker.get(), Some(1040));
+
+        // Out of order update on slice 3 (1020) should not regress
+        tracker.update_slice(3, 1020);
+        assert_eq!(tracker.get(), Some(1040));
+
+        // Advance slice 3 to 1090 -> min is now 1050 (slice 2)
+        tracker.update_slice(3, 1090);
+        assert_eq!(tracker.get(), Some(1050));
+    }
+
+    #[test]
+    fn test_multi_stream_stats_low_watermark() {
+        let stats = IngestionStats::new(Some(5000));
+        stats.set_slice_count(3);
+
+        assert_eq!(stats.latest_cursor_us.load(Ordering::Relaxed), 5000);
+
+        stats.update_slice_cursor(0, 6000);
+        assert_eq!(stats.latest_cursor_us.load(Ordering::Relaxed), 5000);
+
+        stats.update_slice_cursor(1, 5500);
+        assert_eq!(stats.latest_cursor_us.load(Ordering::Relaxed), 5000);
+
+        stats.update_slice_cursor(2, 5200);
+        assert_eq!(stats.latest_cursor_us.load(Ordering::Relaxed), 5200);
+
+        stats.update_slice_cursor(2, 5800);
+        assert_eq!(stats.latest_cursor_us.load(Ordering::Relaxed), 5500);
+    }
+
+    #[test]
+    fn test_normalize_endpoint_variations() {
+        assert_eq!(
+            normalize_jetstream_endpoint("jetstream1.us-east.bsky.network"),
+            "wss://jetstream1.us-east.bsky.network/subscribe"
+        );
+        assert_eq!(
+            normalize_jetstream_endpoint("wss://custom.jetstream.io/subscribe"),
+            "wss://custom.jetstream.io/subscribe"
+        );
+        assert_eq!(
+            normalize_jetstream_endpoint("ws://127.0.0.1:8080/events"),
+            "ws://127.0.0.1:8080/events"
+        );
+    }
+
+    #[test]
+    fn test_is_event_matching_collections_filter() {
+        let like_event = JetstreamEvent::Interaction {
+            user_did: CompactString::new("did:plc:a"),
+            post_uri: CompactString::new("at://did:plc:b/app.bsky.feed.post/1"),
+            signal: SignalType::Like,
+            timestamp_secs: 1000,
+        };
+        let repost_event = JetstreamEvent::Interaction {
+            user_did: CompactString::new("did:plc:a"),
+            post_uri: CompactString::new("at://did:plc:b/app.bsky.feed.post/1"),
+            signal: SignalType::Repost,
+            timestamp_secs: 1000,
+        };
+        let follow_event = JetstreamEvent::Follow {
+            follower_did: CompactString::new("did:plc:a"),
+            subject_did: CompactString::new("did:plc:b"),
+        };
+
+        let like_only = vec![CompactString::new("app.bsky.feed.like")];
+        let follow_only = vec![CompactString::new("app.bsky.graph.follow")];
+
+        assert!(is_event_matching_collections(&like_event, &like_only));
+        assert!(!is_event_matching_collections(&repost_event, &like_only));
+        assert!(is_event_matching_collections(&follow_event, &follow_only));
+        assert!(!is_event_matching_collections(&like_event, &follow_only));
     }
 
     #[test]
