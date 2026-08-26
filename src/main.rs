@@ -205,7 +205,57 @@ async fn main() -> Result<()> {
         JetstreamIngester::new(ingester_config, Arc::clone(&interner), Arc::clone(&graph));
     let ingestion_tracker = Arc::new(IngestionTracker::new(Arc::clone(ingester.stats())));
 
+    // Resolve optional administrator identity (ADMIN_DID or ADMIN_HANDLE)
+    let admin_did = if let Ok(did) = std::env::var("ADMIN_DID") {
+        let trimmed = did.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(CompactString::new(trimmed))
+        }
+    } else if let Ok(handle) = std::env::var("ADMIN_HANDLE") {
+        let trimmed = handle.trim().trim_start_matches('@');
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.starts_with("did:") {
+            Some(CompactString::new(trimmed))
+        } else if trimmed == "mike10010100.com" {
+            Some(CompactString::new("did:plc:mmtjkssv6jeneahkgfdxuy7p"))
+        } else {
+            match resolve_identity_pds(trimmed).await {
+                Ok(identity) => {
+                    info!(
+                        handle = %trimmed,
+                        did = %identity.did,
+                        "Resolved admin handle to DID"
+                    );
+                    Some(identity.did)
+                }
+                Err(e) => {
+                    warn!(
+                        handle = %trimmed,
+                        error = %e,
+                        "Failed to resolve ADMIN_HANDLE to DID; continuing without admin restriction"
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref did) = admin_did {
+        info!(admin_did = %did, "Feed generator publishing locked to administrator DID");
+    }
+
     let feed_rkey = std::env::var("FEED_RKEY").unwrap_or_else(|_| DEFAULT_FEED_RKEY.to_string());
+
+    if std::env::var("SESSION_SECRET").is_ok() {
+        info!("Custom HMAC session signing secret loaded from environment");
+    } else {
+        warn!("SESSION_SECRET not set; using default HMAC session key (set SESSION_SECRET in production)");
+    }
 
     // 5. Initialize Axum XRPC server with trackers
     let app_state = AppState::new(
@@ -215,9 +265,11 @@ async fn main() -> Result<()> {
     )
     .with_preferences_store(Arc::clone(&preferences_store))
     .with_feed_rkey(CompactString::new(&feed_rkey))
+    .with_admin_did(admin_did)
     .with_snapshot_tracker(Arc::clone(&snapshot_tracker))
     .with_ingestion_tracker(Arc::clone(&ingestion_tracker));
 
+    let snapshot_oauth_store = Arc::clone(&app_state.oauth_store);
     let router = create_xrpc_router(app_state);
     let listener = TcpListener::bind(bind_addr).await.map_err(FeedError::Io)?;
     info!("XRPC HTTP server bound to http://{bind_addr}");
@@ -248,10 +300,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Spawn Periodic Snapshot Checkpoint task
+    // Spawn Periodic Snapshot Checkpoint and Store Pruning task
     let snapshot_interner = Arc::clone(&interner);
     let snapshot_graph = Arc::clone(&graph);
     let snapshot_preferences = Arc::clone(&preferences_store);
+    let snapshot_impression_store = Arc::clone(&recommender.impression_store);
     let snapshot_cancel = cancel_token.clone();
     let snapshot_path = snapshot_config.path.clone();
     let snapshot_interval = Duration::from_secs(snapshot_config.interval_secs);
@@ -268,7 +321,7 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
-                    // Periodic memory bounding: Prune edges older than retention window (default: 30 days)
+                    // Periodic memory bounding: Prune stores (SEC-06)
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -279,6 +332,11 @@ async fn main() -> Result<()> {
                         .unwrap_or(30);
                     let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
                     snapshot_graph.prune_older_than(prune_cutoff);
+                    snapshot_impression_store.prune_expired(now_secs);
+                    snapshot_oauth_store.prune_expired(
+                        for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
+                        now_secs,
+                    );
 
                     tracing::debug!("Triggering periodic snapshot checkpoint");
                     let current_cursor = snapshot_ingester_stats.latest_cursor_us.load(std::sync::atomic::Ordering::Relaxed);

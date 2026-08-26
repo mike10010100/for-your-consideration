@@ -753,6 +753,8 @@ elements.statMemoryInterner.textContent = formatBytes(data.memory.interner_bytes
 if (data.uptime_seconds !== undefined) {
 elements.uptimeDisplay.textContent = `Uptime: ${formatUptime(data.uptime_seconds)}`;
 }
+state.adminDid = data.admin_did || null;
+updatePublishButtonVisibility();
 } catch (err) {
 console.warn('Telemetry polling error:', err);
 }
@@ -1535,6 +1537,27 @@ resetDials();
 await syncAuthState();
 showPreferencesToast('Signed out. Reset dials to balanced defaults.');
 }
+function updatePublishButtonVisibility() {
+const btn = document.getElementById('btn-open-publish-modal');
+if (!btn) return;
+const session = getAuthSession();
+if (!state.adminDid) {
+btn.style.display = 'inline-flex';
+btn.title = 'Publish this feed generator to your Bluesky account';
+return;
+}
+const isAdmin = session && (
+session.did === state.adminDid ||
+session.handle === state.adminDid ||
+(state.adminDid === 'did:plc:mmtjkssv6jeneahkgfdxuy7p' && (session.handle === 'mike10010100.com' || session.did === 'did:plc:mmtjkssv6jeneahkgfdxuy7p'))
+);
+if (isAdmin) {
+btn.style.display = 'inline-flex';
+btn.title = 'Administrator: Publish or update official feed generator';
+} else {
+btn.style.display = 'none';
+}
+}
 async function syncAuthState() {
 const session = getAuthSession();
 if (session) {
@@ -1549,6 +1572,7 @@ elements.authUserAvatar.textContent = initial;
 if (elements.dialViewerInput) {
 elements.dialViewerInput.value = session.handle || session.did;
 }
+updatePublishButtonVisibility();
 await loadSavedPreferences(session.token);
 } else {
 if (elements.btnOpenLoginModal) elements.btnOpenLoginModal.style.display = 'inline-flex';
@@ -1559,6 +1583,7 @@ elements.preferencesStatus.style.color = 'var(--text-muted)';
 elements.preferencesStatus.style.borderColor = 'var(--border-light)';
 }
 if (elements.saveStatus) elements.saveStatus.textContent = 'Defaults Active';
+updatePublishButtonVisibility();
 fetchFeedPreview();
 }
 }

@@ -845,36 +845,17 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
         JetstreamEvent::Delete {
             did,
             collection,
-            rkey: _,
+            rkey,
         } => {
+            // In ATProto Jetstream, record deletions carry the record rkey but omit the target subject URI.
+            // Avoid deleting arbitrary first interactions to prevent graph state drift (SEC-05).
             if let Some(uid) = interner.lookup_id(did) {
-                match collection.as_str() {
-                    "app.bsky.feed.like" => {
-                        let edges = graph.get_user_interactions(uid);
-                        for edge in edges {
-                            if edge.signal() == SignalType::Like {
-                                graph.remove_interaction(uid, edge.target(), SignalType::Like);
-                                break;
-                            }
-                        }
-                    }
-                    "app.bsky.feed.repost" => {
-                        let edges = graph.get_user_interactions(uid);
-                        for edge in edges {
-                            if edge.signal() == SignalType::Repost {
-                                graph.remove_interaction(uid, edge.target(), SignalType::Repost);
-                                break;
-                            }
-                        }
-                    }
-                    "app.bsky.graph.follow" => {
-                        let follows = graph.get_user_follows(uid);
-                        if let Some(&target) = follows.first() {
-                            graph.remove_follow(uid, target);
-                        }
-                    }
-                    _ => {}
-                }
+                tracing::trace!(
+                    user_id = uid,
+                    collection = %collection,
+                    rkey = %rkey,
+                    "Jetstream delete event recorded"
+                );
             }
         }
     }
@@ -1573,14 +1554,15 @@ mod tests {
             .unwrap();
         assert!(graph.get_post_meta(p2_id).unwrap().is_root());
 
-        // 4. Delete like
+        // 4. Delete like (blind delete with record rkey preserves graph integrity)
         let delete_like = JetstreamEvent::Delete {
             did: CompactString::new("did:plc:alice"),
             collection: CompactString::new("app.bsky.feed.like"),
             rkey: CompactString::new("3k123"),
         };
         apply_event_to_graph(&delete_like, &interner, &graph);
-        assert!(graph.get_user_interactions(uid).is_empty());
+        // User interaction is safely retained rather than corrupted by arbitrary edge deletion
+        assert_eq!(graph.get_user_interactions(uid).len(), 1);
     }
 
     struct TestMockJetstreamServer {

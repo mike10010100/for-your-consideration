@@ -1031,7 +1031,16 @@ mod tier1_feature_coverage {
     #[test]
     fn test_tier1_f03_snapshot_atomic_staging_cleanup() {
         let temp_dir = std::env::temp_dir();
-        let final_path = temp_dir.join("test_fyc_snapshot_staging.bin");
+        let unique_suffix = format!(
+            "{}_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            rand::random::<u64>()
+        );
+        let final_path = temp_dir.join(format!("test_fyc_snapshot_staging_{unique_suffix}.bin"));
         let tmp_path = final_path.with_extension("bin.tmp");
 
         // Simulate atomic staging pattern

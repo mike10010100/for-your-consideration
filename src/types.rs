@@ -1114,6 +1114,9 @@ pub struct TelemetryResponse {
     pub snapshot: SnapshotStatusInfo,
     /// Sliding LRU impression anti-fatigue memory stats.
     pub impression_store: ImpressionTelemetryInfo,
+    /// Optional administrator DID authorized to publish the official feed generator.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub admin_did: Option<String>,
 }
 
 /// Query parameters for `GET /api/taste-twins`.
@@ -1308,11 +1311,11 @@ impl OAuthClientMetadata {
 
         let client_uri = format!("{scheme}://{clean_host}").into();
 
-        let redirect_uris = vec![
-            format!("{scheme}://{clean_host}/oauth/callback").into(),
-            "http://127.0.0.1:3000/oauth/callback".into(),
-            "http://localhost:3000/oauth/callback".into(),
-        ];
+        let redirect_uris = if is_localhost {
+            vec![CompactString::new("http://127.0.0.1:3000/oauth/callback")]
+        } else {
+            vec![format!("{scheme}://{clean_host}/oauth/callback").into()]
+        };
 
         Self {
             client_id,
@@ -1327,7 +1330,7 @@ impl OAuthClientMetadata {
             scope: CompactString::new("atproto transition:generic"),
             token_endpoint_auth_method: CompactString::new("none"),
             application_type: CompactString::new("web"),
-            dpop_bound_access_tokens: false,
+            dpop_bound_access_tokens: true,
         }
     }
 }
@@ -1706,6 +1709,7 @@ mod tests {
                 hard_suppression_window_secs: 1800,
                 fatigue_decay_window_secs: 21600,
             },
+            admin_did: Some("did:plc:admin".to_string()),
         };
 
         let json = serde_json::to_string(&telemetry).unwrap();
@@ -1922,7 +1926,7 @@ mod tests {
         );
         assert_eq!(meta.application_type, "web");
         assert_eq!(meta.token_endpoint_auth_method, "none");
-        assert!(!meta.dpop_bound_access_tokens);
+        assert!(meta.dpop_bound_access_tokens);
 
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: OAuthClientMetadata = serde_json::from_str(&json).unwrap();

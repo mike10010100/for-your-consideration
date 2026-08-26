@@ -64,13 +64,14 @@ pub mod types;
 /// Convenient prelude re-exporting core data structures, algorithms, and graph primitives.
 pub mod prelude {
     pub use crate::auth::{
-        authenticate_pds_session, exchange_oauth_code, extract_session_did_from_headers,
-        extract_viewer_did, extract_viewer_did_from_headers, generate_pkce_pair,
-        generate_session_token, is_valid_did, parse_jwt_payload_unverified,
-        publish_feed_generator_record, resolve_identity_pds, validate_service_jwt,
-        validate_session_token, verify_pkce_challenge, OAuthSessionState, OAuthStateStore,
-        PkceChallengePair, ResolvedPdsIdentity, ServiceJwtPayload, DEFAULT_OAUTH_STATE_TTL_SECS,
-        OAUTH_STATE_SHARDS,
+        authenticate_pds_session, build_secure_http_client, exchange_oauth_code,
+        extract_session_did_from_headers, extract_viewer_did, extract_viewer_did_from_headers,
+        generate_pkce_pair, generate_session_token, is_restricted_ip, is_valid_did,
+        parse_jwt_payload_unverified, percent_encode_query_param, publish_feed_generator_record,
+        resolve_identity_pds, validate_outbound_url, validate_outbound_url_async,
+        validate_service_jwt, validate_session_token, verify_pkce_challenge, OAuthSessionState,
+        OAuthStateStore, PkceChallengePair, ResolvedPdsIdentity, ServiceJwtPayload,
+        DEFAULT_OAUTH_STATE_TTL_SECS, OAUTH_STATE_SHARDS,
     };
     pub use crate::error::{FeedError, Result};
     pub use crate::graph::{

@@ -281,7 +281,7 @@ impl ImpressionStore {
         self.shards.iter().map(|s| s.read().viewers.len()).sum()
     }
 
-    /// Prunes expired impressions older than 6 hours across all shards.
+    /// Prunes expired impressions older than 6 hours across all shards and clears empty viewers.
     pub fn prune_expired(&self, now_secs: u64) {
         let cutoff = now_secs.saturating_sub(FATIGUE_WINDOW_SECS);
         for shard in &self.shards {
@@ -289,6 +289,7 @@ impl ImpressionStore {
             for history in guard.viewers.values_mut() {
                 history.prune_older_than(cutoff);
             }
+            guard.viewers.retain(|_, history| !history.is_empty());
         }
     }
 
@@ -1292,11 +1293,23 @@ impl Recommender {
         let user_interactions = self.graph.get_user_interactions(viewer_id);
         let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
 
+        // Limit seed posts to most recent 50 interactions to bound combinatorial fan-out (SEC-07)
+        let seed_edges = if user_interactions.len() > 50 {
+            &user_interactions[user_interactions.len() - 50..]
+        } else {
+            &user_interactions[..]
+        };
+
         // Step 1 & 2: Viewer -> Seed Posts -> Co-interactors
-        for edge in &user_interactions {
+        for edge in seed_edges {
             let post_id = edge.target();
             let post_interactions = self.graph.get_post_interactions(post_id);
-            for p_edge in post_interactions {
+            let p_edges_slice = if post_interactions.len() > 500 {
+                &post_interactions[post_interactions.len() - 500..]
+            } else {
+                &post_interactions[..]
+            };
+            for p_edge in p_edges_slice {
                 let co_user = p_edge.target();
                 if co_user != viewer_id {
                     let sim = self.graph.compute_cosine_similarity(viewer_id, co_user);
@@ -1305,9 +1318,18 @@ impl Recommender {
             }
         }
 
+        // Cap co-interactors to top 100 highest-weighted neighbors
+        let mut top_co_interactors: Vec<(u32, f32)> = co_interactor_weights.into_iter().collect();
+        if top_co_interactors.len() > 100 {
+            top_co_interactors.select_nth_unstable_by(100, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            top_co_interactors.truncate(100);
+        }
+
         // Step 3: Co-interactors -> Candidate Posts
         let mut candidate_scores: AHashMap<u32, f32> = AHashMap::new();
-        for (&co_user, &co_sim) in &co_interactor_weights {
+        for (co_user, co_sim) in top_co_interactors {
             let co_interactions = self.graph.get_user_interactions(co_user);
             for c_edge in co_interactions {
                 let cand_pid = c_edge.target();

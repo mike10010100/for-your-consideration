@@ -172,6 +172,7 @@ fn test_challenge_64_shard_hash_distribution_uniformity() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://example.com/oauth/callback".to_string(),
             created_at_secs: 1_700_000_000,
+            dpop_private_key: None,
         };
         store.insert(key, session);
     }
@@ -206,6 +207,7 @@ fn test_challenge_state_store_128_threads_stress() {
                     token_endpoint: "https://bsky.social/oauth/token".to_string(),
                     redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
                     created_at_secs: 1_700_000_000,
+                    dpop_private_key: None,
                 };
 
                 s.insert(key.clone(), session);
@@ -255,6 +257,7 @@ fn test_challenge_state_store_100_threads_atomic_take_race_single_winner() {
         token_endpoint: "https://bsky.social/oauth/token".to_string(),
         redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
         created_at_secs: 1_700_000_000,
+        dpop_private_key: None,
     };
 
     store.insert(state_key.clone(), session);
@@ -316,6 +319,7 @@ async fn test_challenge_http_callback_100_concurrent_race_requests() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -412,6 +416,7 @@ fn test_challenge_concurrent_pruning_under_heavy_read_write_load() {
                     token_endpoint: "https://bsky.social/oauth/token".to_string(),
                     redirect_uri: "https://example.com/oauth/callback".to_string(),
                     created_at_secs: 1_700_000_000 + (i as u64),
+                    dpop_private_key: None,
                 };
                 s.insert(key.clone(), session);
                 let _ = s.get(&key);
@@ -446,6 +451,7 @@ fn test_challenge_clock_warp_safety_and_ttl_pruning() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: anchor_now - 100,
+            dpop_private_key: None,
         },
     );
 
@@ -460,6 +466,7 @@ fn test_challenge_clock_warp_safety_and_ttl_pruning() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: anchor_now - 601,
+            dpop_private_key: None,
         },
     );
 
@@ -474,6 +481,7 @@ fn test_challenge_clock_warp_safety_and_ttl_pruning() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: anchor_now + 500,
+            dpop_private_key: None,
         },
     );
 
@@ -514,6 +522,7 @@ async fn test_challenge_callback_exact_boundary_ttl_rejection() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now_secs - 599,
+            dpop_private_key: None,
         },
     );
 
@@ -546,6 +555,7 @@ async fn test_challenge_callback_exact_boundary_ttl_rejection() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now_secs - 601,
+            dpop_private_key: None,
         },
     );
 
@@ -575,7 +585,10 @@ async fn test_challenge_callback_exact_boundary_ttl_rejection() {
 
 #[test]
 fn test_challenge_service_jwt_fuzzing_and_malicious_payloads() {
-    let now = 1_700_000_000u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     // 1. Valid JWT
     let valid_token = generate_session_token("did:plc:valid_user", 3600);
@@ -796,7 +809,7 @@ async fn test_challenge_100_concurrent_users_full_lifecycle_and_replay_assault()
         let replay_done = Arc::clone(&blocked_replays);
 
         tasks.push(tokio::spawn(async move {
-            let handle = format!("challenge_user_{user_idx}.bsky.social");
+            let handle = format!("mock_challenge_user_{user_idx}.bsky.social");
 
             // Step 1: Login initiation
             let req_login = Request::builder()

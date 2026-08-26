@@ -142,7 +142,7 @@ async fn test_t1_f1_03_metadata_schema_fields_validation() {
     assert_eq!(meta.client_uri, "https://feed.example.com");
     assert_eq!(meta.application_type, "web");
     assert_eq!(meta.token_endpoint_auth_method, "none");
-    assert!(!meta.dpop_bound_access_tokens);
+    assert!(meta.dpop_bound_access_tokens);
 }
 
 #[tokio::test]
@@ -467,6 +467,7 @@ fn test_t1_f4_01_state_store_single_use_take() {
         token_endpoint: "https://bsky.social/oauth/token".to_string(),
         redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
         created_at_secs: 1_700_000_000,
+        dpop_private_key: None,
     };
 
     store.insert(state_token.to_string(), session.clone());
@@ -495,6 +496,7 @@ fn test_t1_f4_02_state_store_64_shard_distribution() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: 1_700_000_000,
+            dpop_private_key: None,
         };
         store.insert(state_key, session);
     }
@@ -517,6 +519,7 @@ fn test_t1_f4_03_state_store_ttl_expiration_pruning() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now - 300,
+            dpop_private_key: None,
         };
         store.insert(format!("fresh_state_{i}"), session);
     }
@@ -531,6 +534,7 @@ fn test_t1_f4_03_state_store_ttl_expiration_pruning() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now - 900,
+            dpop_private_key: None,
         };
         store.insert(format!("expired_state_{i}"), session);
     }
@@ -567,6 +571,7 @@ fn test_t1_f4_04_state_store_concurrent_rw_throughput() {
                     token_endpoint: "https://bsky.social/oauth/token".to_string(),
                     redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
                     created_at_secs: 1_700_000_000,
+                    dpop_private_key: None,
                 };
                 s.insert(key.clone(), session);
 
@@ -624,7 +629,7 @@ async fn test_t1_f5_02_login_with_did_plc() {
     let app = create_xrpc_router(state);
 
     let req = Request::builder()
-        .uri("/api/oauth/login?handle=did:plc:z72i7hdynmk6r22z27h6tvur")
+        .uri("/api/oauth/login?handle=did:plc:mock_z72i7hdynmk6r22z27h6tvur")
         .body(Body::empty())
         .unwrap();
 
@@ -730,6 +735,7 @@ async fn test_t1_f6_01_callback_token_exchange_success() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -776,6 +782,7 @@ async fn test_t1_f6_02_callback_token_validation() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -825,6 +832,7 @@ async fn test_t1_f6_03_callback_with_iss_parameter() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -866,6 +874,7 @@ async fn test_t1_f6_04_callback_consumes_state_atomically() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -910,6 +919,7 @@ async fn test_t1_f6_05_callback_issued_token_enables_authenticated_api_access() 
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -1117,6 +1127,7 @@ async fn test_t2_f1_01_replay_callback_state_rejected_with_400() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -1162,6 +1173,7 @@ fn test_t2_f1_02_replay_consumed_state_returns_none_in_store() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: 1_700_000_000,
+            dpop_private_key: None,
         },
     );
 
@@ -1190,6 +1202,7 @@ async fn test_t2_f1_03_concurrent_duplicate_callbacks_race_only_one_wins() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -1288,6 +1301,7 @@ async fn test_t2_f1_05_cross_session_state_hijacking_blocked() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -1337,6 +1351,7 @@ async fn test_t2_f2_01_callback_with_expired_state_returns_400() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now - 660,
+            dpop_private_key: None,
         },
     );
 
@@ -1377,6 +1392,7 @@ fn test_t2_f2_02_state_store_prunes_10_min_old_entries() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now - 601,
+            dpop_private_key: None,
         },
     );
 
@@ -1400,6 +1416,7 @@ async fn test_t2_f2_03_boundary_state_at_exact_ttl() {
             token_endpoint: "https://bsky.social/oauth/token".to_string(),
             redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
             created_at_secs: now - 601,
+            dpop_private_key: None,
         },
     );
 
@@ -1489,6 +1506,7 @@ async fn test_t2_f3_01_tampered_state_string_returns_400() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -1533,6 +1551,7 @@ async fn test_t2_f3_02_truncated_state_returns_400() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            dpop_private_key: None,
         },
     );
 
@@ -2089,6 +2108,7 @@ async fn test_t3_c6_background_state_pruning_during_concurrent_callbacks() {
                 token_endpoint: "https://bsky.social/oauth/token".to_string(),
                 redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
                 created_at_secs: now - 1000,
+                dpop_private_key: None,
             },
         );
         state.oauth_store.insert(
@@ -2101,6 +2121,7 @@ async fn test_t3_c6_background_state_pruning_during_concurrent_callbacks() {
                 token_endpoint: "https://bsky.social/oauth/token".to_string(),
                 redirect_uri: "https://feed.example.com/oauth/callback".to_string(),
                 created_at_secs: now,
+                dpop_private_key: None,
             },
         );
     }
@@ -2491,4 +2512,85 @@ async fn test_t4_s6_self_hosted_pds_custom_domain_integration() {
         .unwrap();
     let resp_pub = app.oneshot(req_pub).await.unwrap();
     assert_eq!(resp_pub.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Admin DID Authorization Enforcement Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_admin_did_enforcement_blocks_non_admin_with_403() {
+    let admin_did = "did:plc:mmtjkssv6jeneahkgfdxuy7p";
+    let state = create_test_state().with_admin_did(Some(admin_did));
+    let app = create_xrpc_router(state);
+
+    // Caller is authenticated as a different DID (did:plc:other_user)
+    let non_admin_token = generate_session_token("did:plc:other_user", 3600);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/feed/publish")
+        .header(AUTHORIZATION, format!("Bearer {non_admin_token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&FeedPublishRequest {
+                display_name: "Unauthorized Feed".to_string(),
+                rkey: "unauthorized-feed".to_string(),
+                description: "Should fail with 403".to_string(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let err_resp: ApiErrorResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(err_resp.error, "Forbidden");
+    assert!(err_resp.message.contains("restricted to administrator"));
+}
+
+#[tokio::test]
+async fn test_admin_did_enforcement_allows_admin_user() {
+    let admin_did = "did:plc:mmtjkssv6jeneahkgfdxuy7p";
+    let state = create_test_state().with_admin_did(Some(admin_did));
+    let app = create_xrpc_router(state);
+
+    // Caller is authenticated as the designated admin DID
+    let admin_token = generate_session_token(admin_did, 3600);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/feed/publish")
+        .header(AUTHORIZATION, format!("Bearer {admin_token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&FeedPublishRequest {
+                display_name: "Official Feed".to_string(),
+                rkey: "for-your-consideration".to_string(),
+                description: "Published by verified admin".to_string(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_admin_did_telemetry_reflection() {
+    let admin_did = "did:plc:mmtjkssv6jeneahkgfdxuy7p";
+    let state = create_test_state().with_admin_did(Some(admin_did));
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder()
+        .uri("/api/telemetry")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let telemetry: TelemetryResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(telemetry.admin_did.as_deref(), Some(admin_did));
 }

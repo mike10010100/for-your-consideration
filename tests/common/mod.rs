@@ -619,10 +619,13 @@ pub fn generate_mock_jwt(issuer_did: &str, audience_did: &str, valid: bool) -> S
 // 5. Utility & Assertion Helpers
 // ---------------------------------------------------------------------------
 
-/// Returns mock current timestamp in seconds.
+/// Returns current timestamp in seconds.
 #[must_use]
 pub fn chrono_like_now() -> u64 {
-    BLUESKY_EPOCH_SECS + 100_000_000 // ~2026
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Asserts that a string is a valid canonical AT-URI (`at://did:.../app.bsky.feed.post/...`).

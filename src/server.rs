@@ -33,15 +33,18 @@ use base64::Engine;
 use compact_str::CompactString;
 use rand::RngCore;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 use crate::auth::{
-    authenticate_pds_session, exchange_oauth_code, extract_session_did_from_headers,
-    extract_viewer_did_from_headers, generate_pkce_pair, publish_feed_generator_record,
-    resolve_identity_pds, OAuthSessionState, OAuthStateStore, DEFAULT_OAUTH_STATE_TTL_SECS,
+    authenticate_pds_session_with_secret, build_secure_http_client,
+    exchange_oauth_code_with_secret, extract_session_did_from_headers_with_secret,
+    generate_pkce_pair, publish_feed_generator_record, resolve_identity_pds, validate_service_jwt,
+    DPoPKey, OAuthSessionState, OAuthStateStore, DEFAULT_OAUTH_STATE_TTL_SECS,
+    DEFAULT_SESSION_SECRET,
 };
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
@@ -82,6 +85,10 @@ pub struct AppState {
     pub hostname: CompactString,
     /// Feed record key identifier (e.g. `for-your-consideration`).
     pub feed_rkey: CompactString,
+    /// Optional administrator DID authorized to publish or modify the official feed generator record.
+    pub admin_did: Option<CompactString>,
+    /// Server HMAC secret for cryptographically signing and verifying session tokens.
+    pub session_secret: [u8; 32],
     /// Server initialization instant for uptime tracking.
     pub start_time: Instant,
 }
@@ -94,6 +101,19 @@ impl AppState {
         service_did: impl Into<CompactString>,
         hostname: impl Into<CompactString>,
     ) -> Self {
+        let session_secret =
+            std::env::var("SESSION_SECRET").map_or(*DEFAULT_SESSION_SECRET, |sec| {
+                let trimmed = sec.trim();
+                if trimmed.is_empty() {
+                    *DEFAULT_SESSION_SECRET
+                } else {
+                    let hash = Sha256::digest(trimmed.as_bytes());
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&hash);
+                    key
+                }
+            });
+
         Self {
             recommender,
             preferences_store: Arc::new(UserPreferencesStore::new()),
@@ -103,8 +123,24 @@ impl AppState {
             service_did: service_did.into(),
             hostname: hostname.into(),
             feed_rkey: CompactString::new(DEFAULT_FEED_RKEY),
+            admin_did: None,
+            session_secret,
             start_time: Instant::now(),
         }
+    }
+
+    /// Sets a custom session signing secret.
+    #[must_use]
+    pub const fn with_session_secret(mut self, secret: [u8; 32]) -> Self {
+        self.session_secret = secret;
+        self
+    }
+
+    /// Sets an optional administrator DID authorized to publish the feed generator record.
+    #[must_use]
+    pub fn with_admin_did(mut self, admin_did: Option<impl Into<CompactString>>) -> Self {
+        self.admin_did = admin_did.map(Into::into);
+        self
     }
 
     /// Sets a custom preferences store.
@@ -217,6 +253,7 @@ pub fn create_xrpc_router(state: AppState) -> Router {
                 .delete(handle_delete_preferences),
         )
         .layer(cors)
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 
@@ -249,8 +286,20 @@ pub async fn handle_get_feed_skeleton(
         }
     };
 
-    // 1. Resolve viewer DID from Authorization Bearer JWT
-    let viewer_did = extract_viewer_did_from_headers(&headers);
+    // 1. Resolve viewer DID from Authorization Bearer JWT (verifying exp and aud)
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let viewer_did = headers
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth_header| {
+            validate_service_jwt(auth_header, Some(state.service_did.as_str()), now_secs)
+                .ok()
+                .map(|did| did.to_string())
+        });
 
     // 2. Precedence Hierarchy:
     //    1) Explicit HTTP query parameters (?freshness, ?discovery, ?art, etc.)
@@ -383,8 +432,17 @@ pub async fn handle_get_feed_skeleton(
 }
 
 /// Handler for `POST /api/auth/login`.
-pub async fn handle_post_auth_login(Json(body): Json<LoginRequestBody>) -> impl IntoResponse {
-    match authenticate_pds_session(&body.identifier, &body.password, body.pds_url.as_deref()).await
+pub async fn handle_post_auth_login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequestBody>,
+) -> impl IntoResponse {
+    match authenticate_pds_session_with_secret(
+        &body.identifier,
+        &body.password,
+        body.pds_url.as_deref(),
+        &state.session_secret,
+    )
+    .await
     {
         Ok(resp) => (
             StatusCode::OK,
@@ -495,15 +553,47 @@ pub async fn handle_get_oauth_login(
         || state.hostname.starts_with("127.0.0.1")
         || state.hostname.starts_with("0.0.0.0");
     let scheme = if is_localhost { "http" } else { "https" };
+    let expected_redirect_uri = format!("{scheme}://{}/oauth/callback", state.hostname);
 
-    let redirect_uri = query
-        .redirect_uri
-        .unwrap_or_else(|| format!("{scheme}://{}/oauth/callback", state.hostname));
+    let redirect_uri = if let Some(ref req_uri) = query.redirect_uri {
+        let trimmed_req = req_uri.trim();
+        let server_origin_prefix = format!("{scheme}://{}/", state.hostname);
+        let is_valid = trimmed_req == expected_redirect_uri
+            || (is_localhost
+                && (trimmed_req.starts_with("http://127.0.0.1:")
+                    || trimmed_req.starts_with("http://localhost:"))
+                && (trimmed_req.ends_with("/oauth/callback") || trimmed_req.contains("/callback")))
+            || (trimmed_req.starts_with(&server_origin_prefix)
+                && (trimmed_req.ends_with("/oauth/callback")
+                    || trimmed_req.ends_with("/callback")
+                    || trimmed_req.contains("/oauth/")));
+        if !is_valid {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(ApiErrorResponse::new(
+                    "InvalidRedirectUri",
+                    format!(
+                        "Invalid redirect_uri '{trimmed_req}'. Must match server origin callback whitelist"
+                    ),
+                )),
+            )
+                .into_response();
+        }
+        trimmed_req.to_string()
+    } else {
+        expected_redirect_uri
+    };
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+
+    let dpop_key = DPoPKey::generate();
 
     state.oauth_store.insert(
         state_nonce.clone(),
@@ -515,6 +605,7 @@ pub async fn handle_get_oauth_login(
             token_endpoint: resolved.token_endpoint,
             redirect_uri: redirect_uri.clone(),
             created_at_secs: now_secs,
+            dpop_private_key: Some(dpop_key.to_bytes_b64()),
         },
     );
 
@@ -524,15 +615,119 @@ pub async fn handle_get_oauth_login(
         format!("{scheme}://{}/oauth/client-metadata.json", state.hostname)
     };
 
-    let auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&scope=atproto%20transition:generic&state={}&code_challenge={}&code_challenge_method=S256&login_hint={}",
-        resolved.auth_endpoint,
-        percent_encode_query_param(&client_id),
-        percent_encode_query_param(&redirect_uri),
-        percent_encode_query_param(&state_nonce),
-        percent_encode_query_param(&pkce.challenge),
-        percent_encode_query_param(&resolved.handle),
-    );
+    let auth_url = if let Some(ref par_endpoint) = resolved.par_endpoint {
+        let http_client = build_secure_http_client();
+
+        let par_form = [
+            ("client_id", client_id.as_str()),
+            ("response_type", "code"),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("scope", "atproto transition:generic"),
+            ("state", state_nonce.as_str()),
+            ("code_challenge", pkce.challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("login_hint", resolved.handle.as_str()),
+        ];
+
+        let dpop_proof = dpop_key.create_proof("POST", par_endpoint, None, None).ok();
+
+        let mut req = http_client.post(par_endpoint);
+        if let Some(ref proof) = dpop_proof {
+            req = req.header("DPoP", proof);
+        }
+
+        let mut resp = req.form(&par_form).send().await;
+
+        if let Ok(ref r) = resp {
+            if r.status() == StatusCode::BAD_REQUEST || r.status() == StatusCode::UNAUTHORIZED {
+                if let Some(nonce_val) = r.headers().get("DPoP-Nonce").and_then(|h| h.to_str().ok())
+                {
+                    if let Ok(retry_proof) =
+                        dpop_key.create_proof("POST", par_endpoint, Some(nonce_val), None)
+                    {
+                        resp = http_client
+                            .post(par_endpoint)
+                            .header("DPoP", &retry_proof)
+                            .form(&par_form)
+                            .send()
+                            .await;
+                    }
+                }
+            }
+        }
+
+        match resp {
+            Ok(resp) if resp.status().is_success() => {
+                let json: serde_json::Value = resp.json().await.unwrap_or_default();
+                if let Some(request_uri) = json["request_uri"].as_str() {
+                    format!(
+                        "{}?client_id={}&request_uri={}",
+                        resolved.auth_endpoint,
+                        percent_encode_query_param(&client_id),
+                        percent_encode_query_param(request_uri.trim()),
+                    )
+                } else if !is_localhost && resolved.require_par {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        Json(ApiErrorResponse::new(
+                            "ParFailed",
+                            "Pushed Authorization Request required by PDS authorization server but endpoint response was missing request_uri",
+                        )),
+                    )
+                        .into_response();
+                } else {
+                    format!(
+                        "{}?client_id={}&response_type=code&redirect_uri={}&scope=atproto%20transition:generic&state={}&code_challenge={}&code_challenge_method=S256&login_hint={}",
+                        resolved.auth_endpoint,
+                        percent_encode_query_param(&client_id),
+                        percent_encode_query_param(&redirect_uri),
+                        percent_encode_query_param(&state_nonce),
+                        percent_encode_query_param(&pkce.challenge),
+                        percent_encode_query_param(resolved.handle.as_str()),
+                    )
+                }
+            }
+            _ => {
+                if !is_localhost && resolved.require_par {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        )],
+                        Json(ApiErrorResponse::new(
+                            "ParFailed",
+                            "Pushed Authorization Request required by PDS authorization server but endpoint request failed",
+                        )),
+                    )
+                        .into_response();
+                }
+                format!(
+                    "{}?client_id={}&response_type=code&redirect_uri={}&scope=atproto%20transition:generic&state={}&code_challenge={}&code_challenge_method=S256&login_hint={}",
+                    resolved.auth_endpoint,
+                    percent_encode_query_param(&client_id),
+                    percent_encode_query_param(&redirect_uri),
+                    percent_encode_query_param(&state_nonce),
+                    percent_encode_query_param(&pkce.challenge),
+                    percent_encode_query_param(resolved.handle.as_str()),
+                )
+            }
+        }
+    } else {
+        format!(
+            "{}?client_id={}&response_type=code&redirect_uri={}&scope=atproto%20transition:generic&state={}&code_challenge={}&code_challenge_method=S256&login_hint={}",
+            resolved.auth_endpoint,
+            percent_encode_query_param(&client_id),
+            percent_encode_query_param(&redirect_uri),
+            percent_encode_query_param(&state_nonce),
+            percent_encode_query_param(&pkce.challenge),
+            percent_encode_query_param(resolved.handle.as_str()),
+        )
+    };
 
     (
         StatusCode::OK,
@@ -618,7 +813,7 @@ pub async fn handle_post_oauth_callback(
         format!("{scheme}://{}/oauth/client-metadata.json", state.hostname)
     };
 
-    match exchange_oauth_code(code, &session, &client_id).await {
+    match exchange_oauth_code_with_secret(code, &session, &client_id, &state.session_secret).await {
         Ok(resp) => (
             StatusCode::OK,
             [(
@@ -658,7 +853,9 @@ pub async fn handle_post_feed_publish(
     headers: HeaderMap,
     Json(body): Json<FeedPublishRequest>,
 ) -> impl IntoResponse {
-    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+    let Some(viewer_did) =
+        extract_session_did_from_headers_with_secret(&headers, &state.session_secret)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             [(
@@ -683,6 +880,27 @@ pub async fn handle_post_feed_publish(
         .or_else(|| auth_header.strip_prefix("BEARER "))
         .unwrap_or(auth_header)
         .trim();
+
+    // Check optional administrator authorization restriction
+    if let Some(admin_did) = &state.admin_did {
+        if viewer_did.as_str() != admin_did.as_str() {
+            return (
+                StatusCode::FORBIDDEN,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(ApiErrorResponse::new(
+                    "Forbidden",
+                    format!(
+                        "User '{}' is not authorized to publish this feed generator (restricted to administrator '{}')",
+                        viewer_did, admin_did
+                    ),
+                )),
+            )
+                .into_response();
+        }
+    }
 
     match publish_feed_generator_record(&viewer_did, token, &body, state.service_did.as_str(), None)
         .await
@@ -731,7 +949,9 @@ pub async fn handle_get_preferences(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+    let Some(viewer_did) =
+        extract_session_did_from_headers_with_secret(&headers, &state.session_secret)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -774,7 +994,9 @@ pub async fn handle_post_preferences(
     headers: HeaderMap,
     Json(body): Json<SavePreferencesRequestBody>,
 ) -> impl IntoResponse {
-    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+    let Some(viewer_did) =
+        extract_session_did_from_headers_with_secret(&headers, &state.session_secret)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -832,7 +1054,9 @@ pub async fn handle_delete_preferences(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(viewer_did) = extract_session_did_from_headers(&headers) else {
+    let Some(viewer_did) =
+        extract_session_did_from_headers_with_secret(&headers, &state.session_secret)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -987,6 +1211,7 @@ pub async fn handle_get_telemetry(State(state): State<AppState>) -> impl IntoRes
         ingestion: ingestion_info,
         snapshot: snapshot_info,
         impression_store: impression_info,
+        admin_did: state.admin_did.as_ref().map(ToString::to_string),
     };
 
     (
@@ -1673,5 +1898,108 @@ mod tests {
             .unwrap();
         let resp_topic = app.oneshot(req_high_topic).await.unwrap();
         assert_eq!(resp_topic.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_feed_skeleton_service_jwt_validation_and_fallback() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state.clone());
+        let viewer_did = "did:plc:victim_user_123";
+
+        // Save custom dials for victim
+        let dials = UserDials {
+            freshness_half_life_secs: 6.0 * 3600.0,
+            serendipity_ratio: 0.05,
+            topic_weights: TopicWeights {
+                art: 5.0,
+                tech: 0.0,
+                science: 0.0,
+                news: 0.0,
+                culture: 0.0,
+            },
+            updated_at_secs: 0,
+        };
+        state
+            .preferences_store
+            .set_by_did(&state.recommender.interner, viewer_did, dials);
+
+        // 1. Expired Service JWT
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256K","typ":"JWT"}"#);
+        let expired_payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"{viewer_did}","aud":"did:web:feed.example.com","exp":{}}}"#,
+            now - 100
+        ));
+        let expired_jwt = format!("{header}.{expired_payload}.mock_sig");
+
+        let req_expired = Request::builder()
+            .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration")
+            .header(AUTHORIZATION, format!("Bearer {expired_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_expired = app.clone().oneshot(req_expired).await.unwrap();
+        assert_eq!(resp_expired.status(), StatusCode::OK);
+
+        // 2. Mismatched Audience Service JWT
+        let wrong_aud_payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"{viewer_did}","aud":"did:web:competitor-feed.com","exp":{}}}"#,
+            now + 3600
+        ));
+        let wrong_aud_jwt = format!("{header}.{wrong_aud_payload}.mock_sig");
+
+        let req_wrong_aud = Request::builder()
+            .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration")
+            .header(AUTHORIZATION, format!("Bearer {wrong_aud_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_wrong_aud = app.oneshot(req_wrong_aud).await.unwrap();
+        assert_eq!(resp_wrong_aud.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_app_state_session_secret_sha256_derivation() {
+        let recommender = Arc::new(Recommender::new(
+            Arc::new(crate::interner::StringInterner::new()),
+            Arc::new(crate::graph::GraphStore::new()),
+        ));
+
+        // When SESSION_SECRET is set
+        std::env::set_var("SESSION_SECRET", "custom-secret-key-12345");
+        let state = AppState::new(recommender.clone(), "did:web:test", "test.example.com");
+        let expected_hash = Sha256::digest(b"custom-secret-key-12345");
+        assert_eq!(state.session_secret, expected_hash.as_slice());
+
+        // When SESSION_SECRET is empty string
+        std::env::set_var("SESSION_SECRET", "   ");
+        let state_empty = AppState::new(recommender, "did:web:test", "test.example.com");
+        assert_eq!(state_empty.session_secret, *DEFAULT_SESSION_SECRET);
+
+        std::env::remove_var("SESSION_SECRET");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_payload_body_limit_rejected() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state);
+        let token = crate::auth::generate_session_token("did:plc:large_user", 3600);
+
+        // 128 KB payload exceeds the 64 KB DefaultBodyLimit
+        let large_payload = format!(
+            r#"{{"freshness_hours":24.0,"discovery_ratio":0.15,"topic_weights":{{"art":1.0,"tech":1.0,"science":1.0,"news":1.0,"culture":1.0}},"padding":"{}"}}"#,
+            "x".repeat(128 * 1024)
+        );
+
+        let req_large = Request::builder()
+            .method(Method::POST)
+            .uri("/api/preferences")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(large_payload))
+            .unwrap();
+        let resp = app.oneshot(req_large).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

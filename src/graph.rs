@@ -439,28 +439,36 @@ impl GraphStore {
         max_ts
     }
 
-    /// Prunes stale interaction edges older than `cutoff_timestamp_secs`.
+    /// Prunes stale interaction edges and metadata older than `cutoff_timestamp_secs`.
     pub fn prune_older_than(&self, cutoff_timestamp_secs: u64) {
-        // Prune forward interactions
+        // Prune forward interactions and remove empty entries
         for shard in &self.user_interactions {
             let mut guard = shard.write();
             for edges in guard.values_mut() {
                 edges.retain(|e| e.timestamp_secs() >= cutoff_timestamp_secs);
             }
+            guard.retain(|_, edges| !edges.is_empty());
         }
 
-        // Prune reverse interactions
+        // Prune reverse interactions and remove empty entries
         for shard in &self.post_interactions {
             let mut guard = shard.write();
             for edges in guard.values_mut() {
                 edges.retain(|e| e.timestamp_secs() >= cutoff_timestamp_secs);
             }
+            guard.retain(|_, edges| !edges.is_empty());
         }
 
         // Prune active recent posts
         for shard in &self.active_recent_posts {
             let mut guard = shard.write();
             guard.retain(|_, &mut ts| ts >= cutoff_timestamp_secs);
+        }
+
+        // Prune stale post metadata entries
+        for shard in &self.post_metadata {
+            let mut guard = shard.write();
+            guard.retain(|_, meta| meta.created_at >= cutoff_timestamp_secs);
         }
     }
 
