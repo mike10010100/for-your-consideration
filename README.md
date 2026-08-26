@@ -150,16 +150,24 @@ https://bsky.app/profile/<YOUR_DID>/feed/for-your-consideration
 ```
 Tap **"Pin to Home"** to enjoy your custom, real-time personalized feed!
 
----
-
 ## 🎛️ Dynamic Algorithm Dials
 
 Users and clients can customize recommendation parameters dynamically using URL query parameters:
 
 * `freshness`: Adjusts the time-decay half-life $\tau$ (`realtime` = 6h, `balanced` = 36h, `weekly` = 168h).
 * `discovery`: Adjusts the serendipity exploration ratio $\epsilon$ (`familiar` = 5%, `balanced` = 15%, `deep_dive` = 35%).
-* `topic_art`, `topic_tech`, `topic_science`, `topic_news`, `topic_culture`: Custom integer weights (0–100) for topic domain preferences.
+* `replies`: Controls post composition (`root` = Root posts only [default], `all` = Include root posts and replies).
+* `topic_art`, `topic_tech`, `topic_science`, `topic_news`, `topic_culture`: Custom topic domain multipliers (0.0x–5.0x).
 * `explain=true`: Returns full mathematical proof chains explaining why each candidate post was selected.
+
+---
+
+## 🔐 Native ATProto OAuth & Saved Dials
+
+Users can authenticate directly on the web dashboard using native ATProto OAuth (no app passwords required):
+* **Sign In with Bluesky**: PKCE S256 + DPoP token exchange against user's home PDS.
+* **Persistent Algorithmic Dials**: Saved slider adjustments automatically apply to the viewer's feed when browsing the Bluesky app via authenticated Service Auth JWTs.
+* **1-Click Feed Publishing**: Admin users can register or update the `app.bsky.feed.generator` record directly from the web dashboard.
 
 ---
 
