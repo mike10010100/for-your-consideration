@@ -27,7 +27,10 @@ use sha2::{Digest, Sha256};
 use crate::error::{FeedError, Result};
 use crate::types::{FeedPublishRequest, FeedPublishResponse, OAuthCallbackResponse};
 
-/// Minimal payload structure for AT Protocol service auth JWTs.
+/// Default embedded avatar icon (512x512 transparent sparkle star PNG).
+pub static DEFAULT_FEED_AVATAR: &[u8] = include_bytes!("../assets/icon_sparkle_star_512.png");
+
+/// Service Auth JWT Claims payload structure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceJwtPayload {
     /// Issuer DID of the requesting actor.
@@ -1472,25 +1475,55 @@ pub async fn publish_feed_generator_record(
     let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
     let endpoint = format!("{validated_pds}/xrpc/com.atproto.repo.putRecord");
 
-    let payload = serde_json::json!({
-        "repo": did,
-        "collection": "app.bsky.feed.generator",
-        "rkey": rkey,
-        "record": {
-            "$type": "app.bsky.feed.generator",
-            "did": service_did,
-            "displayName": display_name,
-            "description": description,
-            "createdAt": created_at_iso
-        }
-    });
-
     let client = build_secure_http_client();
     let auth_header_val = if token.starts_with("Bearer ") || token.starts_with("bearer ") {
         token.to_string()
     } else {
         format!("Bearer {token}")
     };
+
+    // Attempt to upload default transparent feed avatar if available
+    let mut avatar_blob: Option<serde_json::Value> = None;
+    if !DEFAULT_FEED_AVATAR.is_empty() {
+        let upload_endpoint = format!("{validated_pds}/xrpc/com.atproto.repo.uploadBlob");
+        if let Ok(blob_resp) = client
+            .post(&upload_endpoint)
+            .header("Authorization", &auth_header_val)
+            .header("Content-Type", "image/png")
+            .body(DEFAULT_FEED_AVATAR)
+            .send()
+            .await
+        {
+            if blob_resp.status().is_success() {
+                if let Ok(blob_json) = blob_resp.json::<serde_json::Value>().await {
+                    if let Some(blob) = blob_json.get("blob") {
+                        avatar_blob = Some(blob.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut record_obj = serde_json::json!({
+        "$type": "app.bsky.feed.generator",
+        "did": service_did,
+        "displayName": display_name,
+        "description": description,
+        "createdAt": created_at_iso
+    });
+
+    if let Some(blob) = avatar_blob {
+        if let Some(obj) = record_obj.as_object_mut() {
+            obj.insert("avatar".to_string(), blob);
+        }
+    }
+
+    let payload = serde_json::json!({
+        "repo": did,
+        "collection": "app.bsky.feed.generator",
+        "rkey": rkey,
+        "record": record_obj
+    });
 
     let resp = client
         .post(&endpoint)
