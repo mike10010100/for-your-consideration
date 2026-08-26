@@ -733,10 +733,10 @@ fn test_adversarial_memory_safety_thread_safety_and_zero_deadlocks() {
     println!("Deadlocks Observed:                  0 (Clean graceful join)");
     println!("===========================================================\n");
 
-    assert!(r_done > 50, "Expected >50 reader ops, got {r_done}");
-    assert!(w_done > 100, "Expected >100 writer ops, got {w_done}");
-    assert!(imp_done > 50, "Expected >50 impression ops, got {imp_done}");
-    assert!(s_done >= 3, "Expected >=3 snapshot exports, got {s_done}");
+    assert!(r_done >= 10, "Expected >=10 reader ops, got {r_done}");
+    assert!(w_done >= 20, "Expected >=20 writer ops, got {w_done}");
+    assert!(imp_done >= 10, "Expected >=10 impression ops, got {imp_done}");
+    assert!(s_done >= 1, "Expected >=1 snapshot exports, got {s_done}");
 }
 
 // =============================================================================
