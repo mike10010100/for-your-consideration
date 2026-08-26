@@ -284,6 +284,12 @@ async fn security_headers_middleware(
         axum::http::header::REFERRER_POLICY,
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https: wss:; frame-ancestors 'self';",
+        ),
+    );
     response
 }
 
