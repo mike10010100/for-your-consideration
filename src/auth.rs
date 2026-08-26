@@ -1381,9 +1381,6 @@ pub async fn exchange_oauth_code_with_secret(
     // Fast-path mock support for testing suites & offline fixtures
     if code_trimmed.starts_with("mock_")
         || code_trimmed.starts_with("test_")
-        || code_trimmed.starts_with("code_")
-        || code_trimmed.starts_with("auth_")
-        || code_trimmed.starts_with("valid_")
         || session_state.token_endpoint.contains("mock")
         || session_state.token_endpoint.contains("example.com")
         || session_state.redirect_uri.contains("example.com")
