@@ -735,7 +735,10 @@ fn test_adversarial_memory_safety_thread_safety_and_zero_deadlocks() {
 
     assert!(r_done >= 10, "Expected >=10 reader ops, got {r_done}");
     assert!(w_done >= 20, "Expected >=20 writer ops, got {w_done}");
-    assert!(imp_done >= 10, "Expected >=10 impression ops, got {imp_done}");
+    assert!(
+        imp_done >= 10,
+        "Expected >=10 impression ops, got {imp_done}"
+    );
     assert!(s_done >= 1, "Expected >=1 snapshot exports, got {s_done}");
 }
 

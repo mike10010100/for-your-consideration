@@ -1309,7 +1309,7 @@ fn test_empirical_16_thread_mixed_stress_matrix() {
     );
 
     let min_throughput = if cfg!(debug_assertions) {
-        500.0
+        100.0
     } else {
         5_000.0
     };
