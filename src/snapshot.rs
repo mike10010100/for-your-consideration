@@ -283,7 +283,7 @@ impl<'a> ByteSliceReader<'a> {
             .ok_or_else(|| FeedError::Snapshot("Edge count overflow".to_string()))?;
         let bytes = self.read_bytes(byte_len)?;
         let mut edges = Vec::with_capacity(count);
-        for chunk in bytes.chunks_exact(8) {
+        for chunk in bytes.as_chunks::<8>().0 {
             let target = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             let packed = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
             edges.push(CompactEdge { target, packed });
@@ -297,8 +297,8 @@ impl<'a> ByteSliceReader<'a> {
             .ok_or_else(|| FeedError::Snapshot("u32 count overflow".to_string()))?;
         let bytes = self.read_bytes(byte_len)?;
         let mut list = Vec::with_capacity(count);
-        for chunk in bytes.chunks_exact(4) {
-            let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for chunk in bytes.as_chunks::<4>().0 {
+            let val = u32::from_le_bytes(*chunk);
             list.push(val);
         }
         Ok(list)
