@@ -78,4 +78,7 @@ cargo test --all-targets
 
 # 4. Dependency security & policy scan
 cargo deny check
+
+# 5. Test coverage gate (must maintain >= 80% line coverage)
+cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only
 ```

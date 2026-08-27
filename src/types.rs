@@ -1219,6 +1219,21 @@ pub fn format_memory_bytes(bytes: usize) -> String {
     }
 }
 
+/// Active / concurrent feed consumer telemetry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ActiveUsersTelemetryInfo {
+    /// Number of active in-flight feed generation requests currently executing.
+    pub in_flight_requests: usize,
+    /// Number of distinct active viewers who requested feeds within the last 1 minute.
+    pub concurrent_viewers_1m: usize,
+    /// Number of distinct active viewers who requested feeds within the last 5 minutes.
+    pub concurrent_viewers_5m: usize,
+    /// Number of distinct active viewers who requested feeds within the last 15 minutes.
+    pub concurrent_viewers_15m: usize,
+    /// Total distinct active viewers tracked across all active sliding windows.
+    pub total_active_viewers: usize,
+}
+
 /// Comprehensive live telemetry response for `GET /api/telemetry`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryResponse {
@@ -1238,6 +1253,9 @@ pub struct TelemetryResponse {
     pub snapshot: SnapshotStatusInfo,
     /// Sliding LRU impression anti-fatigue memory stats.
     pub impression_store: ImpressionTelemetryInfo,
+    /// Live active and concurrent feed user metrics.
+    #[serde(default)]
+    pub active_users: ActiveUsersTelemetryInfo,
     /// Optional administrator DID authorized to publish the official feed generator.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub admin_did: Option<String>,
@@ -1884,6 +1902,13 @@ mod tests {
                 hard_suppression_window_secs: 1800,
                 fatigue_decay_window_secs: 21600,
             },
+            active_users: ActiveUsersTelemetryInfo {
+                in_flight_requests: 3,
+                concurrent_viewers_1m: 12,
+                concurrent_viewers_5m: 45,
+                concurrent_viewers_15m: 80,
+                total_active_viewers: 80,
+            },
             admin_did: Some("did:plc:admin".to_string()),
         };
 
@@ -1895,6 +1920,8 @@ mod tests {
         assert_eq!(parsed.ingestion.events_processed, 950);
         assert_eq!(parsed.snapshot.status, "persisted");
         assert_eq!(parsed.impression_store.total_tracked_viewers, 25);
+        assert_eq!(parsed.active_users.in_flight_requests, 3);
+        assert_eq!(parsed.active_users.concurrent_viewers_5m, 45);
     }
 
     #[test]

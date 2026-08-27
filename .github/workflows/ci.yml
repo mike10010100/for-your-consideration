@@ -64,6 +64,27 @@ jobs:
       - name: Run cargo-deny security checks
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  coverage:
+    name: Test Coverage & Regression Gate (>= 80%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Test Coverage & Enforce 80% Threshold
+        run: cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only
+
   docker-build:
     name: Production Docker Build & Healthcheck Verification
     runs-on: ubuntu-latest

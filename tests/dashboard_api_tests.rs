@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use base64::Engine;
 use for_your_consideration::prelude::*;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -163,6 +164,80 @@ async fn test_telemetry_endpoint_full_schema_and_values() {
         1800
     );
     assert_eq!(telemetry.impression_store.fatigue_decay_window_secs, 21600);
+    assert_eq!(telemetry.active_users.in_flight_requests, 0);
+    assert_eq!(telemetry.active_users.concurrent_viewers_5m, 0);
+}
+
+#[tokio::test]
+async fn test_active_users_telemetry_tracking_and_feed_requests() {
+    let (state, _interner, _graph, _rec) = create_rich_test_state();
+    let app = create_xrpc_router(state.clone());
+
+    // 1. Initial telemetry -> 0 active users
+    let req0 = Request::builder()
+        .uri("/api/telemetry")
+        .body(Body::empty())
+        .unwrap();
+    let resp0 = app.clone().oneshot(req0).await.unwrap();
+    let body0 = resp0.into_body().collect().await.unwrap().to_bytes();
+    let tele0: TelemetryResponse = serde_json::from_slice(&body0).unwrap();
+    assert_eq!(tele0.active_users.concurrent_viewers_5m, 0);
+    assert_eq!(tele0.active_users.in_flight_requests, 0);
+
+    // 2. Perform feed preview query for alice
+    let req_preview = Request::builder()
+        .uri("/api/feed-preview?viewer=did:plc:alice")
+        .body(Body::empty())
+        .unwrap();
+    let resp_preview = app.clone().oneshot(req_preview).await.unwrap();
+    assert_eq!(resp_preview.status(), StatusCode::OK);
+
+    // 3. Telemetry now reports 1 active viewer in 1m/5m/15m
+    let req1 = Request::builder()
+        .uri("/api/telemetry")
+        .body(Body::empty())
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    let body1 = resp1.into_body().collect().await.unwrap().to_bytes();
+    let tele1: TelemetryResponse = serde_json::from_slice(&body1).unwrap();
+    assert_eq!(tele1.active_users.concurrent_viewers_1m, 1);
+    assert_eq!(tele1.active_users.concurrent_viewers_5m, 1);
+    assert_eq!(tele1.active_users.total_active_viewers, 1);
+    assert_eq!(tele1.active_users.in_flight_requests, 0);
+
+    // 4. Perform feed skeleton query with valid service JWT
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256K","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        r#"{{"iss":"did:plc:bob","aud":"did:web:feed.example.com","exp":{}}}"#,
+        now + 300
+    ));
+    let jwt = format!("{header}.{payload}.mock_sig");
+
+    let req_feed = Request::builder()
+        .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {jwt}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp_feed = app.clone().oneshot(req_feed).await.unwrap();
+    assert_eq!(resp_feed.status(), StatusCode::OK);
+
+    // 5. Telemetry now reports 2 distinct active viewers (alice + bob)
+    let req2 = Request::builder()
+        .uri("/api/telemetry")
+        .body(Body::empty())
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    let body2 = resp2.into_body().collect().await.unwrap().to_bytes();
+    let tele2: TelemetryResponse = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(tele2.active_users.concurrent_viewers_1m, 2);
+    assert_eq!(tele2.active_users.concurrent_viewers_5m, 2);
+    assert_eq!(tele2.active_users.total_active_viewers, 2);
+    assert_eq!(tele2.active_users.in_flight_requests, 0);
 }
 
 #[tokio::test]

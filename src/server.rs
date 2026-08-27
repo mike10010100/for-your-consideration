@@ -19,9 +19,11 @@
 //! The server utilizes Axum on the Tokio asynchronous runtime with non-blocking graph traversal,
 //! permissive CORS headers for XRPC browser interoperability, and coordinated graceful shutdown.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use ahash::AHashMap;
 use axum::extract::{Query, State};
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
@@ -31,6 +33,7 @@ use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use compact_str::CompactString;
+use parking_lot::RwLock;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -52,13 +55,13 @@ use crate::preferences::UserPreferencesStore;
 use crate::recommender::Recommender;
 use crate::snapshot::SnapshotStatusTracker;
 use crate::types::{
-    ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedPublishRequest, FeedSkeletonResponse,
-    GenericStatusResponse, GraphTelemetryInfo, ImpressionTelemetryInfo, InternerTelemetryInfo,
-    LoginRequestBody, MemoryTelemetryInfo, OAuthCallbackRequest, OAuthClientMetadata,
-    OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto, PreferencesResponseDto,
-    RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost, TasteTwinsQuery,
-    TelemetryResponse, TopicWeights, UserDials, DEFAULT_MIN_LIKES, DEFAULT_PAGE_LIMIT,
-    MAX_PAGE_LIMIT,
+    ActiveUsersTelemetryInfo, ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedPublishRequest,
+    FeedSkeletonResponse, GenericStatusResponse, GraphTelemetryInfo, ImpressionTelemetryInfo,
+    InternerTelemetryInfo, LoginRequestBody, MemoryTelemetryInfo, OAuthCallbackRequest,
+    OAuthClientMetadata, OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto,
+    PreferencesResponseDto, RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost,
+    TasteTwinsQuery, TelemetryResponse, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
+    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -66,6 +69,154 @@ pub const DASHBOARD_HTML: &str = include_str!("assets/dashboard.html");
 
 /// Default feed record key if not overridden by `FEED_RKEY` env var.
 pub const DEFAULT_FEED_RKEY: &str = "for-your-consideration";
+
+/// Number of parallel lock shards for partitioned active user tracking.
+pub const ACTIVE_USERS_SHARDS: usize = 64;
+
+/// Returns the shard index for a viewer identifier string.
+#[inline]
+#[must_use]
+pub fn active_users_shard_idx(viewer: &str) -> usize {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(viewer.as_bytes());
+    (hasher.finalize() as usize) & (ACTIVE_USERS_SHARDS - 1)
+}
+
+/// RAII guard that decrements the in-flight request counter when dropped.
+#[derive(Debug)]
+pub struct InFlightRequestGuard<'a> {
+    tracker: &'a ActiveUsersTracker,
+}
+
+impl Drop for InFlightRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.tracker.decrement_in_flight();
+    }
+}
+
+/// High-concurrency 64-shard partitioned tracker for real-time and sliding-window feed consumers.
+#[derive(Debug)]
+pub struct ActiveUsersTracker {
+    in_flight: AtomicUsize,
+    shards: [RwLock<AHashMap<CompactString, u64>>; ACTIVE_USERS_SHARDS],
+}
+
+impl Default for ActiveUsersTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for ActiveUsersTracker {
+    fn clone(&self) -> Self {
+        let mut new_shards: [RwLock<AHashMap<CompactString, u64>>; ACTIVE_USERS_SHARDS] =
+            std::array::from_fn(|_| RwLock::new(AHashMap::new()));
+        for (i, shard) in self.shards.iter().enumerate() {
+            *new_shards[i].get_mut() = shard.read().clone();
+        }
+        Self {
+            in_flight: AtomicUsize::new(self.in_flight.load(Ordering::SeqCst)),
+            shards: new_shards,
+        }
+    }
+}
+
+impl ActiveUsersTracker {
+    /// Creates a new partitioned active users tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            in_flight: AtomicUsize::new(0),
+            shards: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
+        }
+    }
+
+    /// Records activity for a viewer identifier at a specific timestamp.
+    pub fn record_activity(&self, viewer: &str, timestamp_secs: u64) {
+        let trimmed = viewer.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let idx = active_users_shard_idx(trimmed);
+        let mut shard = self.shards[idx].write();
+        shard.insert(CompactString::new(trimmed), timestamp_secs);
+    }
+
+    /// Tracks a request entering the server, incrementing in-flight count and recording viewer activity.
+    #[must_use]
+    pub fn track_request<'a>(
+        &'a self,
+        viewer: Option<&str>,
+        timestamp_secs: u64,
+    ) -> InFlightRequestGuard<'a> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        if let Some(v) = viewer {
+            self.record_activity(v, timestamp_secs);
+        }
+        InFlightRequestGuard { tracker: self }
+    }
+
+    /// Safely decrements the in-flight request counter.
+    pub fn decrement_in_flight(&self) {
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+                Some(val.saturating_sub(1))
+            });
+    }
+
+    /// Returns the number of currently active in-flight requests.
+    #[must_use]
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Prunes viewer activity records older than the cutoff timestamp.
+    pub fn prune_older_than(&self, cutoff_secs: u64) {
+        for shard in &self.shards {
+            let mut guard = shard.write();
+            guard.retain(|_, &mut ts| ts >= cutoff_secs);
+        }
+    }
+
+    /// Computes active user metrics across 1m, 5m, 15m sliding windows.
+    #[must_use]
+    pub fn get_telemetry(&self, now_secs: u64) -> ActiveUsersTelemetryInfo {
+        let cutoff_1m = now_secs.saturating_sub(60);
+        let cutoff_5m = now_secs.saturating_sub(300);
+        let cutoff_15m = now_secs.saturating_sub(900);
+
+        let in_flight_requests = self.in_flight_count();
+        let mut concurrent_viewers_1m: usize = 0;
+        let mut concurrent_viewers_5m: usize = 0;
+        let mut concurrent_viewers_15m: usize = 0;
+        let mut total_active_viewers: usize = 0;
+
+        for shard in &self.shards {
+            let guard = shard.read();
+            total_active_viewers = total_active_viewers.saturating_add(guard.len());
+            for &ts in guard.values() {
+                if ts >= cutoff_1m {
+                    concurrent_viewers_1m = concurrent_viewers_1m.saturating_add(1);
+                }
+                if ts >= cutoff_5m {
+                    concurrent_viewers_5m = concurrent_viewers_5m.saturating_add(1);
+                }
+                if ts >= cutoff_15m {
+                    concurrent_viewers_15m = concurrent_viewers_15m.saturating_add(1);
+                }
+            }
+        }
+
+        ActiveUsersTelemetryInfo {
+            in_flight_requests,
+            concurrent_viewers_1m,
+            concurrent_viewers_5m,
+            concurrent_viewers_15m,
+            total_active_viewers,
+        }
+    }
+}
 
 /// Application state shared across all HTTP request handlers.
 #[derive(Clone)]
@@ -82,6 +233,8 @@ pub struct AppState {
     pub snapshot_tracker: Arc<SnapshotStatusTracker>,
     /// Tracker for real-time Jetstream firehose ingestion velocity and statistics.
     pub ingestion_tracker: Arc<IngestionTracker>,
+    /// Tracker for concurrent in-flight and sliding-window active feed consumers.
+    pub active_users_tracker: Arc<ActiveUsersTracker>,
     /// AT Protocol service DID (e.g. `did:web:feed.example.com`).
     pub service_did: CompactString,
     /// Fully-qualified hostname serving the feed generator (e.g. `feed.example.com`).
@@ -124,6 +277,7 @@ impl AppState {
             user_oauth_sessions: Arc::new(OAuthUserSessionStore::new()),
             snapshot_tracker: Arc::new(SnapshotStatusTracker::default()),
             ingestion_tracker: Arc::new(IngestionTracker::default()),
+            active_users_tracker: Arc::new(ActiveUsersTracker::new()),
             service_did: service_did.into(),
             hostname: hostname.into(),
             feed_rkey: CompactString::new(DEFAULT_FEED_RKEY),
@@ -172,6 +326,13 @@ impl AppState {
     #[must_use]
     pub fn with_ingestion_tracker(mut self, tracker: Arc<IngestionTracker>) -> Self {
         self.ingestion_tracker = tracker;
+        self
+    }
+
+    /// Sets a custom active users tracker.
+    #[must_use]
+    pub fn with_active_users_tracker(mut self, tracker: Arc<ActiveUsersTracker>) -> Self {
+        self.active_users_tracker = tracker;
         self
     }
 
@@ -340,6 +501,10 @@ pub async fn handle_get_feed_skeleton(
                 .ok()
                 .map(|did| did.to_string())
         });
+
+    let _in_flight_guard = state
+        .active_users_tracker
+        .track_request(viewer_did.as_deref().or(Some("anonymous")), now_secs);
 
     // 2. Precedence Hierarchy:
     //    1) Explicit HTTP query parameters (?freshness, ?discovery, ?art, etc.)
@@ -1239,6 +1404,11 @@ pub async fn handle_get_healthz(State(state): State<AppState>) -> impl IntoRespo
 
 /// Handler for `GET /api/telemetry`.
 pub async fn handle_get_telemetry(State(state): State<AppState>) -> impl IntoResponse {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     let stats = state.recommender.graph.get_stats();
     let interner_len = state.recommender.interner.len();
     let uptime = state.start_time.elapsed().as_secs();
@@ -1281,6 +1451,8 @@ pub async fn handle_get_telemetry(State(state): State<AppState>) -> impl IntoRes
         fatigue_decay_window_secs: crate::recommender::FATIGUE_WINDOW_SECS,
     };
 
+    let active_users_info = state.active_users_tracker.get_telemetry(now_secs);
+
     let response = TelemetryResponse {
         status: "ok".to_string(),
         uptime_seconds: uptime,
@@ -1290,6 +1462,7 @@ pub async fn handle_get_telemetry(State(state): State<AppState>) -> impl IntoRes
         ingestion: ingestion_info,
         snapshot: snapshot_info,
         impression_store: impression_info,
+        active_users: active_users_info,
         admin_did: state.admin_did.as_ref().map(ToString::to_string),
     };
 
@@ -1358,8 +1531,17 @@ pub async fn handle_get_feed_preview(
     State(state): State<AppState>,
     Query(query): Query<FeedPreviewQuery>,
 ) -> impl IntoResponse {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     let viewer_opt = query.viewer_identifier();
     let dials = query.to_dials();
+
+    let _in_flight_guard = state
+        .active_users_tracker
+        .track_request(viewer_opt.or(Some("preview-viewer")), now_secs);
 
     match state.recommender.recommend_preview(viewer_opt, &dials) {
         Ok(preview_resp) => (
@@ -2097,5 +2279,83 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req_large).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn test_active_users_tracker_in_flight_lifecycle() {
+        let tracker = ActiveUsersTracker::new();
+        assert_eq!(tracker.in_flight_count(), 0);
+
+        {
+            let _g1 = tracker.track_request(Some("did:plc:alice"), 1000);
+            assert_eq!(tracker.in_flight_count(), 1);
+
+            {
+                let _g2 = tracker.track_request(Some("did:plc:bob"), 1000);
+                assert_eq!(tracker.in_flight_count(), 2);
+            }
+            assert_eq!(tracker.in_flight_count(), 1);
+        }
+        assert_eq!(tracker.in_flight_count(), 0);
+
+        // Guard drop does not underflow
+        tracker.decrement_in_flight();
+        assert_eq!(tracker.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn test_active_users_tracker_sliding_windows_and_pruning() {
+        let tracker = ActiveUsersTracker::new();
+        let now = 1_000_000u64;
+
+        // Viewer 1: 30s ago (1m, 5m, 15m)
+        tracker.record_activity("did:plc:v1", now - 30);
+        // Viewer 2: 2m ago (5m, 15m)
+        tracker.record_activity("did:plc:v2", now - 120);
+        // Viewer 3: 10m ago (15m)
+        tracker.record_activity("did:plc:v3", now - 600);
+        // Viewer 4: 20m ago (>15m)
+        tracker.record_activity("did:plc:v4", now - 1200);
+
+        let telemetry = tracker.get_telemetry(now);
+        assert_eq!(telemetry.in_flight_requests, 0);
+        assert_eq!(telemetry.concurrent_viewers_1m, 1);
+        assert_eq!(telemetry.concurrent_viewers_5m, 2);
+        assert_eq!(telemetry.concurrent_viewers_15m, 3);
+        assert_eq!(telemetry.total_active_viewers, 4);
+
+        // Pruning older than 15m (now - 900)
+        tracker.prune_older_than(now - 900);
+        let after_prune = tracker.get_telemetry(now);
+        assert_eq!(after_prune.total_active_viewers, 3);
+        assert_eq!(after_prune.concurrent_viewers_15m, 3);
+    }
+
+    #[test]
+    fn test_active_users_tracker_concurrent_stress() {
+        use std::sync::Arc;
+        let tracker = Arc::new(ActiveUsersTracker::new());
+        let mut handles = Vec::new();
+
+        for thread_id in 0..16 {
+            let t = Arc::clone(&tracker);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..100 {
+                    let now = 1_700_000 + i;
+                    let did = format!("did:plc:user_{thread_id}_{i}");
+                    let _guard = t.track_request(Some(&did), now);
+                    let _telemetry = t.get_telemetry(now);
+                    if i % 20 == 0 {
+                        t.prune_older_than(now.saturating_sub(60));
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(tracker.in_flight_count(), 0);
     }
 }
