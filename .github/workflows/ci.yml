@@ -46,6 +46,11 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify Lexicon Schema Synchronization with Upstream Bluesky
+        run: |
+          ./scripts/sync_lexicons.sh
+          git diff --exit-code lexicons/ || (echo "Upstream Bluesky Lexicon schema drift detected!" && exit 1)
+
       - name: Run all Unit, Integration, and Durability Tests
         run: cargo test --all-targets --verbose
 
@@ -58,9 +63,6 @@ jobs:
 
       - name: Run cargo-deny security checks
         uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          arguments: --all-features
 
   docker-build:
     name: Production Docker Build & Healthcheck Verification
@@ -72,10 +74,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build production release Docker image
+      - name: Build Container Image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: false
-          tags: for-your-consideration:ci-test
+          tags: for-your-consideration:test
+          load: true
