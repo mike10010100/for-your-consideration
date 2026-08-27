@@ -408,7 +408,7 @@ pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
 /// User-configurable recommendation dials persisted per viewer account.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UserDials {
-    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 36h (129,600s)).
+    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 24h (86,400s)).
     pub freshness_half_life_secs: f32,
     /// Serendipity exploration ratio (range: 0.0 [0%] to 0.50 [50%], default: 0.15 [15%]).
     pub serendipity_ratio: f32,
