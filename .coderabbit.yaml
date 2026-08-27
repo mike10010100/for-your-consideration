@@ -2,10 +2,10 @@
 language: "en-US"
 early_access: false
 
-tone_instructions: "Be concise, rigorous, and direct. Enforce zero unsafe code, zero panics, and strict ATProto Lexicon compliance."
+tone_instructions: "Be assertive, uncompromising, and exacting. Enforce zero unsafe code, zero production panics, strict ATProto Lexicon compliance, and sub-millisecond latency SLAs."
 
 reviews:
-  profile: "chill"
+  profile: "assertive"
   request_changes_workflow: true
   high_level_summary: true
   poem: false
@@ -17,18 +17,23 @@ reviews:
     base_branches:
       - "main"
   instructions: |
-    Strictly verify and enforce:
-    1. Zero Unsafe Code: `#![forbid(unsafe_code)]` across all crates and files.
-    2. Zero Production Panics: Deny `.unwrap()`, `.expect()`, `panic!`, `todo!`, `unimplemented!` in `src/`. Strongly typed `FeedError` returns only.
-    3. AT Protocol Lexicon Compliance: All XRPC endpoints (e.g. `app.bsky.feed.getFeedSkeleton`) and schemas must strictly follow official Bluesky Lexicon schemas (including camelCase property names such as `feedContext`).
-    4. Monotonic Clock & Skew Resilience: Elapsed times and TTLs must use `.saturating_duration_since()` to guard against clock jumps.
-    5. Concurrency & Lock Safety: Never hold synchronous `RwLock` or `Mutex` guards across `.await` points or network I/O.
-    6. Performance & SLA: Maintain sub-millisecond p99 latency SLA.
-    7. 100% Documentation: Public structs, fields, functions, and enums must have descriptive doc comments (`missing_docs` denied).
+    You are an uncompromising senior Rust distributed systems and AT Protocol security engineer.
+    Strictly review and enforce:
+    1. Zero Unsafe Code: `#![forbid(unsafe_code)]` must be strictly preserved across all crates. Reject any `unsafe` blocks, attributes, or circumventing dependencies.
+    2. Zero Production Panics: Deny `.unwrap()`, `.expect()`, `panic!`, `todo!`, `unimplemented!` across all production code (`src/`). Require typed `Result<T, FeedError>` propagation.
+    3. AT Protocol Lexicon Compliance: All XRPC endpoints (e.g. `app.bsky.feed.getFeedSkeleton`, `app.bsky.feed.describeFeedGenerator`) and responses must strictly match the official Bluesky Lexicon schemas (specifically camelCase fields such as `feedContext`).
+    4. Monotonic Clock & Skew Resilience: Elapsed times, intervals, and TTLs must compute using `.saturating_duration_since()` or defensive fallbacks to prevent underflow crashes on NTP/VM clock jumps.
+    5. Concurrency & Lock Safety: Never hold synchronous `RwLock` or `Mutex` guards across `.await` points or I/O. Ensure 64-shard partitioned concurrency is preserved for high throughput.
+    6. Memory & Performance SLA: Recommendation queries must maintain sub-millisecond p99 latency (< 2.0ms absolute SLA). Avoid unnecessary heap allocations and redundant clone operations in hot paths.
+    7. 100% Documentation: Public structs, fields, constants, functions, and enums must have descriptive doc comments (`missing_docs` denied).
   tools:
     clippy:
       enabled: true
     markdownlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    ast-grep:
       enabled: true
 
 chat:
