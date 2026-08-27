@@ -521,6 +521,35 @@ impl Recommender {
         // 1. Seen / Liked deduplication & Self-post exclusion & Root-only & Engagement Floor filtering
         filter_candidate_pool(&mut candidates);
 
+        // If strict min_likes filtering leaves the candidate pool completely empty,
+        // relax min_likes to 0 in Tier 3 to guarantee a resilient, non-empty feed skeleton response.
+        if candidates.is_empty() && dials.min_likes > 0 {
+            let mut fallback_dials = dials.clone();
+            fallback_dials.min_likes = 0;
+            let mut t3_fallback = self.traverse_tier3(&fallback_dials, now_secs);
+            t3_fallback.retain(|c| {
+                if !dials.include_replies {
+                    if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                        if meta.is_reply() {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(ref seen) = seen_bitmap {
+                    if seen.contains(c.post_id) {
+                        return false;
+                    }
+                }
+                if let Some(uid) = viewer_id {
+                    if c.author_id == uid {
+                        return false;
+                    }
+                }
+                true
+            });
+            candidates = t3_fallback;
+        }
+
         // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping)
         if let Some(uid) = viewer_id {
             for c in &mut candidates {
