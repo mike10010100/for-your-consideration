@@ -903,7 +903,7 @@ pub struct SkeletonFeedPost {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<SkeletonReason>,
     /// Optional context string describing feed generation metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "feedContext", skip_serializing_if = "Option::is_none")]
     pub feed_context: Option<String>,
 }
 
