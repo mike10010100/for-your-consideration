@@ -29,7 +29,7 @@ axum = { version = "0.7", features = ["macros", "json"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http = "1.1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
 # Fast In-Memory Graph & Interner
 roaring = "0.10"
