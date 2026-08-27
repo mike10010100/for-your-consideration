@@ -174,11 +174,9 @@ allow = [
 allow-workspace = false
 # List of crates to deny
 deny = [
-    #"ansi_term@0.11.0",
-    #{ crate = "ansi_term@0.11.0", reason = "you can specify a reason it is banned" },
-    # Wrapper crates can optionally be specified to allow the crate when it
-    # is a direct dependency of the otherwise banned crate
-    #{ crate = "ansi_term@0.11.0", wrappers = ["this-crate-directly-depends-on-ansi_term"] },
+    { crate = "openssl", reason = "The project strictly enforces pure Rustls networking and zero C OpenSSL dependencies" },
+    { crate = "openssl-sys", reason = "The project strictly enforces pure Rustls networking and zero C OpenSSL dependencies" },
+    { crate = "native-tls", reason = "The project strictly enforces pure Rustls networking and zero C OpenSSL dependencies" },
 ]
 
 # List of features to allow/deny
