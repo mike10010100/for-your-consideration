@@ -128,6 +128,17 @@ Load: <span id="stat-snapshot-load-ms">0.0ms</span> • Size: <span id="stat-sna
 Graph: <span id="stat-memory-graph">0 MB</span> • Interner: <span id="stat-memory-interner">0 MB</span>
 </div>
 </div>
+<!-- Concurrent / Active Feed Users -->
+<div class="metric-card highlight-indigo">
+<div class="metric-label">
+<span>Concurrent Users</span>
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+</div>
+<div class="metric-value" id="stat-active-users">0</div>
+<div class="metric-subtext">
+<span id="stat-active-5m">0 active (5m)</span> • <span id="stat-in-flight">0 in-flight</span>
+</div>
+</div>
 </div>
 <!-- Backwards Hydration & Jetstream Replay Progress Banner -->
 <div id="hydration-banner" class="hydration-banner syncing">
@@ -564,6 +575,9 @@ statSnapshotVersion: $('stat-snapshot-version'),
 statMemoryTotal: $('stat-memory-total'),
 statMemoryGraph: $('stat-memory-graph'),
 statMemoryInterner: $('stat-memory-interner'),
+statActiveUsers: $('stat-active-users'),
+statActive5m: $('stat-active-5m'),
+statInFlight: $('stat-in-flight'),
 uptimeDisplay: $('uptime-display'),
 velocityBadge: $('telemetry-velocity-badge'),
 btnTogglePolling: $('btn-toggle-polling'),
@@ -810,6 +824,17 @@ elements.statMemoryGraph.textContent = formatBytes(data.memory.graph_bytes);
 }
 if (elements.statMemoryInterner) {
 elements.statMemoryInterner.textContent = formatBytes(data.memory.interner_bytes);
+}
+}
+if (data.active_users) {
+if (elements.statActiveUsers) {
+elements.statActiveUsers.textContent = formatNumber(data.active_users.concurrent_viewers_5m);
+}
+if (elements.statActive5m) {
+elements.statActive5m.textContent = `${formatNumber(data.active_users.concurrent_viewers_5m)} active (5m)`;
+}
+if (elements.statInFlight) {
+elements.statInFlight.textContent = `${formatNumber(data.active_users.in_flight_requests)} in-flight`;
 }
 }
 if (data.uptime_seconds !== undefined) {

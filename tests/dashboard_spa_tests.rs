@@ -149,6 +149,9 @@ async fn test_dashboard_telemetry_component_elements() {
     assert!(html.contains("id=\"stat-snapshot-status\""));
     assert!(html.contains("id=\"stat-snapshot-load-ms\""));
     assert!(html.contains("id=\"stat-snapshot-size\""));
+    assert!(html.contains("id=\"stat-active-users\""));
+    assert!(html.contains("id=\"stat-active-5m\""));
+    assert!(html.contains("id=\"stat-in-flight\""));
     assert!(html.contains("id=\"uptime-display\""));
     assert!(html.contains("id=\"telemetry-velocity-badge\""));
     assert!(html.contains("id=\"velocity-sparkline\""));
