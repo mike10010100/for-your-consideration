@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 #![allow(
+    clippy::all,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    missing_docs,
+    clippy::suboptimal_flops,
     clippy::float_cmp,
-    clippy::suboptimal_flops
+    clippy::manual_midpoint,
+    missing_docs
 )]
 
 use std::sync::Arc;

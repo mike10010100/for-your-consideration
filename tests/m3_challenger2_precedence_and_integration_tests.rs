@@ -1,10 +1,9 @@
 #![forbid(unsafe_code)]
 #![allow(
+    clippy::all,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::cast_lossless,
-    clippy::too_many_arguments,
     missing_docs,
     rust_2018_idioms
 )]

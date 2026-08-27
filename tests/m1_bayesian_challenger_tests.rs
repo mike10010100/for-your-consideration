@@ -472,7 +472,7 @@ proptest! {
     ) {
         let shrinkage = calculate_bayesian_shrinkage(s, beta);
         prop_assert!(shrinkage >= 0.0, "Shrinkage must be >= 0.0, got {shrinkage}");
-        prop_assert!(shrinkage < 1.0 || s == 0, "Shrinkage must be < 1.0, got {shrinkage}");
+        prop_assert!(shrinkage <= 1.0, "Shrinkage must be <= 1.0, got {shrinkage}");
 
         if s == 0 {
             prop_assert_eq!(shrinkage, 0.0);

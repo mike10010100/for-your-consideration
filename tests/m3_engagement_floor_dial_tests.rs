@@ -7,7 +7,14 @@
 //! 4. XRPC 3-tier precedence hierarchy (`min_likes`/`engagement_floor` query override -> persisted dials -> default).
 //! 5. REST `/api/preferences` GET, POST, DELETE lifecycle with `min_likes`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    missing_docs
+)]
 
 mod common;
 use common::generate_mock_jwt;

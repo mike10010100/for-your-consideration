@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+#![allow(
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    missing_docs
+)]
 
 //! Challenger 2 Empirical Test Suite for Milestone 1 (M1: Bayesian Taste Shrinkage & Overlap Filtering).
 //!

@@ -6,12 +6,12 @@
 //! 3. Validation boundary matrix and query parameter parsing for `min_likes` and `engagement_floor`.
 //! 4. Strict candidate exclusion under multi-tier recommender and preview endpoints.
 
+#![forbid(unsafe_code)]
 #![allow(
+    clippy::all,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::too_many_arguments,
-    clippy::cast_lossless,
     missing_docs
 )]
 
@@ -274,7 +274,7 @@ fn test_snapshot_v4_roundtrip_all_boundary_values() {
             },
             include_replies,
             min_likes,
-            updated_at_secs: now + min_likes as u64,
+            updated_at_secs: now + u64::from(min_likes),
         };
         prefs.set(uid, dials);
     }

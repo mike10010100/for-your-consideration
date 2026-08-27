@@ -1,3 +1,12 @@
+#![forbid(unsafe_code)]
+#![allow(
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    missing_docs
+)]
+
 //! Comprehensive Challenger 2 Empirical Verification Suite for Milestone 3.
 //!
 //! Validates:

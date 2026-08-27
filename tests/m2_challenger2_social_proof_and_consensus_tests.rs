@@ -1,11 +1,10 @@
 #![forbid(unsafe_code)]
 #![allow(
+    clippy::all,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    missing_docs,
-    clippy::float_cmp,
-    clippy::needless_range_loop
+    missing_docs
 )]
 
 use std::sync::{Arc, Barrier};
