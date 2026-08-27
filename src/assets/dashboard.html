@@ -270,6 +270,29 @@ Save Dials to My Bluesky Feed
 <button type="button" class="btn btn-preset" data-viewer="" style="padding: 0.15rem 0.5rem; font-size: 0.6875rem; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-muted);">Anonymous (Cold Start)</button>
 </div>
 </div>
+<!-- Algorithmic Mode Presets -->
+<div class="dial-control" style="margin-bottom: 0.875rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border-light);">
+<div class="dial-label-row" style="margin-bottom: 0.35rem;">
+<span class="dial-label" style="display: flex; align-items: center; gap: 0.35rem;">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-purple);"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+Algorithmic Presets
+</span>
+</div>
+<div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
+<button type="button" class="btn btn-sm btn-mode-preset" data-preset="realtime" style="flex: 1; min-width: 105px; padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">
+⚡ Realtime Pulse
+</button>
+<button type="button" class="btn btn-sm btn-mode-preset btn-active-tab" data-preset="balanced" style="flex: 1; min-width: 105px; padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 6px; font-weight: 500;">
+⚖️ Balanced (Default)
+</button>
+<button type="button" class="btn btn-sm btn-mode-preset" data-preset="deepdive" style="flex: 1; min-width: 105px; padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">
+💎 Deep Dives
+</button>
+<button type="button" class="btn btn-sm btn-mode-preset" data-preset="explorer" style="flex: 1; min-width: 105px; padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">
+🔭 Explorer
+</button>
+</div>
+</div>
 <div class="dial-group">
 <!-- Freshness Half-Life (tau) -->
 <div class="dial-control">
@@ -1070,8 +1093,9 @@ container.classList.toggle('expanded');
 function updateDialBadges() {
 const freshness = Number(elements.sliderFreshness.value);
 let freshnessLabel = 'Balanced';
-if (freshness <= 12) freshnessLabel = 'Realtime';
-else if (freshness >= 72) freshnessLabel = 'Weekly';
+if (freshness <= 6) freshnessLabel = 'Realtime';
+else if (freshness <= 18) freshnessLabel = 'Fast';
+else if (freshness >= 72) freshnessLabel = 'Deep Dive / Weekly';
 elements.badgeFreshness.textContent = `${freshness.toFixed(0)}h (${freshnessLabel})`;
 const discovery = Number(elements.sliderDiscovery.value);
 let discoveryLabel = 'Balanced';
@@ -1928,6 +1952,35 @@ btn.addEventListener('click', () => {
 const v = btn.getAttribute('data-viewer');
 elements.dialViewerInput.value = v;
 triggerFeedPreview();
+});
+});
+const ALGO_PRESETS = {
+realtime: { freshness: 6, discovery: 10, minLikes: 1, replies: false },
+balanced: { freshness: 36, discovery: 15, minLikes: 3, replies: false },
+deepdive: { freshness: 72, discovery: 20, minLikes: 10, replies: false },
+explorer: { freshness: 24, discovery: 35, minLikes: 3, replies: false }
+};
+document.querySelectorAll('.btn-mode-preset').forEach(btn => {
+btn.addEventListener('click', () => {
+const presetKey = btn.getAttribute('data-preset');
+const p = ALGO_PRESETS[presetKey];
+if (p) {
+document.querySelectorAll('.btn-mode-preset').forEach(b => {
+b.className = 'btn btn-sm btn-mode-preset';
+b.style.background = 'var(--bg-surface)';
+b.style.border = '1px solid var(--border-light)';
+b.style.color = 'var(--text-secondary)';
+});
+btn.className = 'btn btn-sm btn-mode-preset btn-active-tab';
+btn.style.background = '';
+btn.style.border = '';
+btn.style.color = '';
+elements.sliderFreshness.value = p.freshness;
+elements.sliderDiscovery.value = p.discovery;
+state.minLikes = p.minLikes;
+state.includeReplies = p.replies;
+triggerFeedPreview();
+}
 });
 });
 elements.btnResetDials.addEventListener('click', handleResetPreferences);

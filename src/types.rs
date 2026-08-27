@@ -298,7 +298,13 @@ impl RecommendationDials {
     ) -> Self {
         let half_life_secs = match freshness {
             Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
+            Some("4h") => 4.0 * 3600.0,
+            Some("8h") => 8.0 * 3600.0,
+            Some("12h") => 12.0 * 3600.0,
+            Some("24h") => 24.0 * 3600.0,
             Some("balanced" | "36h") => 36.0 * 3600.0,
+            Some("48h") => 48.0 * 3600.0,
+            Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
             Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
             Some(custom) => custom
                 .parse::<f32>()

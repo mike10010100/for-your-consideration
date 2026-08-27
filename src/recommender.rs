@@ -1153,7 +1153,9 @@ impl Recommender {
                                     entry.0 += 1;
                                 }
                                 entry.1 += co_sim;
-                                entry.2 = decay;
+                                if decay > entry.2 {
+                                    entry.2 = decay;
+                                }
                             }
                         });
                 }
