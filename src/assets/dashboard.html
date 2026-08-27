@@ -298,9 +298,9 @@ Algorithmic Presets
 <div class="dial-control">
 <div class="dial-label-row">
 <label for="slider-freshness" class="dial-label">Freshness Half-Life (&tau;)</label>
-<span id="badge-freshness" class="dial-value-badge">36.0h (Balanced)</span>
+<span id="badge-freshness" class="dial-value-badge">24.0h (Balanced)</span>
 </div>
-<input type="range" id="slider-freshness" class="range-slider" min="1" max="168" value="36" step="1" aria-label="Freshness Half-Life">
+<input type="range" id="slider-freshness" class="range-slider" min="1" max="168" value="24" step="1" aria-label="Freshness Half-Life">
 </div>
 <!-- Discovery / Serendipity (epsilon) -->
 <div class="dial-control">
@@ -1359,7 +1359,7 @@ Explain Why
 elements.feedPreviewItems.innerHTML = viewerBannerHtml + html;
 }
 function resetDials() {
-elements.sliderFreshness.value = 36;
+elements.sliderFreshness.value = 24;
 elements.sliderDiscovery.value = 15;
 elements.sliderTopicArt.value = 1.0;
 elements.sliderTopicTech.value = 1.0;
@@ -1956,9 +1956,9 @@ triggerFeedPreview();
 });
 const ALGO_PRESETS = {
 realtime: { freshness: 6, discovery: 10, minLikes: 1, replies: false },
-balanced: { freshness: 36, discovery: 15, minLikes: 3, replies: false },
+balanced: { freshness: 24, discovery: 15, minLikes: 3, replies: false },
 deepdive: { freshness: 72, discovery: 20, minLikes: 10, replies: false },
-explorer: { freshness: 24, discovery: 35, minLikes: 3, replies: false }
+explorer: { freshness: 36, discovery: 35, minLikes: 3, replies: false }
 };
 document.querySelectorAll('.btn-mode-preset').forEach(btn => {
 btn.addEventListener('click', () => {

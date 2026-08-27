@@ -2055,7 +2055,7 @@ mod tests {
             .to_bytes();
         let prefs_resp: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
         assert!(!prefs_resp.is_custom);
-        assert_eq!(prefs_resp.preferences.freshness_hours, 36.0);
+        assert_eq!(prefs_resp.preferences.freshness_hours, 24.0);
 
         // 3. Authenticated POST -> 200 saves custom dials
         let save_req = SavePreferencesRequestBody {
