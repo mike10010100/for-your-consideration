@@ -1,12 +1,20 @@
-# CodeRabbit AI Code Review Configuration
-# https://coderabbit.ai / https://docs.coderabbit.ai
-
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "en-US"
-tone_instructions: "Rigorous, concise, and focused on production-grade Rust systems architecture and security."
 early_access: false
 
+tone_instructions: |
+  You are an uncompromising senior Rust systems and distributed systems engineer reviewing Pull Requests for the "For Your Consideration" AT Protocol custom feed generator.
+  Strictly verify and enforce:
+  1. Zero Unsafe Code: `#![forbid(unsafe_code)]` is enforced crate-wide. Reject any `unsafe` blocks or unsafe dependencies.
+  2. Zero Production Panics: Deny `.unwrap()`, `.expect()`, `panic!`, `todo!`, `unimplemented!` in production modules (`src/`). Require typed `Result<T, FeedError>` error handling.
+  3. AT Protocol Lexicon Compliance: All XRPC endpoints (e.g. `app.bsky.feed.getFeedSkeleton`, `app.bsky.feed.describeFeedGenerator`) must strictly follow the official Bluesky Lexicon schemas (including camelCase property names such as `feedContext`).
+  4. Monotonic Clock & Skew Resilience: Elapsed times and TTLs must use `.saturating_duration_since()` or safe defensive handling to guard against NTP or VM clock jumps.
+  5. Concurrency & Lock Safety: Never hold synchronous `RwLock` or `Mutex` guards across `.await` points or network I/O.
+  6. High Performance & Low Latency: Ensure recommendation queries maintain sub-millisecond p99 latency SLA without unnecessary heap allocations in hot paths.
+  7. 100% Documentation Coverage: Public structs, fields, functions, and enums must have descriptive doc comments (`missing_docs` denied).
+
 reviews:
-  profile: "assertive"
+  profile: "chill"
   request_changes_workflow: true
   high_level_summary: true
   poem: false
@@ -15,25 +23,11 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    base_branches:
-      - "main"
-  path_instructions:
-    - path: "src/**/*.rs"
-      instructions: |
-        Strictly enforce the project's non-negotiable invariants from AGENTS.md:
-        1. Zero Unsafe Code: #![forbid(unsafe_code)] is enforced crate-wide. Flag any attempt to introduce unsafe.
-        2. Zero Production Panics: Deny .unwrap(), .expect(), panic!, todo!, unimplemented!. All fallible functions must return Result<T, FeedError>.
-        3. Lock Safety: NEVER allow holding parking_lot::RwLock or Mutex guards across .await points or async yields.
-        4. Monotonic Time: All time-delta calculations must use saturating_duration_since or .map_or(0, ...) to prevent clock-warp crashes.
-        5. Concurrency: High-throughput state must remain 64-shard partitioned.
-    - path: "src/server.rs"
-      instructions: |
-        Verify SSRF & Auth Defenses:
-        1. Ensure outbound PDS/PLC requests strictly validate URLs via validate_outbound_url_async (blocking RFC 1918, loopback, and metadata IPs).
-        2. Ensure OAuth PKCE tokens, state single-use consumption, and DPoP ath bindings are cryptographically sound.
-    - path: "tests/**/*.rs"
-      instructions: |
-        Ensure test suites are deterministic, stress concurrency without deadlocks, and do not introduce brittle sub-millisecond timing assumptions on virtualized 2-core CI runners.
+  tools:
+    clippy:
+      enabled: true
+    markdownlint:
+      enabled: true
 
 chat:
   auto_reply: true
