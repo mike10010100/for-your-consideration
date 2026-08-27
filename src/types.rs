@@ -262,8 +262,8 @@ const fn default_min_likes() -> u32 {
     DEFAULT_MIN_LIKES
 }
 
-/// Default half-life is 36 hours (129,600 seconds).
-pub const DEFAULT_HALF_LIFE_SECS: f32 = 36.0 * 3600.0;
+/// Default half-life is 24 hours (86,400 seconds).
+pub const DEFAULT_HALF_LIFE_SECS: f32 = 24.0 * 3600.0;
 /// Default exploration ratio is 15% (0.15).
 pub const DEFAULT_EXPLORE_RATIO: f32 = 0.15;
 /// Default page limit is 30 items.
@@ -298,7 +298,13 @@ impl RecommendationDials {
     ) -> Self {
         let half_life_secs = match freshness {
             Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
-            Some("balanced" | "36h") => 36.0 * 3600.0,
+            Some("4h") => 4.0 * 3600.0,
+            Some("8h") => 8.0 * 3600.0,
+            Some("12h") => 12.0 * 3600.0,
+            Some("balanced" | "24h") => 24.0 * 3600.0,
+            Some("36h") => 36.0 * 3600.0,
+            Some("48h") => 48.0 * 3600.0,
+            Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
             Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
             Some(custom) => custom
                 .parse::<f32>()
@@ -402,7 +408,7 @@ pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
 /// User-configurable recommendation dials persisted per viewer account.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UserDials {
-    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 36h (129,600s)).
+    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 24h (86,400s)).
     pub freshness_half_life_secs: f32,
     /// Serendipity exploration ratio (range: 0.0 [0%] to 0.50 [50%], default: 0.15 [15%]).
     pub serendipity_ratio: f32,
@@ -2006,8 +2012,8 @@ mod tests {
     #[test]
     fn test_user_dials_default_and_validation() {
         let default_dials = UserDials::default();
-        assert_eq!(default_dials.freshness_half_life_secs, 36.0 * 3600.0);
-        assert_eq!(default_dials.freshness_half_life_hours(), 36.0);
+        assert_eq!(default_dials.freshness_half_life_secs, 24.0 * 3600.0);
+        assert_eq!(default_dials.freshness_half_life_hours(), 24.0);
         assert_eq!(default_dials.discovery_ratio(), 0.15);
         assert_eq!(default_dials.topic_weights.art, 1.0);
         assert_eq!(default_dials.min_likes, DEFAULT_MIN_LIKES);

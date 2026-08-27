@@ -333,7 +333,7 @@ async fn test_rest_preferences_lifecycle_and_aliases() {
     assert_eq!(dto1.did, viewer_did);
     assert!(!dto1.is_custom);
     assert_eq!(dto1.preferences.min_likes, DEFAULT_MIN_LIKES);
-    assert_eq!(dto1.preferences.freshness_hours, 36.0);
+    assert_eq!(dto1.preferences.freshness_hours, 24.0);
     assert_eq!(dto1.preferences.discovery_ratio, 0.15);
     assert!(!dto1.preferences.include_replies);
 

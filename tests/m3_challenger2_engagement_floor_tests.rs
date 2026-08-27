@@ -348,7 +348,7 @@ async fn test_challenger2_rest_preferences_crud_and_boundary_rejection() {
     let body1 = get_resp1.into_body().collect().await.unwrap().to_bytes();
     let dto1: PreferencesResponseDto = serde_json::from_slice(&body1).unwrap();
     assert_eq!(dto1.preferences.min_likes, 3);
-    assert_eq!(dto1.preferences.freshness_hours, 36.0);
+    assert_eq!(dto1.preferences.freshness_hours, 24.0);
     assert_eq!(dto1.preferences.discovery_ratio, 0.15);
     assert!(!dto1.is_custom);
 

@@ -530,7 +530,13 @@ async fn handle_test_get_feed_skeleton(
 
     let half_life_secs = match query.freshness.as_deref() {
         Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
-        Some("balanced" | "36h") => 36.0 * 3600.0,
+        Some("4h") => 4.0 * 3600.0,
+        Some("8h") => 8.0 * 3600.0,
+        Some("12h") => 12.0 * 3600.0,
+        Some("balanced" | "24h") => 24.0 * 3600.0,
+        Some("36h") => 36.0 * 3600.0,
+        Some("48h") => 48.0 * 3600.0,
+        Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
         Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
         Some(custom) => custom
             .parse::<f32>()
@@ -795,7 +801,7 @@ mod tier1_feature_coverage {
     #[test]
     fn test_tier1_f01_user_dials_default_values() {
         let dials = UserDials::default();
-        assert_eq!(dials.freshness_half_life_secs, 36.0 * 3600.0);
+        assert_eq!(dials.freshness_half_life_secs, 24.0 * 3600.0);
         assert_eq!(dials.serendipity_ratio, 0.15);
         assert_eq!(dials.topic_weights.art, 1.0);
         assert_eq!(dials.topic_weights.tech, 1.0);
@@ -1402,7 +1408,7 @@ mod tier1_feature_coverage {
             let dials = None
                 .and_then(|did: &str| store.get_by_did(interner, did))
                 .unwrap_or_default();
-            assert_eq!(dials.freshness_half_life_secs, 36.0 * 3600.0);
+            assert_eq!(dials.freshness_half_life_secs, 24.0 * 3600.0);
         }
         let elapsed = start.elapsed();
         // 1000 fast-path lookups must complete in under 5ms total
@@ -1494,7 +1500,7 @@ mod tier1_feature_coverage {
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: PreferencesResponseDto = serde_json::from_slice(&body_bytes).unwrap();
         assert!(!body.is_custom);
-        assert_eq!(body.preferences.freshness_hours, 36.0);
+        assert_eq!(body.preferences.freshness_hours, 24.0);
         assert_eq!(body.preferences.discovery_ratio, 0.15);
     }
 
@@ -3560,7 +3566,7 @@ mod tier4_real_world_application_scenarios {
             serde_json::from_slice(&get_resp.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert!(!get_data.is_custom);
-        assert_eq!(get_data.preferences.freshness_hours, 36.0);
+        assert_eq!(get_data.preferences.freshness_hours, 24.0);
 
         // Verify Feed
         let feed_req = Request::builder()

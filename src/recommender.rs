@@ -1135,7 +1135,7 @@ impl Recommender {
                     }
                 });
 
-                let mut cand_details: AHashMap<u32, (usize, f32, f32)> = AHashMap::new();
+                let mut cand_details: AHashMap<u32, (usize, f32, f32, f32)> = AHashMap::new();
                 for (&co_user, &co_sim) in &co_interactor_weights {
                     let mut seen_posts_for_curator = AHashSet::new();
                     self.graph
@@ -1148,17 +1148,23 @@ impl Recommender {
                                     now_secs,
                                     dials.half_life_secs,
                                 );
-                                let entry = cand_details.entry(cand_pid).or_insert((0, 0.0, decay));
+                                let affinity = co_sim * decay;
+                                let entry =
+                                    cand_details.entry(cand_pid).or_insert((0, 0.0, 0.0, decay));
                                 if seen_posts_for_curator.insert(cand_pid) {
                                     entry.0 += 1;
                                 }
                                 entry.1 += co_sim;
-                                entry.2 = decay;
+                                entry.2 += affinity;
+                                if decay > entry.3 {
+                                    entry.3 = decay;
+                                }
                             }
                         });
                 }
 
-                for (pid, (curator_count, sim, decay)) in cand_details {
+                for (pid, (curator_count, total_sim, total_affinity, latest_decay)) in cand_details
+                {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
@@ -1180,12 +1186,17 @@ impl Recommender {
                     let consensus_boost = calculate_consensus_boost(curator_count);
                     let social_proof =
                         calculate_social_proof_factor(self.graph.get_post_interaction_count(pid));
-                    let taste_similarity = sim * consensus_boost * social_proof;
-                    let base_score = taste_similarity * decay * topic_boost;
+                    let taste_similarity = total_sim * consensus_boost * social_proof;
+                    let base_score = total_affinity * consensus_boost * social_proof * topic_boost;
                     let final_score = base_score * fatigue_penalty;
+                    let effective_decay = if total_sim > 0.0 {
+                        total_affinity / total_sim
+                    } else {
+                        latest_decay
+                    };
 
                     let breakdown = ScoreBreakdown {
-                        time_decay: decay,
+                        time_decay: effective_decay,
                         taste_similarity,
                         topic_boost,
                         fatigue_penalty,
