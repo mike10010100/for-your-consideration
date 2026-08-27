@@ -139,11 +139,18 @@ fn test_graph_store_similarity_metrics() {
     let cosine_1_2 = graph.compute_cosine_similarity(u1, u2);
     assert!((cosine_1_2 - 0.75).abs() < 1e-4);
 
+    let bayesian_1_2 = graph.compute_bayesian_cosine_similarity(u1, u2, DEFAULT_BAYESIAN_BETA);
+    // 0.75 * (3 / (3 + 3)) = 0.375
+    assert!((bayesian_1_2 - 0.375).abs() < 1e-4);
+
     let jaccard_1_3 = graph.compute_jaccard_similarity(u1, u3);
     assert_eq!(jaccard_1_3, 0.0);
 
     let cosine_1_3 = graph.compute_cosine_similarity(u1, u3);
     assert_eq!(cosine_1_3, 0.0);
+
+    let bayesian_1_3 = graph.compute_bayesian_cosine_similarity(u1, u3, DEFAULT_BAYESIAN_BETA);
+    assert_eq!(bayesian_1_3, 0.0);
 }
 
 #[test]
@@ -231,10 +238,12 @@ fn test_exponential_time_decay_and_popularity_dampener() {
     let expected_18h = (-0.5f32).exp();
     assert!((score_18h_later - expected_18h).abs() < 1e-5);
 
-    // BM25 Dampener
-    assert_eq!(calculate_popularity_dampener(0), 1.0);
-    assert_eq!(calculate_popularity_dampener(3), 0.5);
-    assert_eq!(calculate_popularity_dampener(8), 1.0 / 3.0);
+    // Continuous Social Proof Quality Curve & Consensus Boost
+    assert!((calculate_social_proof_factor(0) - 1.0 / 3.0).abs() < 1e-5);
+    assert!((calculate_popularity_dampener(0) - 1.0 / 3.0).abs() < 1e-5);
+    assert!((calculate_social_proof_factor(3) - 0.805_296).abs() < 1e-4);
+    assert!((calculate_social_proof_factor(10) - 1.1505).abs() < 1e-3);
+    assert!((calculate_consensus_boost(2) - 1.3119).abs() < 1e-3);
 }
 
 #[test]
@@ -259,9 +268,9 @@ fn test_high_velocity_sliding_pool() {
 
     let top_candidates = graph.get_velocity_pool_candidates_at(current_ts, 5);
     assert_eq!(top_candidates.len(), 2);
-    // Post 1002 (reposts 3.0x, dampener 0.5 -> score ~4.44) ranks ahead of Post 1001 (likes 1.0x, dampener ~0.30 -> score ~2.93)
-    assert_eq!(top_candidates[0], 1002);
-    assert_eq!(top_candidates[1], 1001);
+    // Post 1001 (10 likes, social proof S(10) ≈ 1.15 -> score ~11.18) ranks ahead of Post 1002 (3 reposts, social proof S(3) ≈ 0.805 -> score ~7.15)
+    assert_eq!(top_candidates[0], 1001);
+    assert_eq!(top_candidates[1], 1002);
     assert!(!top_candidates.contains(&1003));
 }
 

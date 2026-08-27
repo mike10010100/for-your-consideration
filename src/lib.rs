@@ -76,8 +76,12 @@ pub mod prelude {
     };
     pub use crate::error::{FeedError, Result};
     pub use crate::graph::{
-        calculate_popularity_dampener, calculate_time_decay, GraphSnapshotData, GraphStats,
-        GraphStore, DEFAULT_HALF_LIFE_SECS, NUM_SHARDS, SIX_HOURS_SECS,
+        calculate_bayesian_confidence, calculate_bayesian_shrinkage, calculate_consensus_boost,
+        calculate_popularity_dampener, calculate_social_proof_factor, calculate_time_decay,
+        GraphSnapshotData, GraphStats, GraphStore, DEFAULT_BAYESIAN_BETA,
+        DEFAULT_CONSENSUS_BOOST_MU, DEFAULT_HALF_LIFE_SECS, DEFAULT_SOCIAL_PROOF_ALPHA,
+        DEFAULT_SOCIAL_PROOF_LAMBDA, MIN_SHARED_OVERLAP, NUM_SHARDS, SIX_HOURS_SECS,
+        SOCIAL_PROOF_PLATEAU_THRESHOLD,
     };
     pub use crate::ingest::{
         apply_event_to_graph, build_jetstream_url, build_subscription_url,
@@ -109,7 +113,7 @@ pub mod prelude {
         load_snapshot, load_snapshot_with_preferences, save_snapshot,
         save_snapshot_with_preferences, LoadedSnapshot, SnapshotConfig, SnapshotHeader,
         SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1,
-        SNAPSHOT_MAGIC,
+        SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3, SNAPSHOT_MAGIC,
     };
     pub use crate::types::{
         ApiErrorResponse, CompactEdge, DeletePreferencesResponse, ExplainQuery, FeedPreviewItem,
@@ -123,9 +127,10 @@ pub mod prelude {
         ScoreBreakdown, ScoredPost, SetPreferencesRequest, SetPreferencesResponse, SharedPostInfo,
         SignalType, SkeletonFeedPost, SkeletonReason, SnapshotStatusInfo, TasteTwinItem,
         TasteTwinsQuery, TasteTwinsResponse, TelemetryResponse, TopicCategory, TopicWeights,
-        UserDials, UserDialsResponse, BLUESKY_EPOCH_SECS, DEFAULT_EXPLORE_RATIO,
-        DEFAULT_PAGE_LIMIT, DISCOVERY_MAX, DISCOVERY_MIN, FRESHNESS_MAX_HOURS, FRESHNESS_MIN_HOURS,
-        MAX_FRESHNESS_SECS, MAX_PAGE_LIMIT, MAX_SERENDIPITY_RATIO, MAX_TOPIC_MULTIPLIER,
+        UserDials, UserDialsResponse, BLUESKY_EPOCH_SECS, CURATED_MIN_LIKES, DEFAULT_EXPLORE_RATIO,
+        DEFAULT_MIN_LIKES, DEFAULT_PAGE_LIMIT, DISCOVERY_MAX, DISCOVERY_MIN, EMERGING_MIN_LIKES,
+        FRESHNESS_MAX_HOURS, FRESHNESS_MIN_HOURS, MAX_ENGAGEMENT_FLOOR, MAX_FRESHNESS_SECS,
+        MAX_PAGE_LIMIT, MAX_SERENDIPITY_RATIO, MAX_TOPIC_MULTIPLIER, MIN_ENGAGEMENT_FLOOR,
         MIN_FRESHNESS_SECS, MIN_SERENDIPITY_RATIO, MIN_TOPIC_MULTIPLIER, NUM_TOPIC_CATEGORIES,
         TOPIC_CATEGORIES, TOPIC_MAX, TOPIC_MIN,
     };

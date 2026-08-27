@@ -354,6 +354,7 @@ fn test_adversarial_strict_boundary_invariants() {
             culture: MIN_TOPIC_MULTIPLIER, // 0.0
         },
         include_replies: false,
+        min_likes: MIN_ENGAGEMENT_FLOOR,
         updated_at_secs: 0,
     };
     assert!(
@@ -375,6 +376,7 @@ fn test_adversarial_strict_boundary_invariants() {
             culture: MAX_TOPIC_MULTIPLIER, // 5.0
         },
         include_replies: false,
+        min_likes: MAX_ENGAGEMENT_FLOOR,
         updated_at_secs: u64::MAX,
     };
     assert!(
@@ -387,8 +389,8 @@ fn test_adversarial_strict_boundary_invariants() {
 
 #[test]
 fn test_zero_allocation_and_fast_path_latency() {
-    // 1. Zero allocation contract: UserDials is 40 bytes (with 8-byte u64 alignment) and Copy
-    assert_eq!(std::mem::size_of::<UserDials>(), 40);
+    // 1. Zero allocation contract: UserDials is 48 bytes (with 8-byte u64 alignment) and Copy
+    assert_eq!(std::mem::size_of::<UserDials>(), 48);
     assert_eq!(std::mem::align_of::<UserDials>(), 8);
     assert_eq!(std::mem::size_of::<TopicWeights>(), 20);
 
@@ -628,6 +630,7 @@ fn test_snapshot_crc32_tampering_and_forgery_attacks() {
         payload.extend_from_slice(&1.0f32.to_le_bytes()); // news
         payload.extend_from_slice(&1.0f32.to_le_bytes()); // culture
         payload.extend_from_slice(&[0u8]); // include_replies = false
+        payload.extend_from_slice(&3u32.to_le_bytes()); // min_likes = 3
         payload.extend_from_slice(&100u64.to_le_bytes()); // updated_at
 
         let mut p_hasher = Hasher::new();
@@ -718,8 +721,12 @@ fn test_snapshot_truncation_at_all_granular_offsets() {
 fn test_snapshot_atomic_rename_failure_recovery_and_nesting() {
     let mut nested_path = std::env::temp_dir();
     nested_path.push(format!(
-        "fyc_nested_{}",
-        Instant::now().elapsed().as_nanos()
+        "fyc_nested_{}_{}_{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
     ));
     nested_path.push("deeply");
     nested_path.push("nested");

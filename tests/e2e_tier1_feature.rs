@@ -35,8 +35,12 @@ fn test_f01_intern_basic_did_and_uri() {
     let id_did = interner.intern("did:plc:alice");
     let id_uri = interner.intern("at://did:plc:alice/app.bsky.feed.post/123");
 
-    assert_eq!(id_did, 0);
-    assert_eq!(id_uri, 1);
+    assert_ne!(id_did, id_uri);
+    assert_eq!(interner.lookup_id("did:plc:alice"), Some(id_did));
+    assert_eq!(
+        interner.lookup_id("at://did:plc:alice/app.bsky.feed.post/123"),
+        Some(id_uri)
+    );
 }
 
 #[test]
@@ -433,13 +437,15 @@ fn test_f08_decay_with_signal_weight() {
 }
 
 // ===========================================================================
-// Feature 9: BM25 Inverse Degree Popularity Dampening
+// Feature 9: Continuous Social Proof Quality Curve & Soft Viral Plateau
 // ===========================================================================
 
 #[test]
 fn test_f09_bm25_zero_interactions_1() {
     let dampener = calculate_popularity_dampener(0);
-    assert!((dampener - 1.0).abs() < 1e-5);
+    assert!((dampener - 1.0 / 3.0).abs() < 1e-5);
+    let social_proof = calculate_social_proof_factor(0);
+    assert!((social_proof - 1.0 / 3.0).abs() < 1e-5);
 }
 
 #[test]
@@ -447,31 +453,44 @@ fn test_f09_bm25_monotonic_penalty() {
     let d0 = calculate_popularity_dampener(0);
     let d10 = calculate_popularity_dampener(10);
     let d100 = calculate_popularity_dampener(100);
-    let d1000 = calculate_popularity_dampener(1000);
+    let d500 = calculate_popularity_dampener(500);
+    let d5000 = calculate_popularity_dampener(5000);
 
-    assert!(d0 > d10);
-    assert!(d10 > d100);
-    assert!(d100 > d1000);
+    // Continuous quality growth up to plateau threshold
+    assert!(d0 < d10);
+    assert!(d10 < d100);
+    assert!(d100 < d500);
+
+    // Soft viral plateau gentle taper above threshold
+    assert!(d500 > d5000);
+    assert!(d5000 > 1.0);
 }
 
 #[test]
 fn test_f09_bm25_score_scaling() {
-    let d15 = calculate_popularity_dampener(15);
-    assert!((d15 - 0.25).abs() < 1e-4); // 1 / sqrt(16) = 0.25
+    let d50 = calculate_popularity_dampener(50);
+    assert!((d50 - 1.5298).abs() < 1e-3);
 }
 
 #[test]
 fn test_f09_bm25_comparison_viral_vs_niche() {
-    let niche_dampener = calculate_popularity_dampener(3); // 1/sqrt(4) = 0.5
-    let viral_dampener = calculate_popularity_dampener(99); // 1/sqrt(100) = 0.1
+    let unvetted = calculate_popularity_dampener(0);
+    let validated = calculate_popularity_dampener(10);
 
-    assert_eq!(niche_dampener / viral_dampener, 5.0);
+    // Validated post receives over 3x higher quality multiplier than unvetted noise
+    assert!(validated > unvetted * 3.0);
+
+    // Consensus boost compounding
+    let single_curator = calculate_consensus_boost(1);
+    let triple_curator = calculate_consensus_boost(3);
+    assert_eq!(single_curator, 1.0);
+    assert!((triple_curator - 1.4944).abs() < 1e-3);
 }
 
 #[test]
 fn test_f09_bm25_formula_exactness() {
     let count = 24;
-    let expected = 1.0 / (25.0f32).sqrt();
+    let expected = (25.0 / 27.0) * (1.0 + 0.15 * (25.0f32).ln());
     let actual = calculate_popularity_dampener(count);
     assert!((actual - expected).abs() < 1e-6);
 }
@@ -600,9 +619,11 @@ fn test_f11_3step_walk_multi_cointeractors() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
 
     assert!(res.posts.iter().any(|p| p.uri.contains("/c1")));
 }
@@ -658,9 +679,11 @@ fn test_f11_3step_walk_path_weight_accumulation() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
     assert!(!res.posts.is_empty());
     assert_eq!(res.posts[0].uri, target_post);
 }
@@ -859,9 +882,11 @@ fn test_f13_tier1_to_tier2_fallback_on_empty() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
     // Cascaded to Tier 2
     assert_eq!(res.posts[0].source, RecommendationSource::Tier2FollowWalk);
 }
@@ -892,9 +917,11 @@ fn test_f13_tier2_to_tier3_fallback_on_empty() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
     assert_eq!(res.posts[0].source, RecommendationSource::Tier3VelocityPool);
 }
 
@@ -1175,9 +1202,11 @@ fn test_f16_thread_dampening_multiple_threads() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(None, &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(None, &dials, now).unwrap();
     assert_eq!(res.posts.len(), 3);
 }
 
@@ -1201,9 +1230,11 @@ fn test_f16_thread_dampening_standalone_posts_kept() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(None, &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(None, &dials, now).unwrap();
     assert_eq!(res.posts.len(), 2); // Max 2 per author
 }
 
@@ -1228,9 +1259,11 @@ fn test_f16_thread_dampening_interleaved_replies() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(None, &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(None, &dials, now).unwrap();
     assert_eq!(res.posts.len(), 2);
 }
 

@@ -117,6 +117,14 @@ fn create_test_fixture() -> (
     graph.record_interaction(dave, news_post1, SignalType::Like, now - 250);
     graph.record_interaction(eve, culture_post1, SignalType::Like, now - 150);
 
+    // Baseline interactions so candidate posts meet default engagement floor (min_likes: 3)
+    let u1 = interner.intern("did:plc:mock_emp_user_1");
+    let u2 = interner.intern("did:plc:mock_emp_user_2");
+    for &p in &[tech_post2, art_post2, sci_post1, news_post1, culture_post1] {
+        graph.record_interaction(u1, p, SignalType::Like, now - 350);
+        graph.record_interaction(u2, p, SignalType::Like, now - 350);
+    }
+
     // Snapshot Tracker
     let snap_config = SnapshotConfig {
         path: std::path::PathBuf::from("target/challenger_m3_snapshot.bin"),

@@ -100,7 +100,10 @@ fn test_30m_immediate_hard_suppression_100_percent() {
     graph.record_interaction(followed, p3, SignalType::Like, TEST_EPOCH - 500);
 
     let rec = Recommender::new(interner, graph);
-    let dials = RecommendationDials::default();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // Turn 1: Initial recommendation returns all 3 posts
     let feed1 = rec
@@ -217,7 +220,10 @@ fn test_post_re_ranking_under_fatigue_decay() {
     graph.record_follow(viewer, followed);
 
     let rec = Recommender::new(interner, graph);
-    let dials = RecommendationDials::default();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // Baseline: Post A is #1, Post B is #2
     let base_rec = rec
@@ -392,7 +398,10 @@ fn test_multi_user_isolation_across_shards() {
     graph.record_interaction(followed, post_y, SignalType::Like, TEST_EPOCH - 50);
 
     let rec = Recommender::new(interner, graph);
-    let dials = RecommendationDials::default();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // Serve post_x to User A only
     rec.record_impressions(Some("did:plc:user_a"), &[post_x], TEST_EPOCH);

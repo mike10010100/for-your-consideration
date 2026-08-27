@@ -25,7 +25,7 @@ pub const PREFERENCE_SHARDS: usize = 64;
 #[inline]
 #[must_use]
 pub const fn shard_idx(user_id: u32) -> usize {
-    (user_id as usize) % PREFERENCE_SHARDS
+    (user_id as usize) & (PREFERENCE_SHARDS - 1)
 }
 
 /// High-performance, 64-shard partitioned in-memory store for user preference dials.

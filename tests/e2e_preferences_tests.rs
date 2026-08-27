@@ -57,6 +57,7 @@ pub struct UserDials {
     pub serendipity_ratio: f32,
     pub topic_weights: TopicWeights,
     pub include_replies: bool,
+    pub min_likes: u32,
     pub updated_at_secs: u64,
 }
 
@@ -67,6 +68,7 @@ impl Default for UserDials {
             serendipity_ratio: DEFAULT_EXPLORE_RATIO,         // 0.15 (15%)
             topic_weights: TopicWeights::default(),           // 1.0 for all 5 topics
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 0,
         }
     }
@@ -298,6 +300,7 @@ impl SnapshotSection8Helper {
                     culture,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: updated_at,
             };
 
@@ -554,6 +557,7 @@ async fn handle_test_get_feed_skeleton(
         topic_weights: saved_dials.topic_weights,
         explain: query.explain.unwrap_or(false),
         include_replies: false,
+        min_likes: saved_dials.min_likes,
         limit,
         cursor: query.cursor,
     };
@@ -710,6 +714,7 @@ async fn handle_test_post_preferences(
             culture: body.topic_weights.culture,
         },
         include_replies: false,
+        min_likes: 3,
         updated_at_secs: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -814,6 +819,7 @@ mod tier1_feature_coverage {
                 culture: 3.0,
             },
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 1_700_000_000,
         };
         assert!(dials.validate().is_ok());
@@ -840,6 +846,7 @@ mod tier1_feature_coverage {
                 culture: 1.0,
             },
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 12345,
         };
         let dials2 = dials1; // Copy trait
@@ -852,6 +859,7 @@ mod tier1_feature_coverage {
     fn test_tier1_f01_user_dials_updated_at_timestamp() {
         let dials = UserDials {
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 1_720_000_000,
             ..Default::default()
         };
@@ -879,6 +887,7 @@ mod tier1_feature_coverage {
             serendipity_ratio: 0.10,
             topic_weights: TopicWeights::default(),
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 100,
         };
         store.set(101, dials);
@@ -902,6 +911,7 @@ mod tier1_feature_coverage {
                 culture: 1.0,
             },
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 200,
         };
         let uid = store.set_by_did(&interner, "did:plc:alice_persisted", dials);
@@ -940,6 +950,7 @@ mod tier1_feature_coverage {
                         serendipity_ratio: 0.15,
                         topic_weights: TopicWeights::default(),
                         include_replies: false,
+                        min_likes: 3,
                         updated_at_secs: uid as u64,
                     };
                     store_clone.set(uid, dials);
@@ -975,6 +986,7 @@ mod tier1_feature_coverage {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 1_700_000_123,
             },
         );
@@ -999,6 +1011,7 @@ mod tier1_feature_coverage {
                     serendipity_ratio: (i % 50) as f32 / 100.0,
                     topic_weights: TopicWeights::default(),
                     include_replies: false,
+                    min_likes: 3,
                     updated_at_secs: i as u64,
                 },
             );
@@ -1104,6 +1117,7 @@ mod tier1_feature_coverage {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1184,6 +1198,7 @@ mod tier1_feature_coverage {
                 serendipity_ratio: 0.15,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1214,6 +1229,7 @@ mod tier1_feature_coverage {
                 serendipity_ratio: 0.40,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1273,6 +1289,7 @@ mod tier1_feature_coverage {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1303,6 +1320,7 @@ mod tier1_feature_coverage {
                 serendipity_ratio: 0.20,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1431,6 +1449,7 @@ mod tier1_feature_coverage {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -1529,6 +1548,7 @@ mod tier1_feature_coverage {
                 serendipity_ratio: 0.10,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -2114,6 +2134,7 @@ mod tier2_boundary_corner_cases {
                 serendipity_ratio: 0.15,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: i as u64,
             };
             store.set(42, dials);
@@ -2143,6 +2164,7 @@ mod tier2_boundary_corner_cases {
                     serendipity_ratio: 0.15,
                     topic_weights: TopicWeights::default(),
                     include_replies: false,
+                    min_likes: 3,
                     updated_at_secs: i as u64,
                 },
             );
@@ -2915,6 +2937,7 @@ mod tier3_cross_feature_combinations {
                 culture: 3.0,
             },
             include_replies: false,
+            min_likes: 3,
             updated_at_secs: 1_700_500_000,
         };
         assert!(custom_dials.validate().is_ok());
@@ -2954,6 +2977,7 @@ mod tier3_cross_feature_combinations {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -3053,6 +3077,7 @@ mod tier3_cross_feature_combinations {
                     serendipity_ratio: 0.15,
                     topic_weights: TopicWeights::default(),
                     include_replies: false,
+                    min_likes: 3,
                     updated_at_secs: i as u64,
                 },
             );
@@ -3089,6 +3114,7 @@ mod tier3_cross_feature_combinations {
                         serendipity_ratio: 0.25,
                         topic_weights: TopicWeights::default(),
                         include_replies: false,
+                        min_likes: 3,
                         updated_at_secs: 999,
                     },
                 );
@@ -3154,6 +3180,7 @@ mod tier3_cross_feature_combinations {
                     serendipity_ratio: 0.10 + (i as f32 * 0.02),
                     topic_weights: TopicWeights::default(),
                     include_replies: false,
+                    min_likes: 3,
                     updated_at_secs: 1000 + i as u64,
                 },
             );
@@ -3190,6 +3217,7 @@ mod tier3_cross_feature_combinations {
                 serendipity_ratio: 0.35,
                 topic_weights: TopicWeights::default(),
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -3450,6 +3478,7 @@ mod tier4_real_world_application_scenarios {
                     culture: 1.0,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );
@@ -3501,6 +3530,7 @@ mod tier4_real_world_application_scenarios {
                     culture: 0.5,
                 },
                 include_replies: false,
+                min_likes: 3,
                 updated_at_secs: 100,
             },
         );

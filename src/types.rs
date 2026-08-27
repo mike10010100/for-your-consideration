@@ -238,10 +238,28 @@ pub struct RecommendationDials {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
+    #[serde(default = "default_min_likes")]
+    pub min_likes: u32,
     /// Maximum number of posts to return per page.
     pub limit: usize,
     /// Opaque pagination cursor.
     pub cursor: Option<String>,
+}
+
+/// Default minimum likes threshold for candidate filtering (3+ likes, balanced).
+pub const DEFAULT_MIN_LIKES: u32 = 3;
+/// Minimum likes threshold for Emerging preset (1+ likes).
+pub const EMERGING_MIN_LIKES: u32 = 1;
+/// Minimum likes threshold for Curated preset (10+ likes).
+pub const CURATED_MIN_LIKES: u32 = 10;
+/// Minimum allowable engagement floor (0 likes).
+pub const MIN_ENGAGEMENT_FLOOR: u32 = 0;
+/// Maximum allowable engagement floor (100 likes).
+pub const MAX_ENGAGEMENT_FLOOR: u32 = 100;
+
+const fn default_min_likes() -> u32 {
+    DEFAULT_MIN_LIKES
 }
 
 /// Default half-life is 36 hours (129,600 seconds).
@@ -261,6 +279,7 @@ impl Default for RecommendationDials {
             topic_weights: TopicWeights::default(),
             explain: false,
             include_replies: false,
+            min_likes: DEFAULT_MIN_LIKES,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
         }
@@ -308,8 +327,27 @@ impl RecommendationDials {
             topic_weights: TopicWeights::default(),
             explain,
             include_replies: false,
+            min_likes: DEFAULT_MIN_LIKES,
             limit,
             cursor,
+        }
+    }
+
+    /// Parses engagement floor string or preset alias into numeric `min_likes`.
+    #[must_use]
+    pub fn parse_engagement_floor(value: Option<&str>) -> u32 {
+        match value.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("emerging" | "emerge" | "1" | "1+") => EMERGING_MIN_LIKES,
+            Some("balanced" | "default" | "3" | "3+") | None => DEFAULT_MIN_LIKES,
+            Some("curated" | "high" | "10" | "10+") => CURATED_MIN_LIKES,
+            Some("all" | "none" | "off" | "0" | "0+") => MIN_ENGAGEMENT_FLOOR,
+            Some(custom) => {
+                let clean = custom.trim_end_matches('+');
+                clean
+                    .parse::<u32>()
+                    .unwrap_or(DEFAULT_MIN_LIKES)
+                    .clamp(MIN_ENGAGEMENT_FLOOR, MAX_ENGAGEMENT_FLOOR)
+            }
         }
     }
 
@@ -324,6 +362,13 @@ impl RecommendationDials {
     #[must_use]
     pub const fn with_include_replies(mut self, include_replies: bool) -> Self {
         self.include_replies = include_replies;
+        self
+    }
+
+    /// Sets custom minimum engagement floor (likes) on these dials.
+    #[must_use]
+    pub const fn with_min_likes(mut self, min_likes: u32) -> Self {
+        self.min_likes = min_likes;
         self
     }
 }
@@ -357,7 +402,7 @@ pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
 /// User-configurable recommendation dials persisted per viewer account.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UserDials {
-    /// Half-life time decay parameter in seconds (range: 1h [3,600s] to 168h [604,800s], default: 36h [129,600s]).
+    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 36h (129,600s)).
     pub freshness_half_life_secs: f32,
     /// Serendipity exploration ratio (range: 0.0 [0%] to 0.50 [50%], default: 0.15 [15%]).
     pub serendipity_ratio: f32,
@@ -366,6 +411,9 @@ pub struct UserDials {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
+    #[serde(default = "default_min_likes")]
+    pub min_likes: u32,
     /// Unix timestamp in seconds when preferences were last saved or updated.
     pub updated_at_secs: u64,
 }
@@ -377,6 +425,7 @@ impl Default for UserDials {
             serendipity_ratio: DEFAULT_EXPLORE_RATIO,
             topic_weights: TopicWeights::default(),
             include_replies: false,
+            min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs: 0,
         }
     }
@@ -430,6 +479,13 @@ impl UserDials {
             }
         }
 
+        if self.min_likes > MAX_ENGAGEMENT_FLOOR {
+            return Err(format!(
+                "Minimum engagement floor must be between {} and {} likes, got {}",
+                MIN_ENGAGEMENT_FLOOR, MAX_ENGAGEMENT_FLOOR, self.min_likes
+            ));
+        }
+
         Ok(())
     }
 
@@ -458,6 +514,7 @@ impl UserDials {
             serendipity_ratio: discovery_ratio,
             topic_weights,
             include_replies: false,
+            min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs,
         }
     }
@@ -466,6 +523,13 @@ impl UserDials {
     #[must_use]
     pub const fn with_include_replies(mut self, include_replies: bool) -> Self {
         self.include_replies = include_replies;
+        self
+    }
+
+    /// Sets the minimum engagement floor (likes).
+    #[must_use]
+    pub const fn with_min_likes(mut self, min_likes: u32) -> Self {
+        self.min_likes = min_likes;
         self
     }
 
@@ -478,6 +542,7 @@ impl UserDials {
             topic_weights: self.topic_weights,
             explain: false,
             include_replies: self.include_replies,
+            min_likes: self.min_likes,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
         }
@@ -494,6 +559,7 @@ impl UserDials {
             serendipity_ratio: dials.explore_ratio,
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            min_likes: dials.min_likes,
             updated_at_secs,
         }
     }
@@ -504,6 +570,7 @@ impl UserDials {
         dials.explore_ratio = self.serendipity_ratio;
         dials.topic_weights = self.topic_weights;
         dials.include_replies = self.include_replies;
+        dials.min_likes = self.min_likes;
     }
 }
 
@@ -552,6 +619,9 @@ pub struct UserDialsResponse {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
+    #[serde(default = "default_min_likes")]
+    pub min_likes: u32,
     /// Timestamp in seconds since unix epoch when dials were last updated.
     pub updated_at_secs: u64,
 }
@@ -563,6 +633,7 @@ impl From<UserDials> for UserDialsResponse {
             discovery_ratio: dials.discovery_ratio(),
             topics: dials.topic_weights,
             include_replies: dials.include_replies,
+            min_likes: dials.min_likes,
             updated_at_secs: dials.updated_at_secs,
         }
     }
@@ -582,6 +653,9 @@ pub struct PreferencesPayloadDto {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Minimum engagement floor threshold in likes.
+    #[serde(alias = "engagement_floor", default = "default_min_likes")]
+    pub min_likes: u32,
 }
 
 impl From<UserDials> for PreferencesPayloadDto {
@@ -591,6 +665,7 @@ impl From<UserDials> for PreferencesPayloadDto {
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            min_likes: dials.min_likes,
         }
     }
 }
@@ -626,6 +701,9 @@ pub struct SavePreferencesRequestBody {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (optional, default: false).
     #[serde(default)]
     pub include_replies: Option<bool>,
+    /// Minimum engagement floor threshold in likes (optional, default: 3).
+    #[serde(alias = "engagement_floor", default)]
+    pub min_likes: Option<u32>,
 }
 
 /// Alias for [`SavePreferencesRequestBody`].
@@ -789,7 +867,7 @@ pub struct ScoredPost {
     pub uri: CompactString,
     /// Interned author user ID.
     pub author_id: u32,
-    /// Final composite score after time-decay, cosine similarity, and popularity dampening.
+    /// Final composite score after time-decay, cosine similarity, social proof quality curve, and consensus boost.
     pub score: f32,
     /// Algorithmic tier or mechanism that produced this candidate.
     pub source: RecommendationSource,
@@ -1211,6 +1289,12 @@ pub struct FeedPreviewQuery {
     pub replies: Option<String>,
     /// Alternative boolean flag for including replies.
     pub include_replies: Option<bool>,
+    /// Minimum engagement floor threshold in likes (e.g. 1, 3, 10).
+    #[serde(default)]
+    pub min_likes: Option<u32>,
+    /// Alternative engagement floor preset or count (e.g. "emerging", "balanced", "curated", "10").
+    #[serde(default)]
+    pub engagement_floor: Option<String>,
 
     /// Topic bias multiplier for Art domain.
     pub art: Option<f32>,
@@ -1256,6 +1340,13 @@ impl FeedPreviewQuery {
             (Some("true" | "all" | "include" | "1"), _) | (_, Some(true))
         );
         base_dials.include_replies = include_replies;
+
+        let min_likes = match (self.min_likes, self.engagement_floor.as_deref()) {
+            (Some(v), _) => v.clamp(MIN_ENGAGEMENT_FLOOR, MAX_ENGAGEMENT_FLOOR),
+            (None, Some(raw)) => RecommendationDials::parse_engagement_floor(Some(raw)),
+            (None, None) => DEFAULT_MIN_LIKES,
+        };
+        base_dials.min_likes = min_likes;
 
         let topic_weights = TopicWeights {
             art: self.art.unwrap_or(1.0).max(0.0),
@@ -1843,6 +1934,8 @@ mod tests {
             discovery: Some("deep_dive".to_string()),
             replies: Some("true".to_string()),
             include_replies: None,
+            min_likes: Some(10),
+            engagement_floor: None,
             art: Some(2.5),
             tech: Some(0.5),
             science: None,
@@ -1856,6 +1949,7 @@ mod tests {
         let dials = q.to_dials();
         assert_eq!(dials.half_life_secs, 6.0 * 3600.0);
         assert_eq!(dials.explore_ratio, 0.35);
+        assert_eq!(dials.min_likes, 10);
         assert_eq!(dials.limit, 20);
         assert!(dials.explain);
         assert!(dials.include_replies);
@@ -1889,6 +1983,7 @@ mod tests {
         assert_eq!(default_dials.freshness_half_life_hours(), 36.0);
         assert_eq!(default_dials.discovery_ratio(), 0.15);
         assert_eq!(default_dials.topic_weights.art, 1.0);
+        assert_eq!(default_dials.min_likes, DEFAULT_MIN_LIKES);
         assert!(default_dials.validate().is_ok());
 
         // Boundary minimums
@@ -1903,10 +1998,12 @@ mod tests {
                 culture: TOPIC_MIN,
             },
             1_700_000_000,
-        );
+        )
+        .with_min_likes(MIN_ENGAGEMENT_FLOOR);
         assert!(min_dials.validate().is_ok());
         assert_eq!(min_dials.freshness_half_life_hours(), 1.0);
         assert_eq!(min_dials.discovery_ratio(), 0.0);
+        assert_eq!(min_dials.min_likes, 0);
 
         // Boundary maximums
         let max_dials = UserDials::from_hours(
@@ -1920,10 +2017,17 @@ mod tests {
                 culture: TOPIC_MAX,
             },
             1_700_000_000,
-        );
+        )
+        .with_min_likes(MAX_ENGAGEMENT_FLOOR);
         assert!(max_dials.validate().is_ok());
         assert_eq!(max_dials.freshness_half_life_hours(), 168.0);
         assert_eq!(max_dials.discovery_ratio(), 0.50);
+        assert_eq!(max_dials.min_likes, 100);
+
+        // Invalid min_likes too high
+        let mut invalid_floor = default_dials;
+        invalid_floor.min_likes = MAX_ENGAGEMENT_FLOOR + 1;
+        assert!(invalid_floor.validate().is_err());
 
         // Invalid freshness too low
         let mut invalid_freshness = default_dials;
@@ -1958,6 +2062,33 @@ mod tests {
     }
 
     #[test]
+    fn test_engagement_floor_parsing_and_aliases() {
+        assert_eq!(
+            RecommendationDials::parse_engagement_floor(Some("emerging")),
+            1
+        );
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("1+")), 1);
+        assert_eq!(
+            RecommendationDials::parse_engagement_floor(Some("balanced")),
+            3
+        );
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("3+")), 3);
+        assert_eq!(
+            RecommendationDials::parse_engagement_floor(Some("curated")),
+            10
+        );
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("10+")), 10);
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("all")), 0);
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("0")), 0);
+        assert_eq!(RecommendationDials::parse_engagement_floor(Some("25")), 25);
+        assert_eq!(
+            RecommendationDials::parse_engagement_floor(Some("500")),
+            100
+        ); // Clamped
+        assert_eq!(RecommendationDials::parse_engagement_floor(None), 3);
+    }
+
+    #[test]
     fn test_user_dials_conversions() {
         let dials = UserDials::from_hours(
             24.0,
@@ -1970,12 +2101,14 @@ mod tests {
                 culture: 1.2,
             },
             1_724_000_000,
-        );
+        )
+        .with_min_likes(10);
 
         let rec_dials = dials.to_recommendation_dials();
         assert_eq!(rec_dials.half_life_secs, 24.0 * 3600.0);
         assert_eq!(rec_dials.explore_ratio, 0.20);
         assert_eq!(rec_dials.topic_weights.art, 1.5);
+        assert_eq!(rec_dials.min_likes, 10);
         assert_eq!(rec_dials.limit, DEFAULT_PAGE_LIMIT);
 
         let from_rec = UserDials::from_recommendation_dials(&rec_dials, 1_724_000_000);
@@ -1986,11 +2119,16 @@ mod tests {
         assert_eq!(existing_rec.half_life_secs, 24.0 * 3600.0);
         assert_eq!(existing_rec.explore_ratio, 0.20);
         assert_eq!(existing_rec.topic_weights.tech, 2.0);
+        assert_eq!(existing_rec.min_likes, 10);
 
         let resp: UserDialsResponse = dials.into();
         assert_eq!(resp.freshness_half_life_hours, 24.0);
         assert_eq!(resp.discovery_ratio, 0.20);
+        assert_eq!(resp.min_likes, 10);
         assert_eq!(resp.updated_at_secs, 1_724_000_000);
+
+        let pref_dto: PreferencesPayloadDto = dials.into();
+        assert_eq!(pref_dto.min_likes, 10);
     }
 
     #[test]

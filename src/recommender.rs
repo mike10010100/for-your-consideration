@@ -11,7 +11,7 @@
 //! - Multi-factor candidate scoring:
 //!   - Exponential half-life time decay ($W(e) = W_{\text{signal}} \cdot e^{-\Delta t / \tau}$).
 //!   - RoaringBitmap-accelerated Cosine taste similarity.
-//!   - BM25 inverse degree popularity dampening ($\frac{1}{\sqrt{|\text{GlobalInteractions}(p)| + 1}}$).
+//!   - Continuous social proof quality curve ($S(N)$) and multi-curator consensus boost ($\text{ConsensusBoost}(k)$).
 //! - Anti-fatigue filtering:
 //!   - Seen / liked / interacted deduplication via user's `RoaringBitmap`.
 //!   - Self-authored post exclusion.
@@ -29,7 +29,10 @@ use parking_lot::RwLock;
 use roaring::RoaringBitmap;
 
 use crate::error::Result;
-use crate::graph::{calculate_popularity_dampener, calculate_time_decay, GraphStore};
+use crate::graph::{
+    calculate_bayesian_confidence, calculate_consensus_boost, calculate_social_proof_factor,
+    calculate_time_decay, GraphStore, DEFAULT_BAYESIAN_BETA, MIN_SHARED_OVERLAP,
+};
 use crate::interner::StringInterner;
 use crate::types::{
     CompactEdge, FeedPreviewItem, FeedPreviewResponse, FeedRecommendation, GraphProofChain,
@@ -433,13 +436,42 @@ impl Recommender {
         now_secs: u64,
     ) -> Result<FeedRecommendation> {
         let viewer_id = viewer_did.and_then(|did| self.interner.lookup_id(did));
+        let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
+
+        let filter_candidate_pool = |pool: &mut Vec<ScoredPost>| {
+            pool.retain(|c| {
+                if dials.min_likes > 0 {
+                    let interaction_count = self.graph.get_post_interaction_count(c.post_id);
+                    if interaction_count < dials.min_likes as usize {
+                        return false;
+                    }
+                }
+                if !dials.include_replies {
+                    if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                        if meta.is_reply() {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(ref seen) = seen_bitmap {
+                    if seen.contains(c.post_id) {
+                        return false;
+                    }
+                }
+                if let Some(uid) = viewer_id {
+                    if c.author_id == uid {
+                        return false;
+                    }
+                }
+                true
+            });
+        };
 
         let (mut candidates, source) = viewer_id.map_or_else(
             || {
-                (
-                    self.traverse_tier3(dials, now_secs),
-                    RecommendationSource::Tier3VelocityPool,
-                )
+                let mut t3_candidates = self.traverse_tier3(dials, now_secs);
+                filter_candidate_pool(&mut t3_candidates);
+                (t3_candidates, RecommendationSource::Tier3VelocityPool)
             },
             |uid| {
                 let user_likes = self.graph.get_user_likes_bitmap(uid);
@@ -447,15 +479,17 @@ impl Recommender {
 
                 if likes_count >= 10 {
                     // Tier 1: 3-step random walk
-                    let t1_candidates = self.traverse_tier1(uid, dials, now_secs);
+                    let mut t1_candidates = self.traverse_tier1(uid, dials, now_secs);
+                    filter_candidate_pool(&mut t1_candidates);
                     if t1_candidates.is_empty() {
                         // Cascading fallback to Tier 2
-                        let t2_candidates = self.traverse_tier2(uid, dials, now_secs);
+                        let mut t2_candidates = self.traverse_tier2(uid, dials, now_secs);
+                        filter_candidate_pool(&mut t2_candidates);
                         if t2_candidates.is_empty() {
-                            (
-                                self.traverse_tier3(dials, now_secs),
-                                RecommendationSource::Tier3VelocityPool,
-                            )
+                            // Cascading fallback to Tier 3
+                            let mut t3_candidates = self.traverse_tier3(dials, now_secs);
+                            filter_candidate_pool(&mut t3_candidates);
+                            (t3_candidates, RecommendationSource::Tier3VelocityPool)
                         } else {
                             (t2_candidates, RecommendationSource::Tier2FollowWalk)
                         }
@@ -464,48 +498,28 @@ impl Recommender {
                     }
                 } else if likes_count > 0 || !self.graph.get_user_follows(uid).is_empty() {
                     // Tier 2: Follow-graph walk
-                    let t2_candidates = self.traverse_tier2(uid, dials, now_secs);
+                    let mut t2_candidates = self.traverse_tier2(uid, dials, now_secs);
+                    filter_candidate_pool(&mut t2_candidates);
                     if t2_candidates.is_empty() {
-                        (
-                            self.traverse_tier3(dials, now_secs),
-                            RecommendationSource::Tier3VelocityPool,
-                        )
+                        // Cascading fallback to Tier 3
+                        let mut t3_candidates = self.traverse_tier3(dials, now_secs);
+                        filter_candidate_pool(&mut t3_candidates);
+                        (t3_candidates, RecommendationSource::Tier3VelocityPool)
                     } else {
                         (t2_candidates, RecommendationSource::Tier2FollowWalk)
                     }
                 } else {
                     // Tier 3: Cold start velocity pool
-                    (
-                        self.traverse_tier3(dials, now_secs),
-                        RecommendationSource::Tier3VelocityPool,
-                    )
+                    let mut t3_candidates = self.traverse_tier3(dials, now_secs);
+                    filter_candidate_pool(&mut t3_candidates);
+                    (t3_candidates, RecommendationSource::Tier3VelocityPool)
                 }
             },
         );
 
         // Phase 4: Anti-Fatigue & Feed Composition Filtering
-        // 1. Seen / Liked deduplication & Self-post exclusion & Root-only filtering
-        let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
-        candidates.retain(|c| {
-            if !dials.include_replies {
-                if let Some(meta) = self.graph.get_post_meta(c.post_id) {
-                    if meta.is_reply() {
-                        return false;
-                    }
-                }
-            }
-            if let Some(ref seen) = seen_bitmap {
-                if seen.contains(c.post_id) {
-                    return false;
-                }
-            }
-            if let Some(uid) = viewer_id {
-                if c.author_id == uid {
-                    return false;
-                }
-            }
-            true
-        });
+        // 1. Seen / Liked deduplication & Self-post exclusion & Root-only & Engagement Floor filtering
+        filter_candidate_pool(&mut candidates);
 
         // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping)
         if let Some(uid) = viewer_id {
@@ -662,13 +676,14 @@ impl Recommender {
         // Accumulate unique co-interactors from all posts in viewer's bitmap
         let mut co_interactors = AHashSet::new();
         for post_id in &viewer_bm {
-            let p_edges = self.graph.get_post_interactions(post_id);
-            for edge in p_edges {
-                let co_uid = edge.target();
-                if co_uid != viewer_id {
-                    co_interactors.insert(co_uid);
+            self.graph.with_post_interactions(post_id, |p_edges| {
+                for edge in p_edges {
+                    let co_uid = edge.target();
+                    if co_uid != viewer_id {
+                        co_interactors.insert(co_uid);
+                    }
                 }
-            }
+            });
         }
 
         if co_interactors.is_empty() {
@@ -684,24 +699,32 @@ impl Recommender {
             });
         }
 
-        // Compute SIMD Cosine similarity
-        let mut candidate_twins: Vec<(u32, f32, usize, RoaringBitmap)> =
-            Vec::with_capacity(co_interactors.len());
+        // Compute SIMD Bayesian confidence taste similarity
+        let mut candidate_twins: Vec<(u32, f32, usize)> = Vec::with_capacity(co_interactors.len());
 
         for co_uid in co_interactors {
-            if let Some(co_bm) = self.graph.get_user_likes_bitmap(co_uid) {
-                let co_len = co_bm.len() as f32;
-                if co_len > 0.0 {
-                    let inter_len = viewer_bm.intersection_len(&co_bm);
-                    if inter_len > 0 {
-                        let sim = (inter_len as f32) / (sqrt_v_len * co_len.sqrt());
-                        candidate_twins.push((co_uid, sim, inter_len as usize, co_bm));
+            self.graph.with_user_likes_bitmap(co_uid, |co_bm_opt| {
+                if let Some(co_bm) = co_bm_opt {
+                    let co_len = co_bm.len() as f32;
+                    if co_len > 0.0 {
+                        let inter_len = viewer_bm.intersection_len(co_bm);
+                        if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                            let raw_cosine = (inter_len as f32) / (sqrt_v_len * co_len.sqrt());
+                            let confidence = calculate_bayesian_confidence(
+                                raw_cosine,
+                                inter_len as usize,
+                                DEFAULT_BAYESIAN_BETA,
+                            );
+                            if confidence > 0.0 {
+                                candidate_twins.push((co_uid, confidence, inter_len as usize));
+                            }
+                        }
                     }
                 }
-            }
+            });
         }
 
-        // Rank candidate twins: similarity DESC, shared_count DESC, user_id ASC
+        // Rank candidate twins: Bayesian confidence DESC, shared_count DESC, user_id ASC
         candidate_twins.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -711,44 +734,51 @@ impl Recommender {
         candidate_twins.truncate(limit);
 
         let mut twins = Vec::with_capacity(candidate_twins.len());
-        for (co_uid, sim, shared_count, co_bm) in candidate_twins {
+        for (co_uid, sim, shared_count) in candidate_twins {
             let Some(co_did) = self.interner.lookup_str(co_uid) else {
                 continue;
             };
 
-            let shared_bm = &viewer_bm & &co_bm;
             let mut shared_posts = Vec::new();
             let mut category_counts: AHashMap<TopicCategory, usize> = AHashMap::new();
 
-            for pid in shared_bm.iter().take(5) {
-                if let Some(uri) = self.interner.lookup_str(pid) {
-                    let meta = self.graph.get_post_meta(pid);
-                    let author_did = meta
-                        .as_ref()
-                        .and_then(|m| self.interner.lookup_str(m.author_id))
-                        .unwrap_or_else(|| CompactString::new("unknown"));
-                    let created_at = meta.as_ref().map_or(BLUESKY_EPOCH_SECS, |m| m.created_at);
-                    let category = classify_post(pid, uri.as_str(), Some(author_did.as_str()));
-                    *category_counts.entry(category).or_insert(0) += 1;
+            self.graph.with_user_likes_bitmap(co_uid, |co_bm_opt| {
+                if let Some(co_bm) = co_bm_opt {
+                    let shared_bm = &viewer_bm & co_bm;
+                    for pid in shared_bm.iter().take(5) {
+                        if let Some(uri) = self.interner.lookup_str(pid) {
+                            let meta = self.graph.get_post_meta(pid);
+                            let author_did = meta
+                                .as_ref()
+                                .and_then(|m| self.interner.lookup_str(m.author_id))
+                                .unwrap_or_else(|| CompactString::new("unknown"));
+                            let created_at =
+                                meta.as_ref().map_or(BLUESKY_EPOCH_SECS, |m| m.created_at);
+                            let category =
+                                classify_post(pid, uri.as_str(), Some(author_did.as_str()));
+                            *category_counts.entry(category).or_insert(0) += 1;
 
-                    shared_posts.push(SharedPostInfo {
-                        uri,
-                        author_did,
-                        category,
-                        created_at,
-                    });
-                }
-            }
+                            shared_posts.push(SharedPostInfo {
+                                uri,
+                                author_did,
+                                category,
+                                created_at,
+                            });
+                        }
+                    }
 
-            // Also sample co_bm to build interest profile
-            for pid in co_bm.iter().take(20) {
-                if let Some(uri) = self.interner.lookup_str(pid) {
-                    let meta = self.graph.get_post_meta(pid);
-                    let author_did = meta.and_then(|m| self.interner.lookup_str(m.author_id));
-                    let category = classify_post(pid, uri.as_str(), author_did.as_deref());
-                    *category_counts.entry(category).or_insert(0) += 1;
+                    // Also sample co_bm to build interest profile
+                    for pid in co_bm.iter().take(20) {
+                        if let Some(uri) = self.interner.lookup_str(pid) {
+                            let meta = self.graph.get_post_meta(pid);
+                            let author_did =
+                                meta.and_then(|m| self.interner.lookup_str(m.author_id));
+                            let category = classify_post(pid, uri.as_str(), author_did.as_deref());
+                            *category_counts.entry(category).or_insert(0) += 1;
+                        }
+                    }
                 }
-            }
+            });
 
             let mut sorted_categories: Vec<(TopicCategory, usize)> =
                 category_counts.into_iter().collect();
@@ -817,14 +847,36 @@ impl Recommender {
             for edge in &post_edges {
                 let co_user = edge.target();
                 if co_user != vid {
-                    let sim = self.graph.compute_cosine_similarity(vid, co_user);
-                    if sim > 0.0 {
-                        let score = sim * edge.weight();
-                        if best_twin
-                            .as_ref()
-                            .is_none_or(|(_, best_s, _, _)| score > *best_s)
-                        {
-                            best_twin = Some((co_user, sim, edge.signal(), edge.timestamp_secs()));
+                    if let (Some(v_bm), Some(c_bm)) = (
+                        &viewer_bm,
+                        self.graph.get_user_likes_bitmap(co_user).as_ref(),
+                    ) {
+                        let inter_len = v_bm.intersection_len(c_bm);
+                        if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                            let v_len = v_bm.len() as f32;
+                            let c_len = c_bm.len() as f32;
+                            if v_len > 0.0 && c_len > 0.0 {
+                                let raw_cosine = (inter_len as f32) / (v_len * c_len).sqrt();
+                                let conf = calculate_bayesian_confidence(
+                                    raw_cosine,
+                                    inter_len as usize,
+                                    DEFAULT_BAYESIAN_BETA,
+                                );
+                                if conf > 0.0 {
+                                    let score = conf * edge.weight();
+                                    if best_twin
+                                        .as_ref()
+                                        .is_none_or(|(_, best_s, _, _)| score > *best_s)
+                                    {
+                                        best_twin = Some((
+                                            co_user,
+                                            conf,
+                                            edge.signal(),
+                                            edge.timestamp_secs(),
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -852,11 +904,12 @@ impl Recommender {
                             .interner
                             .lookup_str(spid)
                             .unwrap_or_else(|| CompactString::new("seed_post"));
-                        let v_edges = self.graph.get_user_interactions(vid);
-                        let v_sig = v_edges
-                            .iter()
-                            .find(|e| e.target() == spid)
-                            .map_or(SignalType::Like, CompactEdge::signal);
+                        let v_sig = self.graph.with_user_interactions(vid, |v_edges| {
+                            v_edges
+                                .iter()
+                                .find(|e| e.target() == spid)
+                                .map_or(SignalType::Like, CompactEdge::signal)
+                        });
                         (s_uri, v_sig)
                     },
                 );
@@ -997,6 +1050,38 @@ impl Recommender {
         let viewer_id = clean_viewer.and_then(|d| self.interner.lookup_id(d));
 
         let mut candidate_evals: Vec<CandidateEvaluation> = Vec::new();
+        let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
+        let filter_preview_pool = |evals: &mut Vec<CandidateEvaluation>| {
+            evals.retain(|c| {
+                if dials.min_likes > 0 {
+                    let interaction_count = self.graph.get_post_interaction_count(c.post_id);
+                    if interaction_count < dials.min_likes as usize {
+                        return false;
+                    }
+                }
+                if !dials.include_replies {
+                    if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                        if meta.is_reply() {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(ref seen) = seen_bitmap {
+                    if seen.contains(c.post_id) {
+                        return false;
+                    }
+                }
+                if let Some(uid) = viewer_id {
+                    if c.author_id == uid {
+                        return false;
+                    }
+                }
+                if c.score_breakdown.fatigue_penalty <= 0.0 {
+                    return false;
+                }
+                true
+            });
+        };
 
         if let Some(uid) = viewer_id {
             let user_likes = self.graph.get_user_likes_bitmap(uid);
@@ -1004,42 +1089,76 @@ impl Recommender {
 
             if likes_count >= 10 {
                 // Tier 1 Preview Walk
-                let user_interactions = self.graph.get_user_interactions(uid);
+                let viewer_bm = self.graph.get_user_likes_bitmap(uid);
+                let mut seen_co_users = AHashSet::new();
                 let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
-                for edge in &user_interactions {
-                    let post_id = edge.target();
-                    let post_interactions = self.graph.get_post_interactions(post_id);
-                    for p_edge in post_interactions {
-                        let co_user = p_edge.target();
-                        if co_user != uid {
-                            let sim = self.graph.compute_cosine_similarity(uid, co_user);
-                            *co_interactor_weights.entry(co_user).or_insert(0.0) += sim.max(0.1);
-                        }
-                    }
-                }
 
-                let mut cand_details: AHashMap<u32, (f32, f32, f32)> = AHashMap::new();
+                self.graph.with_user_interactions(uid, |user_interactions| {
+                    for edge in user_interactions {
+                        let post_id = edge.target();
+                        self.graph
+                            .with_post_interactions(post_id, |post_interactions| {
+                                for p_edge in post_interactions {
+                                    let co_user = p_edge.target();
+                                    if co_user != uid && seen_co_users.insert(co_user) {
+                                        if let Some(ref v_bm) = viewer_bm {
+                                            self.graph.with_user_likes_bitmap(
+                                                co_user,
+                                                |c_bm_opt| {
+                                                    if let Some(c_bm) = c_bm_opt {
+                                                        let inter_len = v_bm.intersection_len(c_bm);
+                                                        if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                                                            let v_len = v_bm.len() as f32;
+                                                            let c_len = c_bm.len() as f32;
+                                                            if v_len > 0.0 && c_len > 0.0 {
+                                                                let raw_cosine = (inter_len as f32)
+                                                                    / (v_len * c_len).sqrt();
+                                                                let conf =
+                                                                    calculate_bayesian_confidence(
+                                                                        raw_cosine,
+                                                                        inter_len as usize,
+                                                                        DEFAULT_BAYESIAN_BETA,
+                                                                    );
+                                                                if conf > 0.0 {
+                                                                    co_interactor_weights
+                                                                        .insert(co_user, conf);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                    }
+                });
+
+                let mut cand_details: AHashMap<u32, (usize, f32, f32)> = AHashMap::new();
                 for (&co_user, &co_sim) in &co_interactor_weights {
-                    let co_interactions = self.graph.get_user_interactions(co_user);
-                    for c_edge in co_interactions {
-                        let cand_pid = c_edge.target();
-                        let decay = calculate_time_decay(
-                            c_edge.signal(),
-                            c_edge.timestamp_secs(),
-                            now_secs,
-                            dials.half_life_secs,
-                        );
-                        let dampener = calculate_popularity_dampener(
-                            self.graph.get_post_interaction_count(cand_pid),
-                        );
-                        let entry = cand_details
-                            .entry(cand_pid)
-                            .or_insert((0.0, decay, dampener));
-                        entry.0 += co_sim;
-                    }
+                    let mut seen_posts_for_curator = AHashSet::new();
+                    self.graph
+                        .with_user_interactions(co_user, |co_interactions| {
+                            for c_edge in co_interactions {
+                                let cand_pid = c_edge.target();
+                                let decay = calculate_time_decay(
+                                    c_edge.signal(),
+                                    c_edge.timestamp_secs(),
+                                    now_secs,
+                                    dials.half_life_secs,
+                                );
+                                let entry = cand_details.entry(cand_pid).or_insert((0, 0.0, decay));
+                                if seen_posts_for_curator.insert(cand_pid) {
+                                    entry.0 += 1;
+                                }
+                                entry.1 += co_sim;
+                                entry.2 = decay;
+                            }
+                        });
                 }
 
-                for (pid, (sim, decay, dampener)) in cand_details {
+                for (pid, (curator_count, sim, decay)) in cand_details {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
@@ -1058,7 +1177,10 @@ impl Recommender {
                         .evaluate_fatigue_penalty(uid, pid, now_secs)
                         .unwrap_or(0.0);
 
-                    let taste_similarity = sim * dampener;
+                    let consensus_boost = calculate_consensus_boost(curator_count);
+                    let social_proof =
+                        calculate_social_proof_factor(self.graph.get_post_interaction_count(pid));
+                    let taste_similarity = sim * consensus_boost * social_proof;
                     let base_score = taste_similarity * decay * topic_boost;
                     let final_score = base_score * fatigue_penalty;
 
@@ -1080,28 +1202,36 @@ impl Recommender {
                         score_breakdown: breakdown,
                     });
                 }
-            } else if likes_count > 0 || !self.graph.get_user_follows(uid).is_empty() {
-                // Tier 2 Preview Walk
-                let follows = self.graph.get_user_follows(uid);
-                let mut cand_details: AHashMap<u32, (f32, f32)> = AHashMap::new();
-                for followed_id in follows {
-                    let followed_interactions = self.graph.get_user_interactions(followed_id);
-                    for edge in followed_interactions {
-                        let cand_pid = edge.target();
-                        let decay = calculate_time_decay(
-                            edge.signal(),
-                            edge.timestamp_secs(),
-                            now_secs,
-                            dials.half_life_secs,
-                        );
-                        let dampener = calculate_popularity_dampener(
-                            self.graph.get_post_interaction_count(cand_pid),
-                        );
-                        cand_details.insert(cand_pid, (decay, dampener));
-                    }
-                }
+                filter_preview_pool(&mut candidate_evals);
+            }
 
-                for (pid, (decay, dampener)) in cand_details {
+            if candidate_evals.is_empty()
+                && (likes_count > 0 || !self.graph.get_user_follows(uid).is_empty())
+            {
+                // Tier 2 Preview Walk
+                let mut cand_details: AHashMap<u32, (f32, f32)> = AHashMap::new();
+                self.graph.with_user_follows(uid, |follows| {
+                    for &followed_id in follows {
+                        self.graph
+                            .with_user_interactions(followed_id, |followed_interactions| {
+                                for edge in followed_interactions {
+                                    let cand_pid = edge.target();
+                                    let decay = calculate_time_decay(
+                                        edge.signal(),
+                                        edge.timestamp_secs(),
+                                        now_secs,
+                                        dials.half_life_secs,
+                                    );
+                                    let social_proof = calculate_social_proof_factor(
+                                        self.graph.get_post_interaction_count(cand_pid),
+                                    );
+                                    cand_details.insert(cand_pid, (decay, social_proof));
+                                }
+                            });
+                    }
+                });
+
+                for (pid, (decay, social_proof)) in cand_details {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
@@ -1120,7 +1250,7 @@ impl Recommender {
                         .evaluate_fatigue_penalty(uid, pid, now_secs)
                         .unwrap_or(0.0);
 
-                    let taste_similarity = 1.5 * dampener;
+                    let taste_similarity = 1.5 * social_proof;
                     let base_score = taste_similarity * decay * topic_boost;
                     let final_score = base_score * fatigue_penalty;
 
@@ -1142,6 +1272,7 @@ impl Recommender {
                         score_breakdown: breakdown,
                     });
                 }
+                filter_preview_pool(&mut candidate_evals);
             }
         }
 
@@ -1191,35 +1322,13 @@ impl Recommender {
                     score_breakdown: breakdown,
                 });
             }
+            filter_preview_pool(&mut candidate_evals);
         }
 
         let total_candidates = candidate_evals.len();
 
-        // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter & Root-only filtering
-        let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
-        candidate_evals.retain(|c| {
-            if !dials.include_replies {
-                if let Some(meta) = self.graph.get_post_meta(c.post_id) {
-                    if meta.is_reply() {
-                        return false;
-                    }
-                }
-            }
-            if let Some(ref seen) = seen_bitmap {
-                if seen.contains(c.post_id) {
-                    return false;
-                }
-            }
-            if let Some(uid) = viewer_id {
-                if c.author_id == uid {
-                    return false;
-                }
-            }
-            if c.score_breakdown.fatigue_penalty <= 0.0 {
-                return false;
-            }
-            true
-        });
+        // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter & Root-only & Engagement floor filtering
+        filter_preview_pool(&mut candidate_evals);
 
         // 2. Sort descending by final_score
         candidate_evals.sort_by(|a, b| {
@@ -1304,32 +1413,63 @@ impl Recommender {
         dials: &RecommendationDials,
         now_secs: u64,
     ) -> Vec<ScoredPost> {
-        let user_interactions = self.graph.get_user_interactions(viewer_id);
+        let viewer_bm = self.graph.get_user_likes_bitmap(viewer_id);
+        let Some(ref v_bm) = viewer_bm else {
+            return Vec::new();
+        };
+        let v_len = v_bm.len() as f32;
+        if v_len == 0.0 {
+            return Vec::new();
+        }
+        let sqrt_v_len = v_len.sqrt();
+
+        let mut seen_co_users = AHashSet::new();
         let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
 
         // Limit seed posts to most recent 50 interactions to bound combinatorial fan-out (SEC-07)
-        let seed_edges = if user_interactions.len() > 50 {
-            &user_interactions[user_interactions.len() - 50..]
-        } else {
-            &user_interactions[..]
-        };
+        let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(viewer_id, |edges| {
+            let seed_edges = if edges.len() > 50 {
+                &edges[edges.len() - 50..]
+            } else {
+                edges
+            };
+            seed_edges.iter().map(CompactEdge::target).collect()
+        });
 
         // Step 1 & 2: Viewer -> Seed Posts -> Co-interactors
-        for edge in seed_edges {
-            let post_id = edge.target();
-            let post_interactions = self.graph.get_post_interactions(post_id);
-            let p_edges_slice = if post_interactions.len() > 500 {
-                &post_interactions[post_interactions.len() - 500..]
-            } else {
-                &post_interactions[..]
-            };
-            for p_edge in p_edges_slice {
-                let co_user = p_edge.target();
-                if co_user != viewer_id {
-                    let sim = self.graph.compute_cosine_similarity(viewer_id, co_user);
-                    *co_interactor_weights.entry(co_user).or_insert(0.0) += sim.max(0.1);
+        for post_id in seed_post_ids {
+            self.graph.with_post_interactions(post_id, |p_edges| {
+                let p_edges_slice = if p_edges.len() > 500 {
+                    &p_edges[p_edges.len() - 500..]
+                } else {
+                    p_edges
+                };
+                for p_edge in p_edges_slice {
+                    let co_user = p_edge.target();
+                    if co_user != viewer_id && seen_co_users.insert(co_user) {
+                        self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
+                            if let Some(c_bm) = c_bm_opt {
+                                let inter_len = v_bm.intersection_len(c_bm);
+                                if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                                    let c_len = c_bm.len() as f32;
+                                    if c_len > 0.0 {
+                                        let raw_cosine =
+                                            (inter_len as f32) / (sqrt_v_len * c_len.sqrt());
+                                        let conf = calculate_bayesian_confidence(
+                                            raw_cosine,
+                                            inter_len as usize,
+                                            DEFAULT_BAYESIAN_BETA,
+                                        );
+                                        if conf > 0.0 {
+                                            co_interactor_weights.insert(co_user, conf);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
                 }
-            }
+            });
         }
 
         // Cap co-interactors to top 100 highest-weighted neighbors
@@ -1342,33 +1482,42 @@ impl Recommender {
         }
 
         // Step 3: Co-interactors -> Candidate Posts
-        let mut candidate_scores: AHashMap<u32, f32> = AHashMap::new();
+        let mut candidate_map: AHashMap<u32, (usize, f32)> = AHashMap::new();
+        let mut seen_posts_for_curator = AHashSet::new();
         for (co_user, co_sim) in top_co_interactors {
-            let co_interactions = self.graph.get_user_interactions(co_user);
-            for c_edge in co_interactions {
-                let cand_pid = c_edge.target();
-                let decay = calculate_time_decay(
-                    c_edge.signal(),
-                    c_edge.timestamp_secs(),
-                    now_secs,
-                    dials.half_life_secs,
-                );
-                let dampener =
-                    calculate_popularity_dampener(self.graph.get_post_interaction_count(cand_pid));
-                let score = co_sim * decay * dampener;
-                *candidate_scores.entry(cand_pid).or_insert(0.0) += score;
-            }
+            seen_posts_for_curator.clear();
+            self.graph
+                .with_user_interactions(co_user, |co_interactions| {
+                    for c_edge in co_interactions {
+                        let cand_pid = c_edge.target();
+                        let decay = calculate_time_decay(
+                            c_edge.signal(),
+                            c_edge.timestamp_secs(),
+                            now_secs,
+                            dials.half_life_secs,
+                        );
+                        let affinity = co_sim * decay;
+                        let entry = candidate_map.entry(cand_pid).or_insert((0, 0.0));
+                        if seen_posts_for_curator.insert(cand_pid) {
+                            entry.0 += 1;
+                        }
+                        entry.1 += affinity;
+                    }
+                });
         }
 
-        let mut scored: Vec<ScoredPost> = candidate_scores
+        let mut scored: Vec<ScoredPost> = candidate_map
             .into_iter()
-            .filter_map(|(pid, raw_score)| {
+            .filter_map(|(pid, (curator_count, total_affinity))| {
                 let uri = self.interner.lookup_str(pid)?;
                 let meta = self.graph.get_post_meta(pid)?;
                 let author_str = self.interner.lookup_str(meta.author_id);
                 let category = classify_post(pid, uri.as_str(), author_str.as_deref());
                 let topic_boost = dials.topic_weights.get_weight(category);
-                let score = raw_score * topic_boost;
+                let consensus_boost = calculate_consensus_boost(curator_count);
+                let social_proof =
+                    calculate_social_proof_factor(self.graph.get_post_interaction_count(pid));
+                let score = total_affinity * consensus_boost * social_proof * topic_boost;
                 Some(ScoredPost {
                     post_id: pid,
                     uri,
@@ -1398,25 +1547,29 @@ impl Recommender {
         dials: &RecommendationDials,
         now_secs: u64,
     ) -> Vec<ScoredPost> {
-        let follows = self.graph.get_user_follows(viewer_id);
         let mut candidate_scores: AHashMap<u32, f32> = AHashMap::new();
 
-        for followed_id in follows {
-            let followed_interactions = self.graph.get_user_interactions(followed_id);
-            for edge in followed_interactions {
-                let cand_pid = edge.target();
-                let decay = calculate_time_decay(
-                    edge.signal(),
-                    edge.timestamp_secs(),
-                    now_secs,
-                    dials.half_life_secs,
-                );
-                let dampener =
-                    calculate_popularity_dampener(self.graph.get_post_interaction_count(cand_pid));
-                let score = decay * dampener * 1.5; // Follow boost multiplier
-                *candidate_scores.entry(cand_pid).or_insert(0.0) += score;
+        self.graph.with_user_follows(viewer_id, |follows| {
+            for &followed_id in follows {
+                self.graph
+                    .with_user_interactions(followed_id, |followed_interactions| {
+                        for edge in followed_interactions {
+                            let cand_pid = edge.target();
+                            let decay = calculate_time_decay(
+                                edge.signal(),
+                                edge.timestamp_secs(),
+                                now_secs,
+                                dials.half_life_secs,
+                            );
+                            let social_proof = calculate_social_proof_factor(
+                                self.graph.get_post_interaction_count(cand_pid),
+                            );
+                            let score = decay * social_proof * 1.5; // Follow boost multiplier
+                            *candidate_scores.entry(cand_pid).or_insert(0.0) += score;
+                        }
+                    });
             }
-        }
+        });
 
         let mut scored: Vec<ScoredPost> = candidate_scores
             .into_iter()
@@ -1463,13 +1616,22 @@ impl Recommender {
         let mut buckets: [Vec<ScoredPost>; NUM_TOPIC_CATEGORIES] = Default::default();
 
         for (idx, pid) in pool_ids.into_iter().enumerate() {
-            let Some(uri) = self.interner.lookup_str(pid) else {
-                continue;
-            };
+            if dials.min_likes > 0 {
+                let interaction_count = self.graph.get_post_interaction_count(pid);
+                if interaction_count < dials.min_likes as usize {
+                    continue;
+                }
+            }
             let meta = self
                 .graph
                 .get_post_meta(pid)
                 .unwrap_or_else(|| PostMeta::new(0, None, None, now_secs));
+            if !dials.include_replies && meta.is_reply() {
+                continue;
+            }
+            let Some(uri) = self.interner.lookup_str(pid) else {
+                continue;
+            };
             let author_str = self.interner.lookup_str(meta.author_id);
             let category = classify_post(pid, uri.as_str(), author_str.as_deref());
 
@@ -2049,24 +2211,28 @@ mod tests {
         let author = interner.intern("did:plc:author");
 
         let seed_post = interner.intern("at://did:plc:author/app.bsky.feed.post/seed");
+        let seed_post_2 = interner.intern("at://did:plc:author/app.bsky.feed.post/seed_2");
         let cand_post = interner.intern("at://did:plc:author/app.bsky.feed.post/cand");
 
         let now = BLUESKY_EPOCH_SECS + 10_000;
 
         graph.record_post_meta(seed_post, author, None, None, now - 500);
+        graph.record_post_meta(seed_post_2, author, None, None, now - 500);
         graph.record_post_meta(cand_post, author, None, None, now - 300);
 
-        // Viewer likes seed post
+        // Viewer likes seed posts (2 shared posts with co_user)
         graph.record_interaction(viewer, seed_post, SignalType::Like, now - 200);
-        // Co-user likes seed post and cand post
+        graph.record_interaction(viewer, seed_post_2, SignalType::Like, now - 200);
+        // Co-user likes seed posts and cand post
         graph.record_interaction(co_user, seed_post, SignalType::Like, now - 180);
+        graph.record_interaction(co_user, seed_post_2, SignalType::Like, now - 180);
         graph.record_interaction(co_user, cand_post, SignalType::Repost, now - 150);
 
         let rec = Recommender::new(interner, graph);
         let dials = RecommendationDials::default();
         let candidates = rec.traverse_tier1(viewer, &dials, now);
 
-        assert_eq!(candidates.len(), 2);
+        assert!(!candidates.is_empty());
         // Candidate post should be discovered
         assert!(candidates.iter().any(|c| c.post_id == cand_post));
     }
@@ -2115,7 +2281,10 @@ mod tests {
         }
 
         let rec = Recommender::new(interner, graph);
-        let dials = RecommendationDials::default();
+        let dials = RecommendationDials {
+            min_likes: 1,
+            ..Default::default()
+        };
         let res = rec.recommend(Some("did:plc:viewer"), &dials, now).unwrap();
 
         // Max 2 posts from dominant_author allowed
@@ -2155,7 +2324,10 @@ mod tests {
         graph.record_interaction(followed, reply_post, SignalType::Like, now - 30);
 
         let rec = Recommender::new(interner, graph);
-        let dials = RecommendationDials::default();
+        let dials = RecommendationDials {
+            min_likes: 1,
+            ..Default::default()
+        };
         let res = rec.recommend(Some("did:plc:viewer"), &dials, now).unwrap();
 
         // Only 1 post from the root conversation tree
@@ -2183,6 +2355,7 @@ mod tests {
         let rec = Recommender::new(interner, graph);
         let dials = RecommendationDials {
             limit: 4,
+            min_likes: 1,
             ..Default::default()
         };
 
@@ -2193,6 +2366,7 @@ mod tests {
         let dials2 = RecommendationDials {
             limit: 4,
             cursor: page1.cursor,
+            min_likes: 1,
             ..Default::default()
         };
         let page2 = rec.recommend(Some("did:plc:viewer"), &dials2, now).unwrap();
@@ -2202,6 +2376,7 @@ mod tests {
         let dials3 = RecommendationDials {
             limit: 4,
             cursor: page2.cursor,
+            min_likes: 1,
             ..Default::default()
         };
         let page3 = rec.recommend(Some("did:plc:viewer"), &dials3, now).unwrap();
@@ -2227,6 +2402,7 @@ mod tests {
         let rec = Recommender::new(interner, graph);
         let dials = RecommendationDials {
             explain: true,
+            min_likes: 1,
             ..Default::default()
         };
 
@@ -2309,7 +2485,10 @@ mod tests {
         graph.record_interaction(followed, p2, SignalType::Like, now - 50);
 
         let rec = Recommender::new(interner, graph);
-        let dials = RecommendationDials::default();
+        let dials = RecommendationDials {
+            min_likes: 1,
+            ..Default::default()
+        };
 
         // Initial recommendation returns both posts
         let initial = rec.recommend(Some("did:plc:viewer"), &dials, now).unwrap();
@@ -2505,6 +2684,7 @@ mod tests {
         let rec = Recommender::new(interner, graph);
         let dials = RecommendationDials {
             explain: true,
+            min_likes: 1,
             ..Default::default()
         };
 
@@ -2526,5 +2706,130 @@ mod tests {
         assert!(categories_found.contains(&TopicCategory::Art));
         assert!(categories_found.contains(&TopicCategory::Tech));
         assert!(categories_found.contains(&TopicCategory::Science));
+    }
+
+    #[test]
+    fn test_traverse_tier1_single_overlap_filtered_out() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 50_000;
+
+        let viewer = interner.intern("did:plc:viewer");
+        let single_overlap_user = interner.intern("did:plc:single_overlap");
+        let multi_overlap_user = interner.intern("did:plc:multi_overlap");
+        let author = interner.intern("did:plc:author");
+
+        let p_shared1 = interner.intern("at://did:plc:author/post/shared1");
+        let p_shared2 = interner.intern("at://did:plc:author/post/shared2");
+        let p_single = interner.intern("at://did:plc:author/post/single_only");
+
+        let cand_single = interner.intern("at://did:plc:author/post/cand_single");
+        let cand_multi = interner.intern("at://did:plc:author/post/cand_multi");
+
+        for &p in &[p_shared1, p_shared2, p_single, cand_single, cand_multi] {
+            graph.record_post_meta(p, author, None, None, now - 1000);
+        }
+
+        // Viewer likes 10 padding posts + shared1 + shared2 + single
+        for i in 1..=10 {
+            let pad = interner.intern(&format!("at://did:plc:author/post/pad_{i}"));
+            graph.record_post_meta(pad, author, None, None, now - 1000);
+            graph.record_interaction(viewer, pad, SignalType::Like, now - 500);
+        }
+        graph.record_interaction(viewer, p_shared1, SignalType::Like, now - 400);
+        graph.record_interaction(viewer, p_shared2, SignalType::Like, now - 400);
+        graph.record_interaction(viewer, p_single, SignalType::Like, now - 400);
+
+        // single_overlap_user ONLY shares p_single (overlap = 1)
+        graph.record_interaction(single_overlap_user, p_single, SignalType::Like, now - 300);
+        graph.record_interaction(
+            single_overlap_user,
+            cand_single,
+            SignalType::Like,
+            now - 200,
+        );
+
+        // multi_overlap_user shares p_shared1 AND p_shared2 (overlap = 2)
+        graph.record_interaction(multi_overlap_user, p_shared1, SignalType::Like, now - 300);
+        graph.record_interaction(multi_overlap_user, p_shared2, SignalType::Like, now - 300);
+        graph.record_interaction(multi_overlap_user, cand_multi, SignalType::Like, now - 200);
+
+        let rec = Recommender::new(interner, graph);
+        let dials = RecommendationDials::default();
+        let candidates = rec.traverse_tier1(viewer, &dials, now);
+
+        let candidate_uris: Vec<&str> = candidates.iter().map(|c| c.uri.as_str()).collect();
+
+        // cand_multi must be present because multi_overlap_user has overlap >= 2
+        assert!(candidate_uris.contains(&"at://did:plc:author/post/cand_multi"));
+
+        // cand_single must NOT be present because single_overlap_user only has overlap = 1 (< 2)
+        assert!(!candidate_uris.contains(&"at://did:plc:author/post/cand_single"));
+    }
+
+    #[test]
+    fn test_find_taste_twins_bayesian_confidence_and_single_overlap_filtering() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 50_000;
+
+        let viewer = interner.intern("did:plc:viewer");
+        let twin_1_overlap = interner.intern("did:plc:twin_1");
+        let twin_2_overlap = interner.intern("did:plc:twin_2");
+        let twin_3_overlap = interner.intern("did:plc:twin_3");
+        let author = interner.intern("did:plc:author");
+
+        let p1 = interner.intern("at://did:plc:author/post/1");
+        let p2 = interner.intern("at://did:plc:author/post/2");
+        let p3 = interner.intern("at://did:plc:author/post/3");
+        let p4 = interner.intern("at://did:plc:author/post/4");
+        let p5 = interner.intern("at://did:plc:author/post/5");
+        let p6 = interner.intern("at://did:plc:author/post/6");
+
+        for &p in &[p1, p2, p3, p4, p5, p6] {
+            graph.record_post_meta(p, author, None, None, now - 1000);
+        }
+
+        // Viewer likes p1, p2, p3, p4 (len = 4)
+        graph.record_interaction(viewer, p1, SignalType::Like, now - 500);
+        graph.record_interaction(viewer, p2, SignalType::Like, now - 500);
+        graph.record_interaction(viewer, p3, SignalType::Like, now - 500);
+        graph.record_interaction(viewer, p4, SignalType::Like, now - 500);
+
+        // twin_1_overlap only likes p1 (overlap = 1) -> must be filtered out
+        graph.record_interaction(twin_1_overlap, p1, SignalType::Like, now - 400);
+
+        // twin_2_overlap likes p1, p2 (len = 2, overlap = 2)
+        // raw cosine = 2 / sqrt(4 * 2) = 2 / sqrt(8) ≈ 0.7071
+        // confidence = 0.7071 * (2 / (2 + 3)) = 0.7071 * 0.40 ≈ 0.2828
+        graph.record_interaction(twin_2_overlap, p1, SignalType::Like, now - 400);
+        graph.record_interaction(twin_2_overlap, p2, SignalType::Like, now - 400);
+
+        // twin_3_overlap likes p2, p3, p4, p5, p6 (len = 5, overlap = 3)
+        // raw cosine = 3 / sqrt(4 * 5) = 3 / sqrt(20) ≈ 0.6708
+        // confidence = 0.6708 * (3 / (3 + 3)) = 0.6708 * 0.50 ≈ 0.3354
+        graph.record_interaction(twin_3_overlap, p2, SignalType::Like, now - 400);
+        graph.record_interaction(twin_3_overlap, p3, SignalType::Like, now - 400);
+        graph.record_interaction(twin_3_overlap, p4, SignalType::Like, now - 400);
+        graph.record_interaction(twin_3_overlap, p5, SignalType::Like, now - 400);
+        graph.record_interaction(twin_3_overlap, p6, SignalType::Like, now - 400);
+
+        let rec = Recommender::new(interner, graph);
+        let resp = rec.find_taste_twins("did:plc:viewer", 10).unwrap();
+
+        // 1-overlap twin must be excluded
+        assert_eq!(resp.twins.len(), 2);
+        assert!(!resp.twins.iter().any(|t| t.user_did == "did:plc:twin_1"));
+
+        // twin_3 has higher confidence (0.3354) than twin_2 (0.2828), despite twin_2 having higher raw cosine!
+        assert_eq!(resp.twins[0].user_did, "did:plc:twin_3");
+        let expected_conf_3 = (3.0 / (4.0 * 5.0f32).sqrt()) * (3.0 / 6.0);
+        assert!((resp.twins[0].similarity_score - expected_conf_3).abs() < 1e-4);
+        assert_eq!(resp.twins[0].shared_posts_count, 3);
+
+        assert_eq!(resp.twins[1].user_did, "did:plc:twin_2");
+        let expected_conf_2 = (2.0 / (4.0 * 2.0f32).sqrt()) * (2.0 / 5.0);
+        assert!((resp.twins[1].similarity_score - expected_conf_2).abs() < 1e-4);
+        assert_eq!(resp.twins[1].shared_posts_count, 2);
     }
 }

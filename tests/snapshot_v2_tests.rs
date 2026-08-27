@@ -374,6 +374,7 @@ fn test_snapshot_v2_corrupted_dial_record_rejected() {
     payload.extend_from_slice(&1.0f32.to_le_bytes()); // news
     payload.extend_from_slice(&1.0f32.to_le_bytes()); // culture
     payload.extend_from_slice(&[0u8]); // include_replies = false
+    payload.extend_from_slice(&3u32.to_le_bytes()); // min_likes = 3
     payload.extend_from_slice(&1000u64.to_le_bytes()); // updated_at
 
     let mut p_hasher = Hasher::new();

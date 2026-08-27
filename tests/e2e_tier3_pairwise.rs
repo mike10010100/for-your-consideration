@@ -314,9 +314,11 @@ fn test_pairwise_multi_signal_weighting_impacts_traversal_ranking() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
 
     let rep_idx = res.posts.iter().position(|p| p.uri == reposted_cand);
     let lik_idx = res.posts.iter().position(|p| p.uri == liked_cand);
@@ -338,9 +340,15 @@ fn test_pairwise_exponential_time_decay_penalizes_older_edges() {
 
 #[test]
 fn test_pairwise_bm25_dampens_hyper_viral_posts_fairly() {
-    let viral_dampener = calculate_popularity_dampener(100_000);
-    let niche_dampener = calculate_popularity_dampener(5);
-    assert!(niche_dampener > viral_dampener * 100.0);
+    let peak_social_proof = calculate_social_proof_factor(500);
+    let viral_social_proof = calculate_social_proof_factor(100_000);
+    let unvetted_social_proof = calculate_social_proof_factor(0);
+
+    // Peak post ranks above hyper-viral post due to soft viral taper
+    assert!(peak_social_proof > viral_social_proof);
+    // Hyper-viral post never collapses below baseline floor (maintains > 1.0 multiplier)
+    assert!(viral_social_proof > 1.0);
+    assert!(viral_social_proof > unvetted_social_proof);
 }
 
 #[test]
@@ -450,9 +458,11 @@ fn test_pairwise_3step_walk_with_thread_dampening_max_1_per_root() {
     builder.populate(&interner, &graph);
 
     let rec = TestRecommender::new(interner, graph);
-    let res = rec
-        .recommend(Some(viewer), &RecommendationDials::default(), now)
-        .unwrap();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
+    let res = rec.recommend(Some(viewer), &dials, now).unwrap();
 
     let thread_posts: Vec<_> = res
         .posts
@@ -795,7 +805,7 @@ async fn test_pairwise_e2e_live_ingest_immediately_reflected_in_xrpc_feed() {
 
     // 3. Feed now immediately reflects new live post
     let req2 = Request::builder()
-        .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:plc:feed/app.bsky.feed.generator/foryou")
+        .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:plc:feed/app.bsky.feed.generator/foryou&engagement_floor=all")
         .body(Body::empty())
         .unwrap();
     let resp2 = app.oneshot(req2).await.unwrap();
@@ -824,11 +834,13 @@ async fn test_pairwise_e2e_follow_ingest_graduates_cold_user_to_tier2_feed() {
     graph.record_interaction(aid, pid, SignalType::Like, now - 500);
 
     let rec = TestRecommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // Before follow: Tier 3
-    let res_before = rec
-        .recommend(Some(user_did), &RecommendationDials::default(), now)
-        .unwrap();
+    let res_before = rec.recommend(Some(user_did), &dials, now).unwrap();
     assert_eq!(
         res_before.posts[0].source,
         RecommendationSource::Tier3VelocityPool
@@ -838,9 +850,7 @@ async fn test_pairwise_e2e_follow_ingest_graduates_cold_user_to_tier2_feed() {
     graph.record_follow(uid, aid);
 
     // After follow: Graduated to Tier 2 Follow Walk
-    let res_after = rec
-        .recommend(Some(user_did), &RecommendationDials::default(), now)
-        .unwrap();
+    let res_after = rec.recommend(Some(user_did), &dials, now).unwrap();
     assert_eq!(
         res_after.posts[0].source,
         RecommendationSource::Tier2FollowWalk

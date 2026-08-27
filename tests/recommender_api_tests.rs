@@ -51,13 +51,14 @@ fn test_find_taste_twins_identical_user_exclusion() {
 }
 
 #[test]
-fn test_find_taste_twins_cosine_accuracy() {
+fn test_find_taste_twins_bayesian_confidence_accuracy() {
     let (interner, graph, rec) = setup_graph_and_interner();
     let now = BLUESKY_EPOCH_SECS + 100_000;
 
     let viewer = interner.intern("did:plc:viewer");
     let user_b = interner.intern("did:plc:user_b");
     let user_c = interner.intern("did:plc:user_c");
+    let user_d = interner.intern("did:plc:user_d_single");
     let author = interner.intern("did:plc:author");
 
     // Viewer likes posts 1, 2, 3, 4 (|Viewer| = 4)
@@ -78,7 +79,8 @@ fn test_find_taste_twins_cosine_accuracy() {
     graph.record_interaction(viewer, p4, SignalType::Like, now - 500);
 
     // User B likes posts 2, 3, 4, 5, 6 (|B| = 5, overlap = {2, 3, 4} -> |overlap| = 3)
-    // Expected Cosine = 3.0 / sqrt(4 * 5) = 3.0 / sqrt(20) ≈ 0.6708204
+    // Raw Cosine = 3.0 / sqrt(4 * 5) = 3.0 / sqrt(20) ≈ 0.6708204
+    // Bayesian Confidence = 0.6708204 * (3 / (3 + 3)) = 0.6708204 * 0.50 = 0.3354102
     graph.record_interaction(user_b, p2, SignalType::Like, now - 400);
     graph.record_interaction(user_b, p3, SignalType::Like, now - 400);
     graph.record_interaction(user_b, p4, SignalType::Like, now - 400);
@@ -86,23 +88,31 @@ fn test_find_taste_twins_cosine_accuracy() {
     graph.record_interaction(user_b, p6, SignalType::Like, now - 400);
 
     // User C likes posts 1, 2 (|C| = 2, overlap = {1, 2} -> |overlap| = 2)
-    // Expected Cosine = 2.0 / sqrt(4 * 2) = 2.0 / sqrt(8) ≈ 0.7071068
+    // Raw Cosine = 2.0 / sqrt(4 * 2) = 2.0 / sqrt(8) ≈ 0.7071068
+    // Bayesian Confidence = 0.7071068 * (2 / (2 + 3)) = 0.7071068 * 0.40 = 0.2828427
     graph.record_interaction(user_c, p1, SignalType::Like, now - 300);
     graph.record_interaction(user_c, p2, SignalType::Like, now - 300);
 
+    // User D likes only post 1 (|D| = 1, overlap = {1} -> |overlap| = 1) -> must be excluded!
+    graph.record_interaction(user_d, p1, SignalType::Like, now - 200);
+
     let res = rec.find_taste_twins("did:plc:viewer", 10).unwrap();
     assert_eq!(res.twins.len(), 2);
+    assert!(!res
+        .twins
+        .iter()
+        .any(|t| t.user_did == "did:plc:user_d_single"));
 
-    // User C has higher cosine similarity (0.7071) than User B (0.6708)
-    assert_eq!(res.twins[0].user_did, "did:plc:user_c");
-    let expected_c = 2.0 / (4.0 * 2.0f32).sqrt();
-    assert!((res.twins[0].similarity_score - expected_c).abs() < 1e-4);
-    assert_eq!(res.twins[0].shared_posts_count, 2);
+    // User B has higher Bayesian confidence (0.3354) than User C (0.2828) despite lower raw cosine
+    assert_eq!(res.twins[0].user_did, "did:plc:user_b");
+    let expected_b = (3.0 / (4.0 * 5.0f32).sqrt()) * (3.0 / 6.0);
+    assert!((res.twins[0].similarity_score - expected_b).abs() < 1e-4);
+    assert_eq!(res.twins[0].shared_posts_count, 3);
 
-    assert_eq!(res.twins[1].user_did, "did:plc:user_b");
-    let expected_b = 3.0 / (4.0 * 5.0f32).sqrt();
-    assert!((res.twins[1].similarity_score - expected_b).abs() < 1e-4);
-    assert_eq!(res.twins[1].shared_posts_count, 3);
+    assert_eq!(res.twins[1].user_did, "did:plc:user_c");
+    let expected_c = (2.0 / (4.0 * 2.0f32).sqrt()) * (2.0 / 5.0);
+    assert!((res.twins[1].similarity_score - expected_c).abs() < 1e-4);
+    assert_eq!(res.twins[1].shared_posts_count, 2);
 }
 
 #[test]
@@ -127,9 +137,13 @@ fn test_find_taste_twins_at_prefix_stripping() {
     let author = interner.intern("charlie.bsky.social");
 
     let p1 = interner.intern("at://charlie.bsky.social/app.bsky.feed.post/1");
+    let p2 = interner.intern("at://charlie.bsky.social/app.bsky.feed.post/2");
     graph.record_post_meta(p1, author, None, None, now - 100);
+    graph.record_post_meta(p2, author, None, None, now - 100);
     graph.record_interaction(viewer, p1, SignalType::Like, now - 50);
+    graph.record_interaction(viewer, p2, SignalType::Like, now - 50);
     graph.record_interaction(twin, p1, SignalType::Like, now - 40);
+    graph.record_interaction(twin, p2, SignalType::Like, now - 40);
 
     let res_without_at = rec.find_taste_twins("alice.bsky.social", 10).unwrap();
     let res_with_at = rec.find_taste_twins("@alice.bsky.social", 10).unwrap();
@@ -189,20 +203,28 @@ fn test_recommend_preview_score_breakdown() {
     graph.record_post_meta(cand_post, author, None, None, now - 300);
 
     // Populate active likes to enable Tier 1
+    let mut first_dummy = None;
     for i in 1..=10 {
         let p = interner.intern(&format!(
             "at://did:plc:tech_seed/app.bsky.feed.post/dummy_{i}"
         ));
+        if first_dummy.is_none() {
+            first_dummy = Some(p);
+        }
         graph.record_post_meta(p, author, None, None, now - 600);
         graph.record_interaction(viewer, p, SignalType::Like, now - 400);
     }
 
+    let p_dummy1 = first_dummy.unwrap();
     graph.record_interaction(viewer, seed_post, SignalType::Like, now - 200);
+    // co_user shares 2 likes with viewer: seed_post and dummy_1
     graph.record_interaction(co_user, seed_post, SignalType::Like, now - 180);
+    graph.record_interaction(co_user, p_dummy1, SignalType::Like, now - 180);
     graph.record_interaction(co_user, cand_post, SignalType::Repost, now - 150);
 
     let dials = RecommendationDials {
         explain: true,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -252,7 +274,10 @@ fn test_recommend_preview_read_only_impression_safety() {
     graph.record_interaction(followed, p1, SignalType::Like, now - 100);
     graph.record_interaction(followed, p2, SignalType::Like, now - 100);
 
-    let dials = RecommendationDials::default();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // Call recommend_preview 10 times in rapid succession
     for _ in 0..10 {
@@ -300,6 +325,7 @@ fn test_recommend_preview_topic_weights_modulation() {
             news: 1.0,
             culture: 1.0,
         },
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -324,13 +350,17 @@ fn test_explain_recommendation_tier1_3step_proof_chain() {
     let author = interner.intern("did:plc:tech_seed");
 
     let seed_post = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/seed_post");
+    let seed_post_2 = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/seed_post_2");
     let rec_post = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/recommended_post");
 
     graph.record_post_meta(seed_post, author, None, None, now - 500);
+    graph.record_post_meta(seed_post_2, author, None, None, now - 500);
     graph.record_post_meta(rec_post, author, None, None, now - 300);
 
     graph.record_interaction(viewer, seed_post, SignalType::Like, now - 200);
+    graph.record_interaction(viewer, seed_post_2, SignalType::Like, now - 200);
     graph.record_interaction(twin, seed_post, SignalType::Like, now - 150);
+    graph.record_interaction(twin, seed_post_2, SignalType::Like, now - 150);
     graph.record_interaction(twin, rec_post, SignalType::Repost, now - 100);
 
     let chain = rec
@@ -344,9 +374,11 @@ fn test_explain_recommendation_tier1_3step_proof_chain() {
 
     // Step 1: Viewer -> Seed Post
     assert_eq!(chain.steps[0].step_type, "viewer_interaction");
-    assert_eq!(
-        chain.steps[0].node_id,
-        "at://did:plc:tech_seed/app.bsky.feed.post/seed_post"
+    assert!(
+        chain.steps[0].node_id == "at://did:plc:tech_seed/app.bsky.feed.post/seed_post"
+            || chain.steps[0].node_id == "at://did:plc:tech_seed/app.bsky.feed.post/seed_post_2",
+        "Expected step[0].node_id to be a shared seed post, got: {}",
+        chain.steps[0].node_id
     );
 
     // Step 2: Seed Post -> Taste Twin
@@ -439,11 +471,16 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
     for u in 0..500 {
         let user = interner.intern(&format!("did:plc:user_{u}"));
         let cand_author = interner.intern(&format!("did:plc:author_{u}"));
-        let shared_p = interner.intern(&format!(
+        let shared_p1 = interner.intern(&format!(
             "at://did:plc:author/app.bsky.feed.post/viewer_post_{}",
             u % 50
         ));
-        graph.record_interaction(user, shared_p, SignalType::Like, now - 400);
+        let shared_p2 = interner.intern(&format!(
+            "at://did:plc:author/app.bsky.feed.post/viewer_post_{}",
+            (u + 1) % 50
+        ));
+        graph.record_interaction(user, shared_p1, SignalType::Like, now - 400);
+        graph.record_interaction(user, shared_p2, SignalType::Like, now - 400);
 
         let cand_p = interner.intern(&format!(
             "at://did:plc:author_{u}/app.bsky.feed.post/cand_{u}"
@@ -472,6 +509,7 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
     let dials = RecommendationDials {
         explain: true,
         limit: 30,
+        min_likes: 1,
         ..Default::default()
     };
     let preview_resp = rec

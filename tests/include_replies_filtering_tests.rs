@@ -77,6 +77,14 @@ fn create_reply_test_environment() -> (
     graph.record_interaction(co_user_id, root_post, SignalType::Like, now - 50);
     graph.record_interaction(co_user_id, reply_post, SignalType::Like, now - 30);
 
+    // Baseline interactions so candidate posts meet default engagement floor (min_likes: 3)
+    let u1 = interner.intern("did:plc:mock_reply_user_1");
+    let u2 = interner.intern("did:plc:mock_reply_user_2");
+    for &p in &[root_post, reply_post] {
+        graph.record_interaction(u1, p, SignalType::Like, now - 40);
+        graph.record_interaction(u2, p, SignalType::Like, now - 40);
+    }
+
     let recommender = Arc::new(Recommender::new(Arc::clone(&interner), Arc::clone(&graph)));
     let state = AppState::new(
         Arc::clone(&recommender),
@@ -323,6 +331,7 @@ async fn test_user_preference_persistence_of_include_replies() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(true),
+        min_likes: Some(3),
     };
     let req_save = Request::builder()
         .method(Method::POST)
@@ -337,6 +346,7 @@ async fn test_user_preference_persistence_of_include_replies() {
     // 3. Verify in preferences store
     let saved_dials = prefs_store.get_by_did(&interner, user_did).unwrap();
     assert!(saved_dials.include_replies);
+    assert_eq!(saved_dials.min_likes, 3);
 
     // 4. GET /api/preferences -> returns include_replies: true
     let req_get2 = Request::builder()
@@ -390,6 +400,7 @@ fn test_snapshot_v3_preferences_round_trip() {
             culture: 1.0,
         },
         include_replies: true,
+        min_likes: 3,
         updated_at_secs: 1000,
     };
 
@@ -398,6 +409,7 @@ fn test_snapshot_v3_preferences_round_trip() {
         serendipity_ratio: 0.10,
         topic_weights: TopicWeights::default(),
         include_replies: false,
+        min_likes: 3,
         updated_at_secs: 2000,
     };
 

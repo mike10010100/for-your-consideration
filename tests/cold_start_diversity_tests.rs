@@ -254,6 +254,7 @@ fn test_cold_start_unauthenticated_feed_topic_diversity() {
     let dials = RecommendationDials {
         limit: 30,
         explain: true,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -323,6 +324,7 @@ fn test_single_topic_viral_spike_injection_defense() {
     let dials = RecommendationDials {
         limit: 30,
         explain: true,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -374,7 +376,10 @@ fn test_empty_and_sparse_topic_pools_graceful_backfill() {
     let graph = Arc::new(GraphStore::new());
 
     let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
-    let dials = RecommendationDials::default();
+    let dials = RecommendationDials {
+        min_likes: 1,
+        ..Default::default()
+    };
 
     // 1. Completely empty graph
     let empty_rec = rec.recommend(None, &dials, BASE_NOW).unwrap();
@@ -426,6 +431,7 @@ fn test_topic_diversity_multi_page_pagination() {
     // Page 1: limit = 5
     let dials1 = RecommendationDials {
         limit: 5,
+        min_likes: 1,
         ..Default::default()
     };
     let page1 = rec.recommend(None, &dials1, BASE_NOW).unwrap();
@@ -436,6 +442,7 @@ fn test_topic_diversity_multi_page_pagination() {
     let dials2 = RecommendationDials {
         limit: 5,
         cursor: page1.cursor,
+        min_likes: 1,
         ..Default::default()
     };
     let page2 = rec.recommend(None, &dials2, BASE_NOW).unwrap();
@@ -481,6 +488,7 @@ async fn test_high_concurrency_tier3_diversity_queries() {
             let dials = RecommendationDials {
                 limit: 15,
                 explain: true,
+                min_likes: 1,
                 ..Default::default()
             };
             let feed = rec_clone.recommend(None, &dials, BASE_NOW).unwrap();

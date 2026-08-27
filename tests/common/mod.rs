@@ -218,8 +218,24 @@ impl SyntheticGraphBuilder {
                 None::<&str>,
                 now_secs - 5000,
             );
-            builder =
-                builder.add_interaction(co_user, cand_uri, SignalType::Repost, now_secs - 4800);
+            builder = builder.add_interaction(
+                co_user,
+                cand_uri.clone(),
+                SignalType::Repost,
+                now_secs - 4800,
+            );
+            builder = builder.add_interaction(
+                "did:plc:base_liker_1",
+                cand_uri.clone(),
+                SignalType::Like,
+                now_secs - 4800,
+            );
+            builder = builder.add_interaction(
+                "did:plc:base_liker_2",
+                cand_uri,
+                SignalType::Like,
+                now_secs - 4800,
+            );
         }
 
         // New user: 2 likes, follows author A and co_interactor_1
@@ -481,6 +497,8 @@ pub struct FeedSkeletonQuery {
     pub freshness: Option<String>,
     pub discovery: Option<String>,
     pub explain: Option<bool>,
+    #[serde(alias = "engagement_floor", default)]
+    pub min_likes: Option<String>,
 }
 
 /// Builds the test Axum router with all required XRPC and discovery endpoints.
@@ -517,13 +535,16 @@ async fn handle_get_feed_skeleton(
     // Extract viewer DID from Auth header
     let viewer_did = extract_viewer_did_from_headers(&headers);
 
-    let dials = RecommendationDials::from_query(
+    let mut dials = RecommendationDials::from_query(
         query.freshness.as_deref(),
         query.discovery.as_deref(),
         query.explain,
         query.limit,
         query.cursor,
     );
+    if let Some(ref raw_min_likes) = query.min_likes {
+        dials.min_likes = RecommendationDials::parse_engagement_floor(Some(raw_min_likes.as_str()));
+    }
 
     let now_secs = chrono_like_now();
 

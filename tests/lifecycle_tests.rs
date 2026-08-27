@@ -103,10 +103,14 @@ async fn test_xrpc_impression_recording_and_immediate_hard_suppression() {
     graph.record_post_meta(p3, aid, None, None, now);
 
     // Seed interactions so tier 3 velocity pool / recommendations surface them
-    let u_seed = interner.intern("did:plc:seed_user");
-    graph.record_interaction(u_seed, p1, SignalType::Like, now);
-    graph.record_interaction(u_seed, p2, SignalType::Like, now);
-    graph.record_interaction(u_seed, p3, SignalType::Like, now);
+    let u_seed1 = interner.intern("did:plc:seed_user_1");
+    let u_seed2 = interner.intern("did:plc:seed_user_2");
+    let u_seed3 = interner.intern("did:plc:seed_user_3");
+    for &p in &[p1, p2, p3] {
+        graph.record_interaction(u_seed1, p, SignalType::Like, now);
+        graph.record_interaction(u_seed2, p, SignalType::Like, now);
+        graph.record_interaction(u_seed3, p, SignalType::Like, now);
+    }
 
     let recommender = Arc::new(Recommender::new(Arc::clone(&interner), Arc::clone(&graph)));
     let state = AppState::new(recommender, "did:web:feed.example.com", "feed.example.com");
@@ -490,8 +494,10 @@ async fn test_multithreaded_concurrent_xrpc_requests_and_impression_recording() 
         let aid = interner.intern(&format!("did:plc:author_{i}"));
         let pid = interner.intern(&format!("at://did:plc:author_{i}/app.bsky.feed.post/{i}"));
         graph.record_post_meta(pid, aid, None, None, now);
-        let uid = interner.intern(&format!("did:plc:liker_{i}"));
-        graph.record_interaction(uid, pid, SignalType::Like, now);
+        for k in 1..=3 {
+            let uid = interner.intern(&format!("did:plc:liker_{i}_{k}"));
+            graph.record_interaction(uid, pid, SignalType::Like, now);
+        }
     }
 
     let recommender = Arc::new(Recommender::new(Arc::clone(&interner), Arc::clone(&graph)));

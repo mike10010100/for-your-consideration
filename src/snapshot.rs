@@ -32,13 +32,18 @@ use crate::error::{FeedError, Result};
 use crate::graph::{GraphSnapshotData, GraphStore};
 use crate::interner::StringInterner;
 use crate::preferences::UserPreferencesStore;
-use crate::types::{CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, UserDials};
+use crate::types::{
+    CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
+};
 
 /// Magic 4-byte header identifier: `b"FYFD"` (For-You Feed).
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"FYFD";
 
-/// Current snapshot format version (3 includes Section 8 User Preferences with `include_replies`).
-pub const SNAPSHOT_FORMAT_VERSION: u16 = 3;
+/// Current snapshot format version (4 includes Section 8 User Preferences with `include_replies` and `min_likes`).
+pub const SNAPSHOT_FORMAT_VERSION: u16 = 4;
+
+/// Legacy snapshot format version 3 with `include_replies` without `min_likes`.
+pub const SNAPSHOT_FORMAT_VERSION_V3: u16 = 3;
 
 /// Legacy snapshot format version 2 with user preferences.
 pub const SNAPSHOT_FORMAT_VERSION_V2: u16 = 2;
@@ -272,6 +277,33 @@ impl<'a> ByteSliceReader<'a> {
         Ok(slice)
     }
 
+    fn read_edges(&mut self, count: usize) -> Result<Vec<CompactEdge>> {
+        let byte_len = count
+            .checked_mul(8)
+            .ok_or_else(|| FeedError::Snapshot("Edge count overflow".to_string()))?;
+        let bytes = self.read_bytes(byte_len)?;
+        let mut edges = Vec::with_capacity(count);
+        for chunk in bytes.chunks_exact(8) {
+            let target = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let packed = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            edges.push(CompactEdge { target, packed });
+        }
+        Ok(edges)
+    }
+
+    fn read_u32_vec(&mut self, count: usize) -> Result<Vec<u32>> {
+        let byte_len = count
+            .checked_mul(4)
+            .ok_or_else(|| FeedError::Snapshot("u32 count overflow".to_string()))?;
+        let bytes = self.read_bytes(byte_len)?;
+        let mut list = Vec::with_capacity(count);
+        for chunk in bytes.chunks_exact(4) {
+            let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            list.push(val);
+        }
+        Ok(list)
+    }
+
     const fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.offset)
     }
@@ -453,7 +485,7 @@ pub fn save_snapshot_with_preferences(
         write_chunk(&ts.to_le_bytes())?;
     }
 
-    // Section 8: User Preferences (Version 3)
+    // Section 8: User Preferences (Version 4)
     let num_preferences = u32::try_from(pref_data.len())
         .map_err(|e| FeedError::Snapshot(format!("Too many user preferences for snapshot: {e}")))?;
     write_chunk(&num_preferences.to_le_bytes())?;
@@ -467,6 +499,7 @@ pub fn save_snapshot_with_preferences(
         write_chunk(&dials.topic_weights.news.to_le_bytes())?;
         write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
         write_chunk(&[u8::from(dials.include_replies)])?;
+        write_chunk(&dials.min_likes.to_le_bytes())?;
         write_chunk(&dials.updated_at_secs.to_le_bytes())?;
     }
 
@@ -585,6 +618,7 @@ pub fn load_snapshot_with_preferences(
     let version = u16::from_le_bytes([header_buf[4], header_buf[5]]);
     if version != SNAPSHOT_FORMAT_VERSION_V1
         && version != SNAPSHOT_FORMAT_VERSION_V2
+        && version != SNAPSHOT_FORMAT_VERSION_V3
         && version != SNAPSHOT_FORMAT_VERSION
     {
         return Err(FeedError::Snapshot(format!(
@@ -695,12 +729,7 @@ pub fn load_snapshot_with_preferences(
     for _ in 0..user_count {
         let uid = slice_reader.read_u32()?;
         let edge_count = slice_reader.read_u32()? as usize;
-        let mut edges = Vec::with_capacity(edge_count.min(slice_reader.remaining() / 8));
-        for _ in 0..edge_count {
-            let target = slice_reader.read_u32()?;
-            let packed = slice_reader.read_u32()?;
-            edges.push(CompactEdge { target, packed });
-        }
+        let edges = slice_reader.read_edges(edge_count)?;
         user_interactions.push((uid, edges));
     }
 
@@ -711,12 +740,7 @@ pub fn load_snapshot_with_preferences(
     for _ in 0..post_count {
         let pid = slice_reader.read_u32()?;
         let edge_count = slice_reader.read_u32()? as usize;
-        let mut edges = Vec::with_capacity(edge_count.min(slice_reader.remaining() / 8));
-        for _ in 0..edge_count {
-            let target = slice_reader.read_u32()?;
-            let packed = slice_reader.read_u32()?;
-            edges.push(CompactEdge { target, packed });
-        }
+        let edges = slice_reader.read_edges(edge_count)?;
         post_interactions.push((pid, edges));
     }
 
@@ -742,10 +766,7 @@ pub fn load_snapshot_with_preferences(
     for _ in 0..follower_count {
         let fid = slice_reader.read_u32()?;
         let count = slice_reader.read_u32()? as usize;
-        let mut list = Vec::with_capacity(count.min(slice_reader.remaining() / 4));
-        for _ in 0..count {
-            list.push(slice_reader.read_u32()?);
-        }
+        let list = slice_reader.read_u32_vec(count)?;
         follows.push((fid, list));
     }
 
@@ -789,9 +810,9 @@ pub fn load_snapshot_with_preferences(
         active_recent_posts.push((pid, ts));
     }
 
-    // Section 8: User Preferences (Version 2 / Version 3)
-    let num_preferences = if (version == SNAPSHOT_FORMAT_VERSION
-        || version == SNAPSHOT_FORMAT_VERSION_V2)
+    // Section 8: User Preferences (Version 2 / Version 3 / Version 4)
+    let num_preferences = if (SNAPSHOT_FORMAT_VERSION_V2..=SNAPSHOT_FORMAT_VERSION)
+        .contains(&version)
         && slice_reader.offset < payload.len()
     {
         let pref_count = slice_reader.read_u32()? as usize;
@@ -841,6 +862,11 @@ pub fn load_snapshot_with_preferences(
             } else {
                 false
             };
+            let min_likes = if version >= 4 {
+                slice_reader.read_u32()?
+            } else {
+                DEFAULT_MIN_LIKES
+            };
             let updated_at_secs = slice_reader.read_u64()?;
 
             let dials = UserDials {
@@ -854,6 +880,7 @@ pub fn load_snapshot_with_preferences(
                     culture,
                 },
                 include_replies,
+                min_likes,
                 updated_at_secs,
             };
 

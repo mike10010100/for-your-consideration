@@ -57,7 +57,8 @@ use crate::types::{
     LoginRequestBody, MemoryTelemetryInfo, OAuthCallbackRequest, OAuthClientMetadata,
     OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto, PreferencesResponseDto,
     RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost, TasteTwinsQuery,
-    TelemetryResponse, TopicWeights, UserDials, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    TelemetryResponse, TopicWeights, UserDials, DEFAULT_MIN_LIKES, DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -199,6 +200,9 @@ pub struct FeedSkeletonQuery {
     pub replies: Option<String>,
     /// Alternative boolean flag for including replies.
     pub include_replies: Option<bool>,
+    /// Minimum engagement floor in likes or preset string ("emerging", "balanced", "curated", or numeric).
+    #[serde(alias = "engagement_floor", default)]
+    pub min_likes: Option<String>,
     /// Topic bias multiplier for Art category (0.0 to 5.0).
     pub art: Option<f32>,
     /// Topic bias multiplier for Tech category (0.0 to 5.0).
@@ -407,12 +411,20 @@ pub async fn handle_get_feed_skeleton(
         _ => base_dials.include_replies,
     };
 
+    let min_likes = query
+        .min_likes
+        .as_deref()
+        .map_or(base_dials.min_likes, |raw| {
+            RecommendationDials::parse_engagement_floor(Some(raw))
+        });
+
     let dials = RecommendationDials {
         half_life_secs,
         explore_ratio,
         topic_weights,
         explain,
         include_replies,
+        min_likes,
         limit,
         cursor: query.cursor,
     };
@@ -1035,6 +1047,7 @@ pub async fn handle_get_preferences(
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            min_likes: dials.min_likes,
         },
         is_custom,
         dials: Some(dials.into()),
@@ -1069,11 +1082,13 @@ pub async fn handle_post_preferences(
     };
 
     let include_replies = body.include_replies.unwrap_or(false);
+    let min_likes = body.min_likes.unwrap_or(DEFAULT_MIN_LIKES);
     let dials = UserDials {
         freshness_half_life_secs: body.freshness_hours * 3600.0,
         serendipity_ratio: body.discovery_ratio,
         topic_weights: body.topic_weights.unwrap_or_default(),
         include_replies,
+        min_likes,
         updated_at_secs: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1105,6 +1120,7 @@ pub async fn handle_post_preferences(
                 discovery_ratio: dials.discovery_ratio(),
                 topic_weights: dials.topic_weights,
                 include_replies: dials.include_replies,
+                min_likes: dials.min_likes,
             }),
             dials: Some(dials.into()),
         }),
@@ -1468,11 +1484,15 @@ mod tests {
             .unwrap_or_default()
             .as_secs();
 
-        let uid = interner.intern("did:plc:test_user");
+        let u1 = interner.intern("did:plc:user1");
+        let u2 = interner.intern("did:plc:user2");
+        let u3 = interner.intern("did:plc:user3");
         let pid = interner.intern("at://did:plc:author/app.bsky.feed.post/123");
         let aid = interner.intern("did:plc:author");
         graph.record_post_meta(pid, aid, None, None, now);
-        graph.record_interaction(uid, pid, SignalType::Like, now);
+        graph.record_interaction(u1, pid, SignalType::Like, now);
+        graph.record_interaction(u2, pid, SignalType::Like, now);
+        graph.record_interaction(u3, pid, SignalType::Like, now);
 
         let recommender = Arc::new(Recommender::new(interner, graph));
         AppState::new(recommender, "did:web:feed.example.com", "feed.example.com")
@@ -1867,6 +1887,7 @@ mod tests {
                 culture: 1.5,
             }),
             include_replies: Some(true),
+            min_likes: Some(10),
         };
         let req_post = Request::builder()
             .method(Method::POST)
@@ -1898,6 +1919,7 @@ mod tests {
         assert_eq!(prefs_up.preferences.freshness_hours, 12.0);
         assert_eq!(prefs_up.preferences.discovery_ratio, 0.35);
         assert!(prefs_up.preferences.include_replies);
+        assert_eq!(prefs_up.preferences.min_likes, 10);
 
         // 5. DELETE -> 200 resets to default dials
         let req_del = Request::builder()
@@ -1990,6 +2012,7 @@ mod tests {
                 culture: 0.0,
             },
             include_replies: false,
+            min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs: 0,
         };
         state

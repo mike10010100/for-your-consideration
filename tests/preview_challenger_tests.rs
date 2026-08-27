@@ -117,6 +117,7 @@ fn test_challenge_recommend_preview_high_candidate_load_latency_and_correctness(
         },
         explain: true,
         include_replies: false,
+        min_likes: 1,
         limit: 30,
         cursor: None,
     };
@@ -509,6 +510,7 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                     },
                     explain: i.is_multiple_of(2),
                     include_replies: false,
+                    min_likes: 3,
                     limit: 10 + (i % 40),
                     cursor: None,
                 };
@@ -867,22 +869,24 @@ fn test_taste_twins_cosine_oracle_matrix_fuzzing() {
             .expect("Returned twin must be one of generated users");
 
         let expected_sim = oracle_cosine_similarity(&viewer_set, &matching_user.2) as f32;
+        let expected_shared = viewer_set.intersection(&matching_user.2).count();
+        let expected_conf =
+            calculate_bayesian_confidence(expected_sim, expected_shared, DEFAULT_BAYESIAN_BETA);
         assert!(
-            (twin.similarity_score - expected_sim).abs() < 1e-5,
-            "find_taste_twins cosine mismatch for {}: expected {expected_sim}, got {}",
+            (twin.similarity_score - expected_conf).abs() < 1e-5,
+            "find_taste_twins confidence mismatch for {}: expected {expected_conf}, got {}",
             twin.user_did,
             twin.similarity_score
         );
-        let expected_shared = viewer_set.intersection(&matching_user.2).count();
         assert_eq!(twin.shared_posts_count, expected_shared);
     }
 
-    // Ensure 0-overlap users (u % 5 == 3) were strictly excluded from twins
+    // Ensure < 2 overlap users were strictly excluded from twins
     for (uid, handle, set) in &user_sets {
-        if viewer_set.intersection(set).count() == 0 {
+        if viewer_set.intersection(set).count() < MIN_SHARED_OVERLAP {
             assert!(
                 !twins_resp.twins.iter().any(|t| t.user_did == *handle),
-                "0-overlap user {uid} ({handle}) should not be in taste twins"
+                "Low-overlap user {uid} ({handle}) should not be in taste twins"
             );
         }
     }
@@ -918,11 +922,25 @@ fn test_taste_twins_boundary_edge_cases() {
     let actual = graph.compute_cosine_similarity(viewer, dense_twin);
     assert!((actual - expected).abs() < 1e-6);
 
-    let resp = rec.find_taste_twins("did:plc:sparse_viewer", 10).unwrap();
-    assert_eq!(resp.twins.len(), 1);
-    assert_eq!(resp.twins[0].user_did, "did:plc:dense_twin");
-    assert!((resp.twins[0].similarity_score - expected).abs() < 1e-6);
-    assert_eq!(resp.twins[0].shared_posts_count, 1);
+    // 1 shared like (< MIN_SHARED_OVERLAP) must return 0 taste twins
+    let resp1 = rec.find_taste_twins("did:plc:sparse_viewer", 10).unwrap();
+    assert_eq!(resp1.twins.len(), 0);
+
+    // Now record a second shared like
+    let p_shared2 = interner.intern("at://did:plc:author/app.bsky.feed.post/shared2");
+    graph.record_post_meta(p_shared2, author, None, None, now - 1000);
+    graph.record_interaction(viewer, p_shared2, SignalType::Like, now - 500);
+    graph.record_interaction(dense_twin, p_shared2, SignalType::Like, now - 400);
+
+    // With 2 shared likes, dense twin qualifies
+    let resp2 = rec.find_taste_twins("did:plc:sparse_viewer", 10).unwrap();
+    assert_eq!(resp2.twins.len(), 1);
+    assert_eq!(resp2.twins[0].user_did, "did:plc:dense_twin");
+    let expected_cosine_2 = 2.0 / (2.0 * 10001.0f32).sqrt();
+    let expected_conf_2 =
+        calculate_bayesian_confidence(expected_cosine_2, 2, DEFAULT_BAYESIAN_BETA);
+    assert!((resp2.twins[0].similarity_score - expected_conf_2).abs() < 1e-5);
+    assert_eq!(resp2.twins[0].shared_posts_count, 2);
 }
 
 #[test]
@@ -958,6 +976,7 @@ fn test_read_only_impression_isolation_stress() {
 
     let dials = RecommendationDials {
         explain: true,
+        min_likes: 1,
         limit: 10,
         ..Default::default()
     };
@@ -986,6 +1005,7 @@ fn test_read_only_impression_isolation_stress() {
             },
             explain: step % 2 == 0,
             include_replies: false,
+            min_likes: 1,
             limit: 15,
             cursor: None,
         };
@@ -1107,10 +1127,10 @@ fn test_proof_chain_reconstruction_multi_path_adversarial() {
             || chain.steps[0].node_id == "at://did:plc:tech_seed/app.bsky.feed.post/seed_2"
     );
 
-    // Step 2: Taste Similarity -> Strong Twin
+    // Step 2: Taste Similarity -> Strong Twin (Bayesian shrunk confidence: 0.8165 * 0.40 = 32.7%)
     assert_eq!(chain.steps[1].step_type, "taste_similarity");
     assert_eq!(chain.steps[1].node_id, "did:plc:twin_strong");
-    assert!(chain.steps[1].description.contains("81.6% taste match"));
+    assert!(chain.steps[1].description.contains("32.7% taste match"));
 
     // Step 3: Recommendation Signal -> Target Post via Repost
     assert_eq!(chain.steps[2].step_type, "recommendation_signal");
@@ -1143,13 +1163,19 @@ fn test_preview_mathematical_score_breakdown_invariants() {
     graph.record_post_meta(cand, author, None, None, now - 3600); // 1 hour ago
 
     // Populate 10 likes for Tier 1
+    let mut first_pad = None;
     for i in 1..=10 {
         let p = interner.intern(&format!("at://did:plc:art_seed/app.bsky.feed.post/pad_{i}"));
+        if first_pad.is_none() {
+            first_pad = Some(p);
+        }
         graph.record_post_meta(p, author, None, None, now - 2000);
         graph.record_interaction(viewer, p, SignalType::Like, now - 1500);
     }
+    let p_pad1 = first_pad.unwrap();
     graph.record_interaction(viewer, seed, SignalType::Like, now - 800);
     graph.record_interaction(co_user, seed, SignalType::Like, now - 700);
+    graph.record_interaction(co_user, p_pad1, SignalType::Like, now - 700);
 
     // Co-user reposts cand (weight = 3.0) 3600s ago
     graph.record_interaction(co_user, cand, SignalType::Repost, now - 3600);
@@ -1165,6 +1191,7 @@ fn test_preview_mathematical_score_breakdown_invariants() {
             culture: 1.0,
         },
         explain: true,
+        min_likes: 1,
         ..Default::default()
     };
 

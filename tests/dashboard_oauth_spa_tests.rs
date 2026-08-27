@@ -90,6 +90,14 @@ fn create_rich_dashboard_test_state() -> AppState {
     graph.record_follow(carol, alice);
     graph.record_interaction(carol, sci_p1, SignalType::Like, now - 200);
 
+    // Baseline interactions so candidate posts meet default engagement floor (min_likes: 3)
+    let u1 = interner.intern("did:plc:mock_spa_user_1");
+    let u2 = interner.intern("did:plc:mock_spa_user_2");
+    for &p in &[art_p1, tech_p1, sci_p1] {
+        graph.record_interaction(u1, p, SignalType::Like, now - 350);
+        graph.record_interaction(u2, p, SignalType::Like, now - 350);
+    }
+
     let snap_config = SnapshotConfig {
         path: std::path::PathBuf::from("target/test_dashboard_spa_snap.bin"),
         interval_secs: 300,
@@ -508,6 +516,7 @@ async fn test_authenticated_preference_lifecycle() {
             culture: 1.0,
         }),
         include_replies: Some(false),
+        min_likes: Some(3),
     };
     let req_save = Request::builder()
         .method(Method::POST)

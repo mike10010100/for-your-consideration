@@ -67,6 +67,7 @@ fn test_clock_skew_future_interactions_do_not_underflow() {
     let rec = Recommender::new(interner, graph);
     let dials = RecommendationDials {
         explore_ratio: 0.0,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -91,7 +92,10 @@ fn test_extreme_time_values_and_dials() {
     // Test with now_secs = 0 (before BLUESKY_EPOCH_SECS)
     let res_zero = rec.recommend(
         Some("did:plc:active_user"),
-        &RecommendationDials::default(),
+        &RecommendationDials {
+            min_likes: 1,
+            ..Default::default()
+        },
         0,
     );
     assert!(res_zero.is_ok());
@@ -99,7 +103,10 @@ fn test_extreme_time_values_and_dials() {
     // Test with now_secs = u64::MAX
     let res_max = rec.recommend(
         Some("did:plc:active_user"),
-        &RecommendationDials::default(),
+        &RecommendationDials {
+            min_likes: 1,
+            ..Default::default()
+        },
         u64::MAX,
     );
     assert!(res_max.is_ok());
@@ -107,6 +114,7 @@ fn test_extreme_time_values_and_dials() {
     // Test with half_life_secs = 0.0, negative, extremely large
     let dials_zero_hl = RecommendationDials {
         half_life_secs: 0.0,
+        min_likes: 1,
         ..Default::default()
     };
     let res_zero_hl = rec.recommend(Some("did:plc:active_user"), &dials_zero_hl, now());
@@ -114,6 +122,7 @@ fn test_extreme_time_values_and_dials() {
 
     let dials_neg_hl = RecommendationDials {
         half_life_secs: -1000.0,
+        min_likes: 1,
         ..Default::default()
     };
     let res_neg_hl = rec.recommend(Some("did:plc:active_user"), &dials_neg_hl, now());
@@ -121,6 +130,7 @@ fn test_extreme_time_values_and_dials() {
 
     let dials_huge_hl = RecommendationDials {
         half_life_secs: 1e15,
+        min_likes: 1,
         ..Default::default()
     };
     let res_huge_hl = rec.recommend(Some("did:plc:active_user"), &dials_huge_hl, now());
@@ -135,40 +145,32 @@ fn test_extreme_time_values_and_dials() {
 fn test_tier1_isolated_subgraph_cascades_to_tier2_then_tier3() {
     let interner = Arc::new(StringInterner::new());
     let graph = Arc::new(GraphStore::new());
-
     let query_now = now();
-    let isolated_user = "did:plc:isolated_user";
+
+    let isolated_user = "did:plc:isolated_no_overlap";
     let u_id = interner.intern(isolated_user);
 
-    // Give isolated_user 12 likes (qualifies for Tier 1: >= 10 likes)
-    for i in 1..=12 {
-        let p_uri = format!("at://did:plc:author_x/app.bsky.feed.post/iso_{i}");
-        let p_id = interner.intern(&p_uri);
-        let a_id = interner.intern("did:plc:author_x");
-        graph.record_post_meta(p_id, a_id, None, None, query_now - 1000);
-        graph.record_interaction(u_id, p_id, SignalType::Like, query_now - 500);
-        // NO other user interacts with these posts -> 0 co-interactors!
-    }
+    // User only interacted with 1 post, and nobody else interacted with that post
+    let isolated_post = interner.intern("at://did:plc:isolated_author/app.bsky.feed.post/lone_1");
+    let isolated_author = interner.intern("did:plc:isolated_author");
+    graph.record_post_meta(isolated_post, isolated_author, None, None, query_now - 1000);
+    graph.record_interaction(u_id, isolated_post, SignalType::Like, query_now - 500);
 
-    // Populate global velocity pool with trending posts so Tier 3 has items
+    // Populate velocity pool
     let trend_author = interner.intern("did:plc:trend_author");
-    for i in 1..=5 {
-        let p_uri = format!("at://did:plc:trend_author/app.bsky.feed.post/trend_{i}");
-        let p_id = interner.intern(&p_uri);
-        graph.record_post_meta(p_id, trend_author, None, None, query_now - 2000);
-        for u in 1..=5 {
-            let other_user = interner.intern(&format!("did:plc:trend_user_{u}"));
-            graph.record_interaction(other_user, p_id, SignalType::Like, query_now - 1000);
-        }
-    }
+    let trend_post = interner.intern("at://did:plc:trend_author/app.bsky.feed.post/trend_1");
+    graph.record_post_meta(trend_post, trend_author, None, None, query_now - 2000);
+    let trend_user = interner.intern("did:plc:trend_user");
+    graph.record_interaction(trend_user, trend_post, SignalType::Like, query_now - 100);
 
-    let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let rec = Recommender::new(interner.clone(), graph.clone());
     let dials = RecommendationDials {
         explore_ratio: 0.0,
+        min_likes: 1,
         ..Default::default()
     };
 
-    // Scenario A: isolated user has 0 follows -> Tier 1 (empty) -> Tier 2 (empty) -> Tier 3
+    // Scenario A: isolated user follows nobody -> Tier 1 (empty) -> Tier 2 (empty) -> Tier 3 (found!)
     let res_t3 = rec
         .recommend(Some(isolated_user), &dials, query_now)
         .unwrap();
@@ -177,6 +179,7 @@ fn test_tier1_isolated_subgraph_cascades_to_tier2_then_tier3() {
         res_t3.posts[0].source,
         RecommendationSource::Tier3VelocityPool
     );
+    assert_eq!(res_t3.posts[0].post_id, trend_post);
 
     // Scenario B: isolated user follows an active user -> Tier 1 (empty) -> Tier 2 (found!)
     let followed_user = interner.intern("did:plc:followed_active");
@@ -233,6 +236,7 @@ fn test_tier2_with_zero_active_follows_cascades_to_tier3() {
     let rec = Recommender::new(interner, graph);
     let dials = RecommendationDials {
         explore_ratio: 0.0,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -293,6 +297,7 @@ fn test_explainability_trace_accuracy_and_format() {
     // 1. explain = false -> explain is None
     let dials_no_explain = RecommendationDials {
         explain: false,
+        min_likes: 1,
         ..Default::default()
     };
     let res_no = rec
@@ -305,6 +310,7 @@ fn test_explainability_trace_accuracy_and_format() {
     // 2. explain = true -> explain is Some and contains source, score, root_id
     let dials_explain = RecommendationDials {
         explain: true,
+        min_likes: 1,
         ..Default::default()
     };
     let res_exp = rec
@@ -446,6 +452,7 @@ fn test_degenerate_author_flood_max_2_enforced() {
     let rec = Recommender::new(interner, graph);
     let dials = RecommendationDials {
         limit: 50,
+        min_likes: 1,
         ..Default::default()
     };
 
@@ -494,6 +501,7 @@ fn test_degenerate_thread_flood_max_1_per_root_enforced() {
     let rec = Recommender::new(interner, graph);
     let dials = RecommendationDials {
         limit: 50,
+        min_likes: 1,
         ..Default::default()
     };
 

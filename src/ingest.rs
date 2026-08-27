@@ -19,7 +19,7 @@
 //!   under firehose burst traffic.
 //! - **Graph Mutation Consumer**: Worker task draining events, interning strings, and updating graph
 //!   relationships in real time.
-//! - **Graceful Shutdown**: Coordinated via [`CancellationToken`], sending clean WebSocket close
+//! - **Graceful Shutdown**: Coordinated via `tokio_util::sync::CancellationToken`, sending clean WebSocket close
 //!   frames and draining in-flight buffered events with zero data loss.
 //!
 //! # Example

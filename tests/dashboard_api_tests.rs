@@ -71,6 +71,18 @@ fn create_rich_test_state() -> (
     graph.record_interaction(bob, art_p1, SignalType::Like, now - 400);
     graph.record_interaction(bob, tech_p2, SignalType::Repost, now - 300);
 
+    // Baseline interactions so candidate posts meet default engagement floor (min_likes: 3)
+    let u1 = interner.intern("did:plc:mock_user_1");
+    let u2 = interner.intern("did:plc:mock_user_2");
+    let u3 = interner.intern("did:plc:mock_user_3");
+    for &p in &[tech_p2, art_p2, sci_p1] {
+        graph.record_interaction(u1, p, SignalType::Like, now - 350);
+        graph.record_interaction(u2, p, SignalType::Like, now - 350);
+    }
+    graph.record_interaction(u3, art_p2, SignalType::Like, now - 350);
+    graph.record_interaction(carol, tech_p1, SignalType::Like, now - 350);
+    graph.record_interaction(dave, art_p1, SignalType::Like, now - 350);
+
     // Carol follows Dave; Dave liked sci_p1
     graph.record_follow(carol, dave);
     graph.record_interaction(dave, sci_p1, SignalType::Like, now - 200);
@@ -192,11 +204,15 @@ async fn test_taste_twins_handle_parameter_variations() {
     let alice_handle = interner.intern("alice.bsky.social");
     let bob_handle = interner.intern("bob.bsky.social");
     let post = interner.intern("at://did:plc:art_seed/app.bsky.feed.post/shared");
+    let post2 = interner.intern("at://did:plc:art_seed/app.bsky.feed.post/shared2");
     let author = interner.intern("did:plc:art_seed");
 
     graph.record_post_meta(post, author, None, None, now - 100);
+    graph.record_post_meta(post2, author, None, None, now - 100);
     graph.record_interaction(alice_handle, post, SignalType::Like, now - 50);
+    graph.record_interaction(alice_handle, post2, SignalType::Like, now - 50);
     graph.record_interaction(bob_handle, post, SignalType::Like, now - 50);
+    graph.record_interaction(bob_handle, post2, SignalType::Like, now - 50);
 
     let app = create_xrpc_router(state);
 
