@@ -1,11 +1,15 @@
 # E2E Test Suite Ready
 
 ## Test Runner
-- Command: `cargo test --all-targets --all-features`
-- Coverage Gate: `cargo llvm-cov --all-targets --all-features --fail-under-lines 80 --summary-only`
+
+- Commands:
+  - Default (Jemalloc): `cargo test --all-targets`
+  - Mimalloc: `cargo test --all-targets --no-default-features --features mimalloc`
+- Coverage Gate: `cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only`
 - Expected: All test suites pass with exit code 0, >= 80% line coverage, 0 clippy warnings, 0 fmt diffs, and 0 deny violations.
 
 ## Coverage Summary
+
 | Tier | Count | Description |
 |------|------:|-------------|
 | 1. Feature Coverage | 35 | >= 5 per feature across 7 core optimization features |
@@ -16,12 +20,13 @@
 | **Total** | **107** | Total test targets & test cases across 53 integration suites |
 
 ## Feature Checklist
-| Feature | Tier 1 | Tier 2 | Tier 3 | Tier 4 | Tier 5 |
-|---------|:------:|:------:|:------:|:------:|:------:|
-| Bounded Feed Preview Walk | 5 | 5 | ✓ | ✓ | ✓ |
-| Bounded Taste Twins Discovery | 5 | 5 | ✓ | ✓ | ✓ |
-| Explainability Zero-Allocation Slicing | 5 | 5 | ✓ | ✓ | ✓ |
-| Velocity Pool TTL Cache | 5 | 5 | ✓ | ✓ | ✓ |
-| Shard-by-Shard Streaming Snapshots | 5 | 5 | ✓ | ✓ | ✓ |
-| Non-Blocking `spawn_blocking` Persistence | 5 | 5 | ✓ | ✓ | ✓ |
-| Safe Allocator Features & Zero Unsafe | 5 | 5 | ✓ | ✓ | ✓ |
+
+| Feature | Requirement | Tier 1 | Tier 2 | Tier 3 | Tier 4 | Tier 5 |
+|---------|:-----------:|:------:|:------:|:------:|:------:|:------:|
+| Bounded Feed Preview Walk | R1 | 5 | 5 | ✓ | ✓ | ✓ |
+| Bounded Taste Twins Discovery | R1 | 5 | 5 | ✓ | ✓ | ✓ |
+| Velocity Pool TTL Cache | R2 | 5 | 5 | ✓ | ✓ | ✓ |
+| Non-Blocking Snapshot Checkpoints | R3 | 5 | 5 | ✓ | ✓ | ✓ |
+| Streaming Shard Snapshot Serialization | R3 | 5 | 5 | ✓ | ✓ | ✓ |
+| Heap Memory & Allocator Configuration | R4 | 5 | 5 | ✓ | ✓ | ✓ |
+| Safety Invariants (Zero Unsafe / Zero Panic) | R5 | 5 | 5 | ✓ | ✓ | ✓ |

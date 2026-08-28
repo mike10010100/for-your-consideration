@@ -270,6 +270,64 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
 }
 
 #[test]
+fn test_streaming_methods_propagate_writer_errors() {
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    let preferences = UserPreferencesStore::new();
+
+    for i in 0..10 {
+        interner.intern(&format!("did:plc:err_user_{i}"));
+        graph.record_interaction(i + 1, i + 100, SignalType::Like, 1_700_000_000);
+        preferences.set(i + 1, UserDials::default());
+    }
+
+    // 1. Interner failing writer
+    let mut calls = 0usize;
+    let mut failing_writer = |_data: &[u8]| -> std::io::Result<()> {
+        calls += 1;
+        if calls > 3 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "disk full",
+            ));
+        }
+        Ok(())
+    };
+    let res = interner.stream_strings_to(&mut failing_writer);
+    assert!(res.is_err(), "interner writer error must propagate");
+
+    // 2. Preferences failing writer
+    let mut pref_calls = 0usize;
+    let mut failing_pref_writer = |_data: &[u8]| -> std::io::Result<()> {
+        pref_calls += 1;
+        if pref_calls > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ));
+        }
+        Ok(())
+    };
+    let pref_res = preferences.stream_preferences_to(&mut failing_pref_writer);
+    assert!(pref_res.is_err(), "preferences writer error must propagate");
+
+    // 3. Graph failing writer
+    let mut graph_calls = 0usize;
+    let mut failing_graph_writer = |_data: &[u8]| -> std::io::Result<()> {
+        graph_calls += 1;
+        if graph_calls > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "broken pipe",
+            ));
+        }
+        Ok(())
+    };
+    let graph_res = graph.stream_user_interactions_to(&mut failing_graph_writer);
+    assert!(graph_res.is_err(), "graph writer error must propagate");
+}
+
+#[test]
 fn test_streaming_snapshot_roundtrip_integrity() {
     let temp_dir = std::env::temp_dir().join(format!("fyfd_test_{}", rand::random::<u64>()));
     std::fs::create_dir_all(&temp_dir).unwrap();

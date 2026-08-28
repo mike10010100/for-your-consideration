@@ -58,11 +58,11 @@
 - `get_velocity_pool_candidates_at(&self, current_time_secs: u64, limit: usize) -> Vec<u32>`
 
 ### M3: Streaming Snapshot Persistence (`src/snapshot.rs`, `src/graph.rs`)
-- `GraphStore::stream_user_interactions_to<F>(&self, write_chunk: &mut F, total_edges: &mut u64) -> Result<()>`
-- `GraphStore::stream_post_interactions_to<F>(&self, write_chunk: &mut F) -> Result<()>`
-- `GraphStore::stream_user_likes_bitmaps_to<F>(&self, write_chunk: &mut F, buf: &mut Vec<u8>) -> Result<()>`
-- `StringInterner::stream_strings_to<F>(&self, write_chunk: &mut F) -> Result<()>`
-- `UserPreferencesStore::stream_preferences_to<F>(&self, write_chunk: &mut F) -> Result<()>`
+- `GraphStore::stream_user_interactions_to<F>(&self, write_chunk: &mut F) -> Result<(u32, u64)>`
+- `GraphStore::stream_post_interactions_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
+- `GraphStore::stream_user_likes_bitmaps_to<F>(&self, write_chunk: &mut F, bm_buf: &mut Vec<u8>) -> Result<u32>`
+- `StringInterner::stream_strings_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
+- `UserPreferencesStore::stream_preferences_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
 - `save_snapshot_with_preferences`: Streams shard data directly to `BufWriter` (128 KB buffer) and computes CRC32 on the fly.
 - In `src/main.rs`: `tokio::task::spawn_blocking` wraps `save_snapshot_with_preferences`.
 

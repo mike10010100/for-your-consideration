@@ -505,10 +505,7 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
     graph.record_interaction(phantom_id, phantom_cand_pid, SignalType::Like, now - 100);
 
     // 3. Create 150 co-interactors on the 50 RECENT seed posts
-    // We give them varying overlap counts from 2 up to 20 shared likes so that Bayesian confidence produces distinct rankings.
-    let mut expected_co_weights = Vec::new();
-    let sqrt_v = (80.0f32).sqrt(); // viewer total likes = 80
-
+    // We give them varying overlap counts from 2 up to 20 shared likes.
     for u in 0..150 {
         let co_did = format!("did:plc:recent_co_{u:03}");
         let co_id = interner.intern(&co_did);
@@ -518,11 +515,6 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
             graph.record_interaction(co_id, recent_pids[s], SignalType::Like, now - 50_000);
         }
 
-        let c_len = shared_count as f32;
-        let raw_cosine = (shared_count as f32) / (sqrt_v * c_len.sqrt());
-        let conf = calculate_bayesian_confidence(raw_cosine, shared_count, DEFAULT_BAYESIAN_BETA);
-        expected_co_weights.push((co_id, conf));
-
         // Recommend one candidate post per co-interactor
         let cand_uri = format!("at://did:plc:recent_cand_auth_{u:03}/app.bsky.feed.post/cand");
         let cand_pid = interner.intern(&cand_uri);
@@ -530,9 +522,6 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
         graph.record_post_meta(cand_pid, cand_auth, None, None, now - 1000);
         graph.record_interaction(co_id, cand_pid, SignalType::Like, now - 1000);
     }
-
-    // Top 100 co-interactors should be retained
-    expected_co_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     let dials = RecommendationDials {
         limit: 50,
@@ -560,7 +549,7 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
         "Candidate from phantom twin on seed posts older than top 50 must be completely excluded"
     );
 
-    // 3. Verify all returned preview items have valid taste_similarity scores >= the minimum top-100 threshold
+    // 3. Verify all returned preview items have positive final scores
     for it in &preview.items {
         assert!(
             it.score_breakdown.final_score > 0.0,

@@ -68,6 +68,17 @@ pub const MAX_POST_EDGES: usize = 500;
 /// Maximum number of top co-interactor neighbors retained by Bayesian taste similarity.
 pub const MAX_CO_INTERACTORS: usize = 100;
 
+/// Returns the last `n` elements of `slice`, or the whole slice when it is shorter than `n`.
+#[inline]
+#[must_use]
+pub(crate) fn tail_bounded<T>(slice: &[T], n: usize) -> &[T] {
+    if slice.len() > n {
+        &slice[slice.len() - n..]
+    } else {
+        slice
+    }
+}
+
 /// An individual post impression record with its served timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImpressionEntry {
@@ -684,11 +695,7 @@ impl Recommender {
 
         // Step 1: Collect seed posts bounded to MAX_SEED_POSTS (50) from most recent interactions
         let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(viewer_id, |edges| {
-            let seed_edges = if edges.len() > MAX_SEED_POSTS {
-                &edges[edges.len() - MAX_SEED_POSTS..]
-            } else {
-                edges
-            };
+            let seed_edges = tail_bounded(edges, MAX_SEED_POSTS);
             seed_edges.iter().map(CompactEdge::target).collect()
         });
 
@@ -703,11 +710,7 @@ impl Recommender {
         let mut co_interactors = AHashSet::new();
         for post_id in seed_posts {
             self.graph.with_post_interactions(post_id, |p_edges| {
-                let p_edges_slice = if p_edges.len() > MAX_POST_EDGES {
-                    &p_edges[p_edges.len() - MAX_POST_EDGES..]
-                } else {
-                    p_edges
-                };
+                let p_edges_slice = tail_bounded(p_edges, MAX_POST_EDGES);
                 for edge in p_edges_slice {
                     let co_uid = edge.target();
                     if co_uid != viewer_id {
@@ -875,45 +878,43 @@ impl Recommender {
             let mut best_twin: Option<(u32, f32, SignalType, u64)> = None;
 
             self.graph.with_post_interactions(pid, |post_edges| {
-                let edges_slice = if post_edges.len() > MAX_POST_EDGES {
-                    &post_edges[post_edges.len() - MAX_POST_EDGES..]
-                } else {
-                    post_edges
-                };
+                let edges_slice = tail_bounded(post_edges, MAX_POST_EDGES);
                 for edge in edges_slice {
                     let co_user = edge.target();
                     if co_user != vid {
-                        if let (Some(v_bm), Some(c_bm)) = (
-                            &viewer_bm,
-                            self.graph.get_user_likes_bitmap(co_user).as_ref(),
-                        ) {
-                            let inter_len = v_bm.intersection_len(c_bm);
-                            if inter_len >= MIN_SHARED_OVERLAP as u64 {
-                                let v_len = v_bm.len() as f32;
-                                let c_len = c_bm.len() as f32;
-                                if v_len > 0.0 && c_len > 0.0 {
-                                    let raw_cosine = (inter_len as f32) / (v_len * c_len).sqrt();
-                                    let conf = calculate_bayesian_confidence(
-                                        raw_cosine,
-                                        inter_len as usize,
-                                        DEFAULT_BAYESIAN_BETA,
-                                    );
-                                    if conf > 0.0 {
-                                        let score = conf * edge.weight();
-                                        if best_twin
-                                            .as_ref()
-                                            .is_none_or(|(_, best_s, _, _)| score > *best_s)
-                                        {
-                                            best_twin = Some((
-                                                co_user,
-                                                conf,
-                                                edge.signal(),
-                                                edge.timestamp_secs(),
-                                            ));
+                        if let Some(ref v_bm) = viewer_bm {
+                            self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
+                                if let Some(c_bm) = c_bm_opt {
+                                    let inter_len = v_bm.intersection_len(c_bm);
+                                    if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                                        let v_len = v_bm.len() as f32;
+                                        let c_len = c_bm.len() as f32;
+                                        if v_len > 0.0 && c_len > 0.0 {
+                                            let raw_cosine =
+                                                (inter_len as f32) / (v_len * c_len).sqrt();
+                                            let conf = calculate_bayesian_confidence(
+                                                raw_cosine,
+                                                inter_len as usize,
+                                                DEFAULT_BAYESIAN_BETA,
+                                            );
+                                            if conf > 0.0 {
+                                                let score = conf * edge.weight();
+                                                if best_twin
+                                                    .as_ref()
+                                                    .is_none_or(|(_, best_s, _, _)| score > *best_s)
+                                                {
+                                                    best_twin = Some((
+                                                        co_user,
+                                                        conf,
+                                                        edge.signal(),
+                                                        edge.timestamp_secs(),
+                                                    ));
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
+                            });
                         }
                     }
                 }
@@ -992,11 +993,7 @@ impl Recommender {
             if !follows.is_empty() {
                 let mut follow_match: Option<(u32, SignalType)> = None;
                 self.graph.with_post_interactions(pid, |post_edges| {
-                    let edges_slice = if post_edges.len() > MAX_POST_EDGES {
-                        &post_edges[post_edges.len() - MAX_POST_EDGES..]
-                    } else {
-                        post_edges
-                    };
+                    let edges_slice = tail_bounded(post_edges, MAX_POST_EDGES);
                     for edge in edges_slice {
                         let co_user = edge.target();
                         if follows.contains(&co_user) {
@@ -1146,11 +1143,7 @@ impl Recommender {
 
                 // Limit seed posts to most recent MAX_SEED_POSTS interactions to bound combinatorial fan-out
                 let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(uid, |edges| {
-                    let seed_edges = if edges.len() > MAX_SEED_POSTS {
-                        &edges[edges.len() - MAX_SEED_POSTS..]
-                    } else {
-                        edges
-                    };
+                    let seed_edges = tail_bounded(edges, MAX_SEED_POSTS);
                     seed_edges.iter().map(CompactEdge::target).collect()
                 });
 
@@ -1161,13 +1154,8 @@ impl Recommender {
                         for post_id in seed_post_ids {
                             self.graph
                                 .with_post_interactions(post_id, |post_interactions| {
-                                    let p_edges_slice = if post_interactions.len() > MAX_POST_EDGES
-                                    {
-                                        &post_interactions
-                                            [post_interactions.len() - MAX_POST_EDGES..]
-                                    } else {
-                                        post_interactions
-                                    };
+                                    let p_edges_slice =
+                                        tail_bounded(post_interactions, MAX_POST_EDGES);
                                     for p_edge in p_edges_slice {
                                         let co_user = p_edge.target();
                                         if co_user != uid && seen_co_users.insert(co_user) {
@@ -1208,7 +1196,9 @@ impl Recommender {
                     co_interactor_weights.into_iter().collect();
                 if top_co_interactors.len() > MAX_CO_INTERACTORS {
                     top_co_interactors.select_nth_unstable_by(MAX_CO_INTERACTORS, |a, b| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        b.1.partial_cmp(&a.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
                     });
                     top_co_interactors.truncate(MAX_CO_INTERACTORS);
                 }
@@ -1566,7 +1556,9 @@ impl Recommender {
         let mut top_co_interactors: Vec<(u32, f32)> = co_interactor_weights.into_iter().collect();
         if top_co_interactors.len() > MAX_CO_INTERACTORS {
             top_co_interactors.select_nth_unstable_by(MAX_CO_INTERACTORS, |a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
             });
             top_co_interactors.truncate(MAX_CO_INTERACTORS);
         }

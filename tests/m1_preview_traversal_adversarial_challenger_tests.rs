@@ -135,10 +135,16 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
         explain_mean
     );
 
+    let max_allowed_us = if cfg!(debug_assertions) {
+        100_000
+    } else {
+        10_000
+    };
+
     // Operational latency budget for explain is sub-10ms (and typically sub-1ms)
     assert!(
-        explain_p50 < 10_000,
-        "explain_recommendation p50 must be sub-10ms, was {} µs",
+        explain_p50 < max_allowed_us,
+        "explain_recommendation p50 must be sub-10ms (release), was {} µs",
         explain_p50
     );
 
@@ -167,8 +173,8 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
         twins_mean
     );
     assert!(
-        twins_p50 < 10_000,
-        "find_taste_twins p50 must be sub-10ms, was {} µs",
+        twins_p50 < max_allowed_us,
+        "find_taste_twins p50 must be sub-10ms (release), was {} µs",
         twins_p50
     );
 
@@ -198,8 +204,8 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
         prev_mean
     );
     assert!(
-        prev_p50 < 10_000,
-        "recommend_preview_at p50 must be sub-10ms, was {} µs",
+        prev_p50 < max_allowed_us,
+        "recommend_preview_at p50 must be sub-10ms (release), was {} µs",
         prev_p50
     );
 }
