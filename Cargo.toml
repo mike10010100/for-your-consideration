@@ -14,7 +14,16 @@ path = "src/lib.rs"
 name = "for-your-consideration"
 path = "src/main.rs"
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
+# Memory Allocators
+tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
 # Async Runtime & Concurrency
 tokio = { version = "1.40", features = ["full"] }
 tokio-util = "0.7"

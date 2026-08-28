@@ -5,14 +5,19 @@ use parking_lot::RwLock;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{FeedError, Result};
 use crate::types::{CompactEdge, PostMeta, SignalType};
 
+/// Default TTL duration in seconds for velocity pool candidate caching (10 seconds).
+pub const VELOCITY_CACHE_TTL_SECS: u64 = 10;
+
+/// Memoized cache entry for the 6-hour high-velocity pool candidates with time-windowed TTL.
 #[derive(Debug, Clone)]
-struct VelocityCandidateCache {
-    current_time_secs: u64,
-    limit: usize,
-    mutation_count: u64,
-    candidates: Vec<u32>,
+pub struct VelocityCandidateCache {
+    /// Monotonic timestamp (in seconds) when the candidate pool was evaluated.
+    pub evaluated_at_secs: u64,
+    /// Cached candidates sorted descending by velocity score.
+    pub candidates: Vec<u32>,
 }
 
 const RING_BUFFER_CAPACITY: usize = 65_536;
@@ -766,20 +771,18 @@ impl GraphStore {
             return Vec::new();
         }
 
-        let current_mutation = self.mutation_counter.load(Ordering::Relaxed);
-
-        // 1. Fast path: check velocity cache
+        // 1. Fast path: check velocity cache with clock-warp safety
         {
             let cache_guard = self.velocity_cache.read();
             if let Some(ref cache) = *cache_guard {
-                if cache.current_time_secs == current_time_secs
-                    && cache.mutation_count == current_mutation
-                    && cache.limit >= limit
+                if current_time_secs >= cache.evaluated_at_secs
+                    && current_time_secs.saturating_sub(cache.evaluated_at_secs)
+                        < VELOCITY_CACHE_TTL_SECS
                 {
-                    if cache.candidates.len() <= limit {
-                        return cache.candidates.clone();
+                    if cache.candidates.len() >= limit {
+                        return cache.candidates[..limit].to_vec();
                     }
-                    return cache.candidates[..limit].to_vec();
+                    return cache.candidates.clone();
                 }
             }
         }
@@ -845,13 +848,11 @@ impl GraphStore {
 
         let all_result: Vec<u32> = scored_candidates.into_iter().map(|(pid, _)| pid).collect();
 
-        // Update cache (store up to max(limit, 100))
-        {
+        // Update cache if non-empty
+        if !all_result.is_empty() {
             let mut cache_guard = self.velocity_cache.write();
             *cache_guard = Some(VelocityCandidateCache {
-                current_time_secs,
-                limit: limit.max(all_result.len()),
-                mutation_count: current_mutation,
+                evaluated_at_secs: current_time_secs,
                 candidates: all_result.clone(),
             });
         }
@@ -1202,6 +1203,280 @@ impl GraphStore {
             }
         }
         *self.velocity_cache.write() = None;
+    }
+
+    /// Counts the total number of non-empty user interaction shards across all 64 shards.
+    #[must_use]
+    pub fn count_non_empty_users(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.user_interactions {
+            let guard = shard.read();
+            count += guard.values().filter(|edges| !edges.is_empty()).count();
+        }
+        count
+    }
+
+    /// Counts the total number of non-empty post reverse interaction shards across all 64 shards.
+    #[must_use]
+    pub fn count_non_empty_posts(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.post_interactions {
+            let guard = shard.read();
+            count += guard.values().filter(|edges| !edges.is_empty()).count();
+        }
+        count
+    }
+
+    /// Counts the total number of non-empty user likes bitmaps across all 64 shards.
+    #[must_use]
+    pub fn count_non_empty_bitmaps(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.user_likes_bitmaps {
+            let guard = shard.read();
+            count += guard.values().filter(|bm| !bm.is_empty()).count();
+        }
+        count
+    }
+
+    /// Counts the total number of non-empty follow lists across all 64 shards.
+    #[must_use]
+    pub fn count_non_empty_follows(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.follows {
+            let guard = shard.read();
+            count += guard.values().filter(|list| !list.is_empty()).count();
+        }
+        count
+    }
+
+    /// Counts the total number of post metadata entries across all 64 shards.
+    #[must_use]
+    pub fn count_post_metadata(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.post_metadata {
+            let guard = shard.read();
+            count += guard.len();
+        }
+        count
+    }
+
+    /// Counts the total number of active recent posts across all 64 shards.
+    #[must_use]
+    pub fn count_active_recent_posts(&self) -> usize {
+        let mut count = 0;
+        for shard in &self.active_recent_posts {
+            let guard = shard.read();
+            count += guard.len();
+        }
+        count
+    }
+
+    /// Streams forward user interactions shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit user count prefix followed by `(uid, edge_count, [CompactEdge])` records.
+    /// Returns `(num_users, total_forward_edges)`.
+    pub fn stream_user_interactions_to<F>(&self, write_chunk: &mut F) -> Result<(u32, u64)>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.user_interactions[i].read());
+        let total_users: usize = guards
+            .iter()
+            .map(|g| g.values().filter(|edges| !edges.is_empty()).count())
+            .sum();
+        let num_users = u32::try_from(total_users)
+            .map_err(|e| FeedError::Snapshot(format!("Too many users for snapshot: {e}")))?;
+        write_chunk(&num_users.to_le_bytes())?;
+
+        let mut total_forward_edges = 0u64;
+        for guard in &guards {
+            for (&uid, edges) in guard.iter() {
+                if edges.is_empty() {
+                    continue;
+                }
+                write_chunk(&uid.to_le_bytes())?;
+                let edge_count = u32::try_from(edges.len())
+                    .map_err(|e| FeedError::Snapshot(format!("Too many edges for user: {e}")))?;
+                write_chunk(&edge_count.to_le_bytes())?;
+                for e in edges {
+                    write_chunk(&e.target.to_le_bytes())?;
+                    write_chunk(&e.packed.to_le_bytes())?;
+                }
+                total_forward_edges = total_forward_edges.saturating_add(edges.len() as u64);
+            }
+        }
+        Ok((num_users, total_forward_edges))
+    }
+
+    /// Streams reverse post interactions shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit post count prefix followed by `(pid, edge_count, [CompactEdge])` records.
+    /// Returns `num_posts`.
+    pub fn stream_post_interactions_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.post_interactions[i].read());
+        let total_posts: usize = guards
+            .iter()
+            .map(|g| g.values().filter(|edges| !edges.is_empty()).count())
+            .sum();
+        let num_posts = u32::try_from(total_posts)
+            .map_err(|e| FeedError::Snapshot(format!("Too many posts for snapshot: {e}")))?;
+        write_chunk(&num_posts.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&pid, edges) in guard.iter() {
+                if edges.is_empty() {
+                    continue;
+                }
+                write_chunk(&pid.to_le_bytes())?;
+                let edge_count = u32::try_from(edges.len())
+                    .map_err(|e| FeedError::Snapshot(format!("Too many edges for post: {e}")))?;
+                write_chunk(&edge_count.to_le_bytes())?;
+                for e in edges {
+                    write_chunk(&e.target.to_le_bytes())?;
+                    write_chunk(&e.packed.to_le_bytes())?;
+                }
+            }
+        }
+        Ok(num_posts)
+    }
+
+    /// Streams user likes Roaring Bitmaps shard-by-shard to a writer callback using a reusable buffer.
+    ///
+    /// Writes the 32-bit user count prefix followed by `(uid, bm_len, bm_bytes)` records.
+    /// Returns `num_bm_users`.
+    pub fn stream_user_likes_bitmaps_to<F>(
+        &self,
+        write_chunk: &mut F,
+        bm_buf: &mut Vec<u8>,
+    ) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.user_likes_bitmaps[i].read());
+        let total_bms: usize = guards
+            .iter()
+            .map(|g| g.values().filter(|bm| !bm.is_empty()).count())
+            .sum();
+        let num_bm_users = u32::try_from(total_bms)
+            .map_err(|e| FeedError::Snapshot(format!("Too many bitmap users: {e}")))?;
+        write_chunk(&num_bm_users.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&uid, bm) in guard.iter() {
+                if bm.is_empty() {
+                    continue;
+                }
+                bm_buf.clear();
+                bm.serialize_into(&mut *bm_buf).map_err(|e| {
+                    FeedError::Snapshot(format!("RoaringBitmap serialization error: {e}"))
+                })?;
+                write_chunk(&uid.to_le_bytes())?;
+                let bm_len = u32::try_from(bm_buf.len()).map_err(|e| {
+                    FeedError::Snapshot(format!("Bitmap byte length exceeds u32: {e}"))
+                })?;
+                write_chunk(&bm_len.to_le_bytes())?;
+                write_chunk(bm_buf)?;
+            }
+        }
+        Ok(num_bm_users)
+    }
+
+    /// Streams follow relationships shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit follower count prefix followed by `(fid, followed_count, [followed_id])` records.
+    /// Returns `num_followers`.
+    pub fn stream_follows_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.follows[i].read());
+        let total_follows: usize = guards
+            .iter()
+            .map(|g| g.values().filter(|list| !list.is_empty()).count())
+            .sum();
+        let num_followers = u32::try_from(total_follows)
+            .map_err(|e| FeedError::Snapshot(format!("Too many followers: {e}")))?;
+        write_chunk(&num_followers.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&fid, list) in guard.iter() {
+                if list.is_empty() {
+                    continue;
+                }
+                write_chunk(&fid.to_le_bytes())?;
+                let count = u32::try_from(list.len())
+                    .map_err(|e| FeedError::Snapshot(format!("Too many followed users: {e}")))?;
+                write_chunk(&count.to_le_bytes())?;
+                for &target in list {
+                    write_chunk(&target.to_le_bytes())?;
+                }
+            }
+        }
+        Ok(num_followers)
+    }
+
+    /// Streams post metadata entries shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit count prefix followed by `(pid, author_id, root_id, parent_id, created_at)` records.
+    /// Returns `num_post_metadata`.
+    pub fn stream_post_metadata_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.post_metadata[i].read());
+        let total_meta: usize = guards.iter().map(|g| g.len()).sum();
+        let num_post_metadata = u32::try_from(total_meta)
+            .map_err(|e| FeedError::Snapshot(format!("Too many metadata entries: {e}")))?;
+        write_chunk(&num_post_metadata.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&pid, meta) in guard.iter() {
+                write_chunk(&pid.to_le_bytes())?;
+                write_chunk(&meta.author_id.to_le_bytes())?;
+                if let Some(r) = meta.root_id {
+                    write_chunk(&1u8.to_le_bytes())?;
+                    write_chunk(&r.to_le_bytes())?;
+                } else {
+                    write_chunk(&0u8.to_le_bytes())?;
+                    write_chunk(&0u32.to_le_bytes())?;
+                }
+                if let Some(p) = meta.parent_id {
+                    write_chunk(&1u8.to_le_bytes())?;
+                    write_chunk(&p.to_le_bytes())?;
+                } else {
+                    write_chunk(&0u8.to_le_bytes())?;
+                    write_chunk(&0u32.to_le_bytes())?;
+                }
+                write_chunk(&meta.created_at.to_le_bytes())?;
+            }
+        }
+        Ok(num_post_metadata)
+    }
+
+    /// Streams active recent posts tracker shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit count prefix followed by `(pid, timestamp)` records.
+    /// Returns `num_recent`.
+    pub fn stream_active_recent_posts_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_SHARDS] = std::array::from_fn(|i| self.active_recent_posts[i].read());
+        let total_recent: usize = guards.iter().map(|g| g.len()).sum();
+        let num_recent = u32::try_from(total_recent)
+            .map_err(|e| FeedError::Snapshot(format!("Too many active recent posts: {e}")))?;
+        write_chunk(&num_recent.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&pid, &ts) in guard.iter() {
+                write_chunk(&pid.to_le_bytes())?;
+                write_chunk(&ts.to_le_bytes())?;
+            }
+        }
+        Ok(num_recent)
     }
 }
 

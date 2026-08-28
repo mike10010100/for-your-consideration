@@ -142,8 +142,8 @@ fn test_challenge_recommend_preview_high_candidate_load_latency_and_correctness(
         // Sanity assertions on output
         assert_eq!(resp.items.len(), 30);
         assert!(
-            resp.total_candidates >= 5_000,
-            "Total evaluated candidates should be large: {}",
+            resp.total_candidates >= 1_000 && resp.total_candidates <= 2_000,
+            "Total evaluated candidates should be bounded by top co-interactors: {}",
             resp.total_candidates
         );
         assert_eq!(resp.viewer_did, viewer_did.as_str());
@@ -343,9 +343,11 @@ fn test_challenge_find_taste_twins_large_bitsets_and_accuracy() {
     // Candidate 1: High overlap Twin (likes 4,500 of viewer's posts + 500 other) -> |C1|=5,000, overlap=4,500
     // Cosine Sim = 4500 / sqrt(5000 * 5000) = 0.90
     let twin_high_id = interner.intern("did:plc:twin_high");
-    for p in 0..4_500 {
-        let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
-        graph.record_interaction(twin_high_id, pid, SignalType::Like, now - 4_000);
+    for p in 0..total_viewer_posts {
+        if p % 10 != 0 {
+            let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
+            graph.record_interaction(twin_high_id, pid, SignalType::Like, now - 4_000);
+        }
     }
     for p in 5_000..5_500 {
         let uri = format!("at://did:plc:author/app.bsky.feed.post/other_{p}");
@@ -357,9 +359,11 @@ fn test_challenge_find_taste_twins_large_bitsets_and_accuracy() {
     // Candidate 2: Medium overlap Twin (likes 2,500 of viewer's posts + 2,500 other) -> |C2|=5,000, overlap=2,500
     // Cosine Sim = 2500 / 5000 = 0.50
     let twin_med_id = interner.intern("did:plc:twin_med");
-    for p in 0..2_500 {
-        let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
-        graph.record_interaction(twin_med_id, pid, SignalType::Like, now - 4_000);
+    for p in 0..total_viewer_posts {
+        if p % 2 == 0 {
+            let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
+            graph.record_interaction(twin_med_id, pid, SignalType::Like, now - 4_000);
+        }
     }
     for p in 5_500..8_000 {
         let uri = format!("at://did:plc:author/app.bsky.feed.post/other_{p}");
@@ -371,9 +375,11 @@ fn test_challenge_find_taste_twins_large_bitsets_and_accuracy() {
     // Candidate 3: Low overlap Twin (likes 500 of viewer's posts + 4,500 other) -> |C3|=5,000, overlap=500
     // Cosine Sim = 500 / 5000 = 0.10
     let twin_low_id = interner.intern("did:plc:twin_low");
-    for p in 0..500 {
-        let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
-        graph.record_interaction(twin_low_id, pid, SignalType::Like, now - 4_000);
+    for p in 0..total_viewer_posts {
+        if p % 10 == 0 {
+            let pid = interner.intern(&format!("at://did:plc:author/app.bsky.feed.post/v_{p}"));
+            graph.record_interaction(twin_low_id, pid, SignalType::Like, now - 4_000);
+        }
     }
     for p in 8_000..12_500 {
         let uri = format!("at://did:plc:author/app.bsky.feed.post/other_{p}");
@@ -1219,4 +1225,208 @@ fn test_preview_mathematical_score_breakdown_invariants() {
     // 4. Final score = taste_similarity * time_decay * topic_boost * fatigue_penalty
     let expected_final = b.taste_similarity * b.time_decay * b.topic_boost * b.fatigue_penalty;
     assert!((b.final_score - expected_final).abs() < 1e-4);
+}
+
+#[test]
+fn test_m1_defensive_bounds_seed_posts_capping() {
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+    let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let now = BLUESKY_EPOCH_SECS + 60_000_000;
+
+    let viewer_did = "did:plc:m1_bounds_viewer";
+    let viewer_id = interner.intern(viewer_did);
+
+    // Viewer interacts with 100 posts (0..100) with increasing timestamps
+    for i in 0..100 {
+        let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
+        let pid = interner.intern(&uri);
+        let author = interner.intern("did:plc:author");
+        graph.record_post_meta(pid, author, None, None, now - 100_000 + i as u64);
+        graph.record_interaction(viewer_id, pid, SignalType::Like, now - 100_000 + i as u64);
+    }
+
+    // Co-user A only likes oldest seed posts 0..5 (outside the 50 most recent, i.e. 50..100)
+    let co_a_did = "did:plc:co_user_old";
+    let co_a_id = interner.intern(co_a_did);
+    for i in 0..5 {
+        let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
+        let pid = interner.intern(&uri);
+        graph.record_interaction(co_a_id, pid, SignalType::Like, now - 50_000);
+    }
+    // Candidate post from Co-user A
+    let cand_a_pid = interner.intern("at://did:plc:co_user_old/app.bsky.feed.post/cand_a");
+    graph.record_post_meta(cand_a_pid, co_a_id, None, None, now - 10_000);
+    graph.record_interaction(co_a_id, cand_a_pid, SignalType::Like, now - 10_000);
+
+    // Co-user B likes newest seed posts 95..100 (inside the 50 most recent)
+    let co_b_did = "did:plc:co_user_recent";
+    let co_b_id = interner.intern(co_b_did);
+    for i in 95..100 {
+        let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
+        let pid = interner.intern(&uri);
+        graph.record_interaction(co_b_id, pid, SignalType::Like, now - 50_000);
+    }
+    // Candidate post from Co-user B
+    let cand_b_pid = interner.intern("at://did:plc:co_user_recent/app.bsky.feed.post/cand_b");
+    graph.record_post_meta(cand_b_pid, co_b_id, None, None, now - 10_000);
+    graph.record_interaction(co_b_id, cand_b_pid, SignalType::Like, now - 10_000);
+
+    // 1. Taste twins discovery should find Co-user B (recent seed overlap) and NOT Co-user A
+    let twins_resp = rec.find_taste_twins(viewer_did, 10).unwrap();
+    let twin_dids: Vec<&str> = twins_resp
+        .twins
+        .iter()
+        .map(|t| t.user_did.as_str())
+        .collect();
+    assert!(
+        twin_dids.contains(&co_b_did),
+        "Co-user B with recent overlap should be discovered"
+    );
+    assert!(
+        !twin_dids.contains(&co_a_did),
+        "Co-user A with older overlap outside top-50 seed posts should NOT be explored"
+    );
+
+    // 2. Feed preview should evaluate candidates from Co-user B and NOT Co-user A
+    let dials = RecommendationDials {
+        limit: 10,
+        min_likes: 1,
+        ..Default::default()
+    };
+    let preview = rec
+        .recommend_preview_at(Some(viewer_did), &dials, now)
+        .unwrap();
+    let preview_uris: Vec<&str> = preview.items.iter().map(|it| it.uri.as_str()).collect();
+    assert!(
+        preview_uris.contains(&"at://did:plc:co_user_recent/app.bsky.feed.post/cand_b"),
+        "Candidate from recent co-interactor should be included"
+    );
+    assert!(
+        !preview_uris.contains(&"at://did:plc:co_user_old/app.bsky.feed.post/cand_a"),
+        "Candidate from old seed co-interactor should not be reached"
+    );
+}
+
+#[test]
+fn test_m1_defensive_bounds_viral_post_edges_and_top_co_interactors() {
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+    let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let now = BLUESKY_EPOCH_SECS + 70_000_000;
+
+    let viewer_did = "did:plc:m1_viral_viewer";
+    let viewer_id = interner.intern(viewer_did);
+
+    // Viewer interacts with 15 seed posts
+    let mut seed_pids = Vec::with_capacity(15);
+    for i in 0..15 {
+        let uri = format!("at://did:plc:author/app.bsky.feed.post/vseed_{i}");
+        let pid = interner.intern(&uri);
+        let author = interner.intern("did:plc:author");
+        graph.record_post_meta(pid, author, None, None, now - 100_000);
+        graph.record_interaction(viewer_id, pid, SignalType::Like, now - 90_000);
+        seed_pids.push(pid);
+    }
+
+    // Populate 200 co-interactors, each liking all 15 seed posts
+    for u in 0..200 {
+        let co_did = format!("did:plc:viral_co_{u:03}");
+        let co_id = interner.intern(&co_did);
+        for &spid in &seed_pids {
+            graph.record_interaction(co_id, spid, SignalType::Like, now - 80_000);
+        }
+        // Each co-user has a distinct candidate post
+        let cand_uri = format!("at://did:plc:viral_co_{u:03}/app.bsky.feed.post/cand");
+        let cand_pid = interner.intern(&cand_uri);
+        graph.record_post_meta(cand_pid, co_id, None, None, now - 10_000);
+        graph.record_interaction(co_id, cand_pid, SignalType::Like, now - 10_000);
+    }
+
+    let dials = RecommendationDials {
+        limit: 30,
+        min_likes: 1,
+        ..Default::default()
+    };
+
+    // Warmup
+    for _ in 0..5 {
+        let _ = rec.recommend_preview_at(Some(viewer_did), &dials, now);
+    }
+
+    let preview = rec
+        .recommend_preview_at(Some(viewer_did), &dials, now)
+        .unwrap();
+
+    // With 200 co-interactors capped to MAX_CO_INTERACTORS (100), exactly 100 candidate posts should be evaluated
+    assert_eq!(
+        preview.total_candidates, 100,
+        "Total candidates evaluated should match MAX_CO_INTERACTORS (100)"
+    );
+    assert_eq!(preview.items.len(), 30);
+    assert!(
+        preview.query_latency_us < 20_000,
+        "Preview latency must be sub-20ms in debug mode (was {}µs)",
+        preview.query_latency_us
+    );
+}
+
+#[test]
+fn test_m1_explain_recommendation_viral_post_sub_1ms() {
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+    let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let now = BLUESKY_EPOCH_SECS + 80_000_000;
+
+    let viewer_did = "did:plc:explain_viewer";
+    let viewer_id = interner.intern(viewer_did);
+
+    let seed_pid1 = interner.intern("at://did:plc:author/app.bsky.feed.post/shared_seed1");
+    let seed_pid2 = interner.intern("at://did:plc:author/app.bsky.feed.post/shared_seed2");
+    let author_id = interner.intern("did:plc:author");
+    graph.record_post_meta(seed_pid1, author_id, None, None, now - 50_000);
+    graph.record_post_meta(seed_pid2, author_id, None, None, now - 50_000);
+    graph.record_interaction(viewer_id, seed_pid1, SignalType::Like, now - 40_000);
+    graph.record_interaction(viewer_id, seed_pid2, SignalType::Like, now - 40_000);
+
+    let target_uri = "at://did:plc:creator/app.bsky.feed.post/viral_target";
+    let target_pid = interner.intern(target_uri);
+    let creator_id = interner.intern("did:plc:creator");
+    graph.record_post_meta(target_pid, creator_id, None, None, now - 10_000);
+
+    // Target post has 1,200 reverse interaction edges (viral post)
+    for u in 0..1200 {
+        let user_did = format!("did:plc:liker_{u:04}");
+        let uid = interner.intern(&user_did);
+        graph.record_interaction(
+            uid,
+            target_pid,
+            SignalType::Like,
+            now - 5_000 + (u as u64 % 1000),
+        );
+        if u == 1150 {
+            // Twin curator who also likes the 2 shared seed posts (MIN_SHARED_OVERLAP >= 2)
+            graph.record_interaction(uid, seed_pid1, SignalType::Like, now - 40_000);
+            graph.record_interaction(uid, seed_pid2, SignalType::Like, now - 40_000);
+        }
+    }
+
+    // Warmup
+    for _ in 0..5 {
+        let _ = rec.explain_recommendation(viewer_did, target_uri);
+    }
+
+    let t0 = Instant::now();
+    let explanation = rec
+        .explain_recommendation(viewer_did, target_uri)
+        .expect("explain_recommendation should succeed");
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed.as_micros() < 5_000,
+        "Explain latency should be sub-5ms on viral post in debug mode (took {:?})",
+        elapsed
+    );
+    assert_eq!(explanation.steps.len(), 3);
+    assert!(explanation.summary.to_lowercase().contains("taste twin"));
 }

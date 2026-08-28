@@ -19,6 +19,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use compact_str::CompactString;
 use for_your_consideration::prelude::*;
 use rand::RngCore;
@@ -406,18 +414,42 @@ async fn main() -> Result<()> {
                     snapshot_active_users.prune_older_than(now_secs.saturating_sub(900));
 
                     tracing::debug!("Triggering periodic snapshot checkpoint");
-                    let current_cursor = snapshot_ingester_stats.latest_cursor_us.load(std::sync::atomic::Ordering::Relaxed);
+                    let current_cursor = snapshot_ingester_stats
+                        .latest_cursor_us
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     let start_save = std::time::Instant::now();
-                    match save_snapshot_with_preferences(&snapshot_path, &snapshot_interner, &snapshot_graph, &snapshot_preferences, current_cursor) {
-                        Ok(_) => {
+                    let snap_path = snapshot_path.clone();
+                    let snap_interner = Arc::clone(&snapshot_interner);
+                    let snap_graph = Arc::clone(&snapshot_graph);
+                    let snap_preferences = Arc::clone(&snapshot_preferences);
+
+                    let save_res = tokio::task::spawn_blocking(move || {
+                        save_snapshot_with_preferences(
+                            &snap_path,
+                            &snap_interner,
+                            &snap_graph,
+                            &snap_preferences,
+                            current_cursor,
+                        )
+                    })
+                    .await;
+
+                    match save_res {
+                        Ok(Ok(_)) => {
                             let duration_ms = start_save.elapsed().as_secs_f64() * 1000.0;
                             let file_size = snapshot_path.metadata().map_or(0, |m| m.len());
                             periodic_snapshot_tracker.record_save(duration_ms, file_size);
-                            tracing::debug!("Periodic snapshot checkpoint saved successfully in {duration_ms:.2} ms");
+                            tracing::debug!(
+                                "Periodic snapshot checkpoint saved successfully in {duration_ms:.2} ms"
+                            );
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             periodic_snapshot_tracker.record_save_failure(&e.to_string());
                             warn!(error = %e, "Periodic snapshot save failed");
+                        }
+                        Err(join_err) => {
+                            periodic_snapshot_tracker.record_save_failure(&join_err.to_string());
+                            warn!(error = %join_err, "Periodic snapshot spawn_blocking join error");
                         }
                     }
                 }
@@ -456,14 +488,24 @@ async fn main() -> Result<()> {
     let final_cursor = ingester.latest_cursor();
     info!("Persisting final snapshot on graceful shutdown...");
     let start_final = std::time::Instant::now();
-    match save_snapshot_with_preferences(
-        &snapshot_config.path,
-        &interner,
-        &graph,
-        &preferences_store,
-        final_cursor,
-    ) {
-        Ok(_) => {
+    let snap_path = snapshot_config.path.clone();
+    let snap_interner = Arc::clone(&interner);
+    let snap_graph = Arc::clone(&graph);
+    let snap_preferences = Arc::clone(&preferences_store);
+
+    let save_res = tokio::task::spawn_blocking(move || {
+        save_snapshot_with_preferences(
+            &snap_path,
+            &snap_interner,
+            &snap_graph,
+            &snap_preferences,
+            final_cursor,
+        )
+    })
+    .await;
+
+    match save_res {
+        Ok(Ok(_)) => {
             let duration_ms = start_final.elapsed().as_secs_f64() * 1000.0;
             let file_size = snapshot_config.path.metadata().map_or(0, |m| m.len());
             snapshot_tracker.record_save(duration_ms, file_size);
@@ -472,9 +514,13 @@ async fn main() -> Result<()> {
                 snapshot_config.path.display()
             );
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             snapshot_tracker.record_save_failure(&e.to_string());
             error!(error = %e, "Final shutdown snapshot save failed");
+        }
+        Err(join_err) => {
+            snapshot_tracker.record_save_failure(&join_err.to_string());
+            error!(error = %join_err, "Final shutdown snapshot spawn_blocking join error");
         }
     }
 
