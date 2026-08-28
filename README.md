@@ -102,7 +102,10 @@ To make your feed public and pin-able in the official Bluesky app, you need to e
 
 #### Option A: Docker Compose (Recommended for Permanent Box)
 ```bash
-# Start with persistent volume for snapshot checkpoints
+# Auto-extract SemVer version, build tagged image, and launch stack:
+./scripts/deploy.sh
+
+# Or start directly with Docker Compose:
 docker compose up -d --build
 
 # View live stream ingest and telemetry
