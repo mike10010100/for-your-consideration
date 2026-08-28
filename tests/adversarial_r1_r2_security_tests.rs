@@ -474,6 +474,73 @@ fn test_service_jwt_valid_non_expired_token_accepted() {
 }
 
 #[test]
+fn test_service_jwt_clock_skew_leeway_window() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // 1. Expired 30 seconds ago: within 60s leeway -> ACCEPTED
+    let skew_jwt_30s = create_raw_service_jwt(
+        Some("did:plc:skew_actor_30s_z72i7hdynmk6r22z27h6tvur"),
+        None,
+        Some("did:web:feed.example.com"),
+        Some(now - 30),
+        Some(now - 90),
+    );
+    let res_30s = validate_service_jwt(
+        &format!("Bearer {skew_jwt_30s}"),
+        Some("did:web:feed.example.com"),
+        now,
+    );
+    assert!(
+        res_30s.is_ok(),
+        "Token expired 30s ago must be accepted under clock skew leeway"
+    );
+    assert_eq!(
+        res_30s.unwrap().as_str(),
+        "did:plc:skew_actor_30s_z72i7hdynmk6r22z27h6tvur"
+    );
+
+    // 2. Expired 60 seconds ago: exact boundary -> ACCEPTED
+    let skew_jwt_60s = create_raw_service_jwt(
+        Some("did:plc:skew_actor_60s_z72i7hdynmk6r22z27h6tvur"),
+        None,
+        Some("did:web:feed.example.com"),
+        Some(now - 60),
+        Some(now - 120),
+    );
+    let res_60s = validate_service_jwt(
+        &format!("Bearer {skew_jwt_60s}"),
+        Some("did:web:feed.example.com"),
+        now,
+    );
+    assert!(
+        res_60s.is_ok(),
+        "Token expired exactly 60s ago must be accepted under clock skew leeway"
+    );
+    assert_eq!(
+        res_60s.unwrap().as_str(),
+        "did:plc:skew_actor_60s_z72i7hdynmk6r22z27h6tvur"
+    );
+
+    // 3. Expired 61 seconds ago: exceeds leeway -> REJECTED
+    let skew_jwt_61s = create_raw_service_jwt(
+        Some("did:plc:skew_actor_61s_z72i7hdynmk6r22z27h6tvur"),
+        None,
+        Some("did:web:feed.example.com"),
+        Some(now - 61),
+        Some(now - 121),
+    );
+    let res_61s = validate_service_jwt(
+        &format!("Bearer {skew_jwt_61s}"),
+        Some("did:web:feed.example.com"),
+        now,
+    );
+    assert!(res_61s.is_err(), "Token expired 61s ago must be rejected");
+}
+
+#[test]
 fn test_service_jwt_audience_matching_and_mismatch_rejection() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

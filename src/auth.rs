@@ -425,11 +425,14 @@ pub fn parse_jwt_payload_unverified(token: &str) -> Result<ServiceJwtPayload> {
     Ok(payload)
 }
 
+/// Maximum allowable clock skew leeway in seconds when validating Service Auth JWT expiration (RFC 7519 §4.1.4).
+pub const JWT_CLOCK_SKEW_LEEWAY_SECS: u64 = 60;
+
 /// Validates an incoming `ATProto` service auth JWT token.
 ///
 /// Checks:
 /// 1. Bearer prefix.
-/// 2. Payload expiration (`exp > now_secs`).
+/// 2. Payload expiration (`exp + JWT_CLOCK_SKEW_LEEWAY_SECS >= now_secs` per RFC 7519 §4.1.4).
 /// 3. Audience matching (`aud == expected_audience`).
 /// 4. Valid DID subject / issuer.
 pub fn validate_service_jwt(
@@ -468,9 +471,9 @@ pub fn validate_service_jwt(
             now_secs
         };
 
-        if effective_now > exp {
+        if effective_now > exp.saturating_add(JWT_CLOCK_SKEW_LEEWAY_SECS) {
             return Err(FeedError::Auth(format!(
-                "Token expired: exp {exp} < now {now_secs}"
+                "Token expired: exp {exp} (+{JWT_CLOCK_SKEW_LEEWAY_SECS}s leeway) < now {now_secs}"
             )));
         }
     }
@@ -1962,6 +1965,43 @@ mod tests {
         assert!(
             validate_service_jwt(&format!("Bearer {jwt_expired}"), Some("did:web:feed"), now)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_service_jwt_clock_skew_leeway() {
+        let now = 1_700_000_000;
+        // Case 1: Token expired 30 seconds ago (within 60s leeway) -> ACCEPTED
+        let jwt_skew_30s = make_jwt(&format!(
+            r#"{{"iss":"did:plc:alice","aud":"did:web:feed","exp":{}}}"#,
+            now - 30
+        ));
+        assert!(
+            validate_service_jwt(&format!("Bearer {jwt_skew_30s}"), Some("did:web:feed"), now)
+                .is_ok(),
+            "Token expired 30s ago should be accepted under 60s leeway window"
+        );
+
+        // Case 2: Token expired exactly 60 seconds ago (boundary) -> ACCEPTED
+        let jwt_skew_60s = make_jwt(&format!(
+            r#"{{"iss":"did:plc:alice","aud":"did:web:feed","exp":{}}}"#,
+            now - 60
+        ));
+        assert!(
+            validate_service_jwt(&format!("Bearer {jwt_skew_60s}"), Some("did:web:feed"), now)
+                .is_ok(),
+            "Token expired exactly 60s ago should be accepted under 60s leeway window"
+        );
+
+        // Case 3: Token expired 61 seconds ago (exceeds leeway) -> REJECTED
+        let jwt_skew_61s = make_jwt(&format!(
+            r#"{{"iss":"did:plc:alice","aud":"did:web:feed","exp":{}}}"#,
+            now - 61
+        ));
+        assert!(
+            validate_service_jwt(&format!("Bearer {jwt_skew_61s}"), Some("did:web:feed"), now)
+                .is_err(),
+            "Token expired 61s ago must be rejected"
         );
     }
 
