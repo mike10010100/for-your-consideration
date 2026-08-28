@@ -2,6 +2,8 @@ use ahash::AHashMap;
 use compact_str::CompactString;
 use parking_lot::RwLock;
 
+use crate::error::{FeedError, Result};
+
 /// Total number of independent shards for the [`StringInterner`].
 pub const NUM_INTERNER_SHARDS: usize = 64;
 
@@ -182,6 +184,32 @@ impl StringInterner {
             all.extend(guard.to_str.iter().cloned());
         }
         all
+    }
+
+    /// Streams all interned strings shard-by-shard to a writer callback without allocating intermediate vectors.
+    ///
+    /// Writes the 32-bit count prefix followed by length-prefixed UTF-8 strings.
+    /// Returns the total number of strings streamed.
+    pub fn stream_strings_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; NUM_INTERNER_SHARDS] = std::array::from_fn(|i| self.shards[i].read());
+        let total_strings: usize = guards.iter().map(|g| g.to_str.len()).sum();
+        let num_strings = u32::try_from(total_strings)
+            .map_err(|e| FeedError::Snapshot(format!("Too many strings for snapshot: {e}")))?;
+        write_chunk(&num_strings.to_le_bytes())?;
+
+        for guard in &guards {
+            for s in &guard.to_str {
+                let b = s.as_bytes();
+                let str_len = u32::try_from(b.len())
+                    .map_err(|e| FeedError::Snapshot(format!("String length exceeds u32: {e}")))?;
+                write_chunk(&str_len.to_le_bytes())?;
+                write_chunk(b)?;
+            }
+        }
+        Ok(num_strings)
     }
 
     /// Creates a new [`StringInterner`] pre-populated from an ordered list of strings.

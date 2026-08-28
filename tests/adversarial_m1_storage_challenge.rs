@@ -372,13 +372,14 @@ fn test_v2_snapshot_roundtrip_10000_profiles_exact_bit_fidelity() {
         assert_eq!(dials_by_did, *expected_dials);
     }
 
-    // Performance assertions: both save and load under 500ms
+    // Performance assertions: both save and load under 2000ms in debug, 100ms in release
+    let max_duration_ms = if cfg!(debug_assertions) { 2_000 } else { 100 };
     assert!(
-        save_duration.as_millis() < 500,
+        save_duration.as_millis() < max_duration_ms,
         "Save duration too high: {save_duration:?}"
     );
     assert!(
-        load_duration.as_millis() < 500,
+        load_duration.as_millis() < max_duration_ms,
         "Load duration too high: {load_duration:?}"
     );
 

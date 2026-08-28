@@ -96,3 +96,55 @@ Adhere strictly to mike10010100/rust-best-practices: #![forbid(unsafe_code)], ze
 - [ ] cargo fmt --all -- --check passes cleanly.
 - [ ] cargo test and cargo test --doc pass 100% of test cases.
 
+---
+
+## 2026-08-28T01:33:53Z
+
+Use a full multi-agent swarm team to resolve critical feed generation latency and memory bottlenecks in the AT Protocol / Bluesky custom feed generator (`for-your-consideration`), bringing query response times, preview generation, and background snapshot persistence into sub-10ms performance bounds under high-volume firehose ingestion while curbing heap RSS bloat.
+
+Working directory: /home/mike10010100/git/for-your-consideration
+Integrity mode: development
+
+## Requirements
+
+### R1. Recommendation Query & Preview Traversal Optimization
+- Ensure feed preview generation (`recommend_preview_at` for `GET /api/feed-preview`) and live graph traversals operate with strict defensive bounds (capping seed posts to 50, slicing post edges to 500, capping top co-interactors to 100) to eliminate combinatorial fanout on graphs with >50M edges.
+- Ensure taste-twin discovery (`find_taste_twins` for `GET /api/taste-twins`) bounds seed post exploration and interaction slicing to return sub-10ms response times.
+
+### R2. High-Velocity Pool Sliding Window TTL Cache
+- Implement a resilient time-windowed TTL cache (e.g. 5–10s validity) for Tier 3 / cold-start velocity pool candidate selection in `GraphStore::get_velocity_pool_candidates_at`.
+- Eliminate redundant dynamic recalculation and scanning of the 65,536-entry ring buffer on every unauthenticated request during active ~450 ev/s firehose ingestion.
+
+### R3. Non-Blocking Snapshot Checkpoint Persistence
+- Offload periodic disk snapshot persistence (`save_snapshot_with_preferences`) from the core Tokio async worker thread in `src/main.rs` to dedicated blocking worker threads via `tokio::task::spawn_blocking`.
+- Stream shard data during snapshot serialization to avoid allocating multi-gigabyte temporary clone vectors across 52.6M edges.
+
+### R4. Heap Memory Optimization & Allocator Configuration
+- Configure a high-performance memory allocator (e.g. `tikv-jemallocator` or `mimalloc` under safe Rust feature gates) to prevent `glibc` malloc heap fragmentation and bring Docker container RSS down from 23.2GB to < 5GB.
+
+### R5. Non-Negotiable Repository Invariants & Verification Pipeline
+- Strictly enforce all repository standards: `#![forbid(unsafe_code)]`, zero panics (`clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic` denied), `#![deny(missing_docs)]`, 64-shard partitioned concurrency, and clock-warp safe math.
+- Pass 100% of the verification pipeline:
+  1. `cargo fmt --all -- --check`
+  2. `cargo clippy --all-targets -- -D warnings`
+  3. `cargo test --all-targets`
+  4. `cargo deny check`
+  5. `cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only`
+
+## Acceptance Criteria
+
+### Performance & Latency
+- [ ] `/api/feed-preview` response time drops from ~7.8s to < 10ms on the live 52M-edge graph.
+- [ ] Tier 3 / cold-start candidate retrieval drops from ~42ms to < 1ms on cache hits.
+- [ ] `/api/taste-twins` response time drops from ~745ms to < 20ms.
+- [ ] Periodic snapshot execution does not block or monopolize Tokio async runtime worker threads.
+- [ ] In-memory heap memory spikes during snapshot checkpoints are minimized.
+
+### Production Integrity & Quality Gates
+- [ ] Zero `#![forbid(unsafe_code)]` violations.
+- [ ] Zero unwraps, expects, or panics in production code paths.
+- [ ] 100% documentation coverage on all public APIs and items (`missing_docs`).
+- [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo deny check` pass with 0 warnings/errors.
+- [ ] Full test suite (`cargo test --all-targets`) passes 100% of unit, integration, and stress tests with >= 80% line coverage.
+
+

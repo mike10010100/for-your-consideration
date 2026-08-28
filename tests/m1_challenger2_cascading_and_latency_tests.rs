@@ -416,9 +416,10 @@ fn test_adversarial_dense_single_overlap_fanout_latency() {
         10,
         "Only the 10 genuine curators (S=3) should qualify; 1990 single-overlaps dropped"
     );
-    // In debug mode, traversal of 2000 roaring bitmaps should take < 50ms
+    // In debug mode, traversal of 2000 roaring bitmaps should take < 200ms; < 10ms in release
+    let max_twins_ms = if cfg!(debug_assertions) { 200 } else { 10 };
     assert!(
-        elapsed_twins.as_millis() < 50,
+        elapsed_twins.as_millis() < max_twins_ms,
         "Taste twins query took too long: {:?}",
         elapsed_twins
     );
@@ -435,8 +436,9 @@ fn test_adversarial_dense_single_overlap_fanout_latency() {
     assert!(rec_res.is_ok());
     let feed = rec_res.unwrap();
     assert!(!feed.posts.is_empty());
+    let max_rec_ms = if cfg!(debug_assertions) { 200 } else { 10 };
     assert!(
-        elapsed_rec.as_millis() < 50,
+        elapsed_rec.as_millis() < max_rec_ms,
         "Recommendation query took too long: {:?}",
         elapsed_rec
     );

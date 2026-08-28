@@ -1,81 +1,82 @@
-# Project: for-your-consideration Phase 2
+# Project: for-your-consideration Performance and Memory Optimization
 
 ## Architecture
-- **Language & Standards**: Safe Rust 2021 Edition, `#![forbid(unsafe_code)]`, zero unwraps/panics in production, strict `clippy::pedantic` with `-D warnings`, saturating time arithmetic.
-- **Core Components**:
-  - `StringInterner` (`src/interner.rs`): Bidirectional 32-bit compact string table.
-  - `GraphStore` (`src/graph.rs`): 64-shard partitioned multi-signal graph store with RoaringBitmaps.
-  - `SnapshotEngine` (`src/snapshot.rs`): Atomic disk persistence with CRC32 checksum, `< 50ms` boot hydration.
-  - `ImpressionStore` & `Recommender` (`src/recommender.rs`): 64-shard sliding LRU impression cache, 30m hard suppression, 2–6h exponential decay, 5-cluster topic diversity (Art, Tech, Science, News, Culture), creator seeds, 3-tier candidate generation.
-  - `XRPCServer` & `Lifecycle` (`src/server.rs`, `src/main.rs`): Axum HTTP service, impression tracking on `getFeedSkeleton`, periodic background checkpoints in `tokio::task::JoinSet`, graceful shutdown persistence on `SIGINT`/`SIGTERM`.
+`for-your-consideration` is a high-throughput custom feed generator for Bluesky / AT Protocol operating under continuous firehose ingestion (~450 events/sec, >52M edges). The optimization architecture eliminates query latency bottlenecks, bounds combinatorial graph traversals, introduces sliding window candidate caching, offloads blocking snapshot persistence with shard streaming, and configures modern low-fragmentation memory allocators.
+
+### Core Subsystems & Data Flow
+1. **Graph Store (`src/graph.rs`)**:
+   - 64 independent `parking_lot::RwLock` shards for forward edges, reverse edges, RoaringBitmaps, and metadata.
+   - Sliding window TTL cache (`VelocityCandidateCache`) with 10-second validity and clock-warp safety.
+   - Shard-by-shard streaming serialization methods (`stream_user_interactions_to`, `stream_post_interactions_to`, `stream_user_likes_bitmaps_to`, etc.) directly into `BufWriter`.
+2. **Recommender Engine (`src/recommender.rs`)**:
+   - Centralized defensive bounding constants: `MAX_SEED_POSTS = 50`, `MAX_POST_EDGES = 500`, `MAX_CO_INTERACTORS = 100`.
+   - `recommend_preview_at`: Bounded 3-step walk with seed slicing, reverse post edge slicing, and top co-interactor selection.
+   - `find_taste_twins`: Bounded seed post exploration and reverse edge slicing.
+3. **Snapshot Checkpoint Persistence (`src/snapshot.rs`, `src/main.rs`)**:
+   - `save_snapshot_with_preferences`: Streams shard-by-shard without creating intermediate multi-gigabyte clone vectors.
+   - Offloaded from Tokio async worker threads to dedicated blocking thread pool via `tokio::task::spawn_blocking`.
+4. **Allocator & Safety (`Cargo.toml`, `src/main.rs`, `src/lib.rs`)**:
+   - Feature-gated `tikv-jemallocator` (`jemalloc` default) and `mimalloc` under 100% safe Rust `#[global_allocator]`.
+   - Strict `#![forbid(unsafe_code)]`, zero unwraps/expects/panics, `#![deny(missing_docs)]`.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
-|---|---|---|---|---|
-| F1 | Binary Snapshot Format | 64-byte self-describing header (`b"FYFD"`, v1), string dictionary, 64-shard graph tables | M1 (DONE) | PRD §3.5, R1 |
-| F2 | CRC32 Integrity Checksum | Header and payload CRC32 validation via `crc32fast` | M1 (DONE) | PRD §3.5, R1 |
-| F3 | Atomic Rename Persistence | Temporary file write (`snapshot.bin.tmp`) + `sync_all` + atomic POSIX rename to `snapshot.bin` | M1 (DONE) | PRD §3.5, R1 |
-| F4 | Fast Boot Hydration (<50ms) | Instant pre-warmed state recovery with zero hashmap reallocation overhead | M1 (DONE) | PRD §3.5, R1 |
-| F5 | StringInterner Snapshot Hooks | Export and hydration methods for string dictionary | M1 (DONE) | PRD §3.5, R1 |
-| F6 | GraphStore Snapshot Hooks | Export and hydration methods for 64 shards of adjacency, bitmaps, follows, post metadata, and active posts | M1 (DONE) | PRD §3.5, R1 |
-| F7 | Impression Store Data Structure | 64-shard `parking_lot::RwLock` sliding LRU per viewer DID (`RoaringBitmap` + `VecDeque` + `AHashMap`) | M2 (DONE) | PRD §3.2, R2 |
-| F8 | Two-Tier Anti-Fatigue Filtering | 100% hard suppression for posts served in 0–30m; exponential soft score decay for posts served in 30m–6h | M2 (DONE) | PRD §3.2, R2 |
-| F9 | Impression Eviction & Bounded Memory | Bounded per-user capacity (1,000 posts) and sliding window pruning | M2 (DONE) | PRD §3.2, R2 |
-| F10 | Topic Diversity Clustering | 5-cluster classification (Art, Tech, Science, News, Culture) with keyword/hashtag pattern matching | M3 (DONE) | PRD §3.3, R3 |
-| F11 | Curated Starter Creator Seeds | High-signal creator seeds mapped to topic clusters for unauthenticated / new users | M3 (DONE) | PRD §3.3, R3 |
-| F12 | Round-Robin Diversity Interleaving | Balanced candidate selection preventing single-topic viral monopoly in Tier 3 cold-start | M3 (DONE) | PRD §3.3, R3 |
-| F13 | XRPC Impression Recording Hook | Capture served post IDs in `handle_get_feed_skeleton` and record to viewer's impression history | M4 (DONE) | PRD §3.2, R4 |
-| F14 | Startup Snapshot Hydration Hook | Load pre-warmed graph and interner on server startup before binding listener | M4 (DONE) | PRD §3.5, R4 |
-| F15 | Periodic Snapshot JoinSet Task | Background worker running every 5 minutes in `tokio::task::JoinSet` with `CancellationToken` | M4 (DONE) | PRD §3.5, R4 |
-| F16 | Graceful Shutdown Persistence | Persist latest graph and interner state to `snapshot.bin` on `SIGINT`/`SIGTERM` after task drain | M4 (DONE) | PRD §3.5, R4 |
-| F17 | Production Quality & Linter Gates | `#![forbid(unsafe_code)]`, zero panics/unwraps, `clippy::pedantic` `-D warnings`, `cargo fmt`, unit/prop/doc tests | M5 (DONE) | PRD §5, R5 |
-| F18 | Embedded SPA Dashboard | Responsive zero-dependency HTML5/CSS/Vanilla-JS SPA served at `/` and `/dashboard` via Axum | M3 (DONE) | PRD, R1 |
-| F19 | Telemetry API (`/api/telemetry`) | Live graph telemetry: total edges, interned strings, nodes, snapshot status, ingestion velocity | M2 (DONE) | PRD, R1 |
-| F20 | Taste Twins API (`/api/taste-twins`) | Co-interactor discovery, Cosine similarity over RoaringBitmaps, shared liked posts | M1 (DONE) | PRD, R2 |
-| F21 | Dials & Feed Preview API (`/api/feed-preview`) | Live algorithmic dials (Freshness, Discovery, Topic weights) + read-only candidate scoring (<2ms) | M1 (DONE) | PRD, R3 |
-| F22 | Graph Proof Chain Explainer (`/api/explain`) | 3-step proof chain reconstruction (`You -> Interacted Post -> Taste Twin -> Recommended Post`) | M1 (DONE) | PRD, R4 |
-| F23 | Production Stability & Linter Gates | `#![forbid(unsafe_code)]`, zero unwraps/panics, strict clippy `-D warnings`, full test suite | M4 (DONE) | PRD, R5 |
+|---|---------|-------------|-----------|--------|
+| 1 | Centralized Traversal Bounds | Define `MAX_SEED_POSTS` (50), `MAX_POST_EDGES` (500), `MAX_CO_INTERACTORS` (100) in `src/recommender.rs` | M1 | Survey 1 / Request R1 |
+| 2 | Bounded Feed Preview Walk | Slice seed posts to 50, post edges to 500, top co-interactors to 100 in `recommend_preview_at` | M1 | Survey 1 / Request R1 |
+| 3 | Bounded Taste Twins Walk | Slice seed posts to 50 and reverse edges to 500 in `find_taste_twins` | M1 | Survey 1 / Request R1 |
+| 4 | Explainability Edge Slicing | Slice reverse interaction edges to 500 in `explain_recommendation` | M1 | Survey 1 / Request R1 |
+| 5 | Velocity Pool TTL Cache | 10-second clock-warp safe sliding window TTL cache in `GraphStore::get_velocity_pool_candidates_at` | M2 | Survey 2 / Request R2 |
+| 6 | TTL Cache Invalidation Discipline | Invalidate cache on `clear()`, `restore_from_snapshot()`, and `prune_older_than()` | M2 | Survey 2 / Request R2 |
+| 7 | Non-Blocking Snapshot Checkpoints | Offload periodic snapshot persistence to `tokio::task::spawn_blocking` in `src/main.rs` | M3 | Survey 2 / Request R3 |
+| 8 | Shard-by-Shard Streaming Serialization | Stream data directly from 64 shards to `BufWriter` without multi-gigabyte clone vectors | M3 | Survey 2 / Request R3 |
+| 9 | Safe Allocator Configuration | Feature-gate `tikv-jemallocator` and `mimalloc` in `Cargo.toml` and `src/main.rs` | M4 | Survey 3 / Request R4 |
+| 10 | Strict Safety & Repository Invariants | Maintain `#![forbid(unsafe_code)]`, zero unwrap/expect/panic, `#![deny(missing_docs)]` | M4 | Survey 3 / Request R5 |
+| 11 | Complete Verification Pipeline | Pass fmt, clippy -D warnings, test suite, cargo deny, llvm-cov >= 80% | M5 | Survey 3 / Request R5 |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
-|---|---|---|---|---|
-| M1 | Core Recommender APIs & Proof Engine | `src/types.rs`, `src/recommender.rs`, `src/graph.rs`, `tests/recommender_api_tests.rs` | none | DONE |
-| M2 | Telemetry & Axum REST Endpoints | `src/server.rs`, `src/main.rs`, `tests/dashboard_api_tests.rs` | M1 | DONE |
-| M3 | Embedded Web Dashboard SPA | `src/assets/dashboard.html`, `src/server.rs`, `tests/dashboard_spa_tests.rs` | M2 | DONE |
-| M4 | Comprehensive QA & Hardening | Full workspace, Clippy pedantic, Fmt, Doc tests, E2E tests, Auditor gate | M1, M2, M3 | DONE |
+|---|------|-------|-------------|--------|
+| M1 | Traversal Bounds & Query Optimization | `src/recommender.rs`, `tests/` | none | DONE |
+| M2 | High-Velocity Pool TTL Cache | `src/graph.rs`, `src/types.rs`, `tests/` | none | DONE |
+| M3 | Non-Blocking Streaming Snapshot Persistence | `src/snapshot.rs`, `src/graph.rs`, `src/interner.rs`, `src/preferences.rs`, `src/main.rs`, `tests/` | none | DONE |
+| M4 | Heap Memory Optimization & Allocator Config | `Cargo.toml`, `src/main.rs` | none | DONE |
+| M5 | E2E Testing Suite & Adversarial Hardening | Opaque-box E2E test suite (Tiers 1-4) & adversarial test suite (Tier 5) | M1, M2, M3, M4 | DONE |
 
 ## Interface Contracts
 
-### `src/types.rs` ↔ `src/recommender.rs`
-- `TopicWeights { art: f32, tech: f32, science: f32, news: f32, culture: f32 }`
-- `ScoreBreakdown { time_decay: f32, taste_similarity: f32, topic_boost: f32, fatigue_penalty: f32, final_score: f32 }`
-- `FeedPreviewItem { uri: CompactString, author_did: CompactString, topic: TopicCategory, tier: String, score_breakdown: ScoreBreakdown, proof_chain: Option<GraphProofChain> }`
-- `FeedPreviewResponse { viewer_did: CompactString, items: Vec<FeedPreviewItem>, total_candidates: usize, query_latency_us: u64 }`
-- `TasteTwinItem { user_did: CompactString, similarity_score: f32, shared_posts_count: usize, top_interests: Vec<TopicCategory>, shared_posts: Vec<SharedPostInfo> }`
-- `TasteTwinsResponse { viewer_did: CompactString, total_liked_posts: usize, twins: Vec<TasteTwinItem>, query_latency_us: u64 }`
-- `GraphProofChain { steps: Vec<ProofChainStep>, summary: String }`
+### M1: Traversal Bounds (`src/recommender.rs`)
+- `pub const MAX_SEED_POSTS: usize = 50;`
+- `pub const MAX_POST_EDGES: usize = 500;`
+- `pub const MAX_CO_INTERACTORS: usize = 100;`
+- `recommend_preview_at`: Caps seed posts, slices post interactions, selects top 100 co-interactors by Bayesian similarity.
+- `find_taste_twins`: Bounded seed exploration and interaction edge slicing.
 
-### `src/recommender.rs` ↔ `src/server.rs`
-- `Recommender::find_taste_twins(&self, viewer_did: &str, limit: usize) -> Result<TasteTwinsResponse, FeedError>`
-- `Recommender::recommend_preview(&self, viewer_did: Option<&str>, dials: &RecommendationDials) -> Result<FeedPreviewResponse, FeedError>`
-- `Recommender::explain_recommendation(&self, viewer_did: &str, post_uri: &str) -> Result<GraphProofChain, FeedError>`
+### M2: Velocity Pool TTL Cache (`src/graph.rs`)
+- `pub const VELOCITY_CACHE_TTL_SECS: u64 = 10;`
+- `pub struct VelocityCandidateCache { pub evaluated_at_secs: u64, pub candidates: Vec<u32> }`
+- `get_velocity_pool_candidates_at(&self, current_time_secs: u64, limit: usize) -> Vec<u32>`
 
-### `src/server.rs` ↔ Axum Handlers
-- `GET /` and `GET /dashboard` -> `Html<&'static str>`
-- `GET /api/telemetry` -> `Json<TelemetryResponse>`
-- `GET /api/taste-twins?did=...&limit=...` -> `Json<TasteTwinsResponse>`
-- `GET /api/feed-preview?viewer=...&freshness=...&discovery=...&art=...&tech=...&science=...&news=...&culture=...` -> `Json<FeedPreviewResponse>`
-- `GET /api/explain?viewer=...&uri=...` -> `Json<GraphProofChain>`
+### M3: Streaming Snapshot Persistence (`src/snapshot.rs`, `src/graph.rs`)
+- `GraphStore::stream_user_interactions_to<F>(&self, write_chunk: &mut F) -> Result<(u32, u64)>`
+- `GraphStore::stream_post_interactions_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
+- `GraphStore::stream_user_likes_bitmaps_to<F>(&self, write_chunk: &mut F, bm_buf: &mut Vec<u8>) -> Result<u32>`
+- `StringInterner::stream_strings_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
+- `UserPreferencesStore::stream_preferences_to<F>(&self, write_chunk: &mut F) -> Result<u32>`
+- `save_snapshot_with_preferences`: Streams shard data directly to `BufWriter` (128 KB buffer) and computes CRC32 on the fly.
+- In `src/main.rs`: `tokio::task::spawn_blocking` wraps `save_snapshot_with_preferences`.
+
+### M4: Allocator & Feature Gates (`Cargo.toml`, `src/main.rs`)
+- `[features] default = ["jemalloc"], jemalloc = ["dep:tikv-jemallocator"], mimalloc = ["dep:mimalloc"]`
+- In `src/main.rs`: `#[cfg(feature = "jemalloc")] #[global_allocator] static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;`
 
 ## Code Layout
-- `src/lib.rs`: Module exports and prelude
-- `src/types.rs`: Core types, `SignalType`, `CompactEdge`, `PostMeta`, `TopicCategory`, `TopicWeights`, telemetry & preview DTOs
-- `src/interner.rs`: `StringInterner` with export/hydrate
-- `src/graph.rs`: 64-shard `GraphStore` with export/restore and RoaringBitmap operations
-- `src/snapshot.rs`: Binary serialization, CRC32, atomic rename, hydration
-- `src/recommender.rs`: Multi-signal routing, `ImpressionStore`, anti-fatigue math, topic diversity, taste twins, preview candidate generation, proof chain tracing
-- `src/server.rs`: Axum XRPC server, SPA static embedding, REST endpoints for telemetry, taste twins, preview, and explainability
-- `src/assets/dashboard.html`: Embedded zero-dependency HTML5/CSS/Vanilla-JS SPA
-- `src/main.rs`: CLI runtime, telemetry trackers, lifecycle tasks, graceful shutdown persistence
-- `src/error.rs`: Error taxonomy including `FeedError::UserNotFound`, `FeedError::PostNotFound`
-- `tests/`: Unit, boundary, property, and E2E integration test suites
+- `src/lib.rs`: Library crate root with safety invariants.
+- `src/main.rs`: Binary entry point, runtime setup, global allocator, supervised task management.
+- `src/graph.rs`: 64-shard storage, adjacency accessors, similarity & decay math, velocity cache, streaming snapshot methods.
+- `src/recommender.rs`: Bounded collaborative filtering, candidate scoring, feed preview, taste twins, explainability.
+- `src/snapshot.rs`: Streaming binary serialization, atomic checkpoint saving, CRC32 verification, deserialization.
+- `src/preferences.rs`: 64-shard user preference store and streaming methods.
+- `src/interner.rs`: 64-shard string interner and streaming methods.
+- `src/types.rs`: Data structures, score breakdowns, candidate evaluations, response types.
+- `tests/`: Integration, unit, adversarial challenger, and stress test suites.

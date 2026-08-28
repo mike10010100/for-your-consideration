@@ -15,6 +15,7 @@
 use ahash::AHashMap;
 use parking_lot::RwLock;
 
+use crate::error::{FeedError, Result};
 use crate::interner::StringInterner;
 use crate::types::UserDials;
 
@@ -171,6 +172,39 @@ impl UserPreferencesStore {
             }
         }
         data
+    }
+
+    /// Streams all user preferences shard-by-shard to a writer callback without clone vectors.
+    ///
+    /// Writes the 32-bit count prefix followed by `(uid, UserDials)` records.
+    /// Returns the total number of preferences streamed.
+    pub fn stream_preferences_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; PREFERENCE_SHARDS] = std::array::from_fn(|i| self.shards[i].read());
+        let total_prefs: usize = guards.iter().map(|g| g.len()).sum();
+        let num_preferences = u32::try_from(total_prefs).map_err(|e| {
+            FeedError::Snapshot(format!("Too many user preferences for snapshot: {e}"))
+        })?;
+        write_chunk(&num_preferences.to_le_bytes())?;
+
+        for guard in &guards {
+            for (&uid, dials) in guard.iter() {
+                write_chunk(&uid.to_le_bytes())?;
+                write_chunk(&dials.freshness_half_life_secs.to_le_bytes())?;
+                write_chunk(&dials.serendipity_ratio.to_le_bytes())?;
+                write_chunk(&dials.topic_weights.art.to_le_bytes())?;
+                write_chunk(&dials.topic_weights.tech.to_le_bytes())?;
+                write_chunk(&dials.topic_weights.science.to_le_bytes())?;
+                write_chunk(&dials.topic_weights.news.to_le_bytes())?;
+                write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
+                write_chunk(&[u8::from(dials.include_replies)])?;
+                write_chunk(&dials.min_likes.to_le_bytes())?;
+                write_chunk(&dials.updated_at_secs.to_le_bytes())?;
+            }
+        }
+        Ok(num_preferences)
     }
 
     /// Restores preference state from snapshot data, completely replacing existing state.

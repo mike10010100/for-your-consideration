@@ -78,10 +78,10 @@ pub mod prelude {
     pub use crate::graph::{
         calculate_bayesian_confidence, calculate_bayesian_shrinkage, calculate_consensus_boost,
         calculate_popularity_dampener, calculate_social_proof_factor, calculate_time_decay,
-        GraphSnapshotData, GraphStats, GraphStore, DEFAULT_BAYESIAN_BETA,
+        GraphSnapshotData, GraphStats, GraphStore, VelocityCandidateCache, DEFAULT_BAYESIAN_BETA,
         DEFAULT_CONSENSUS_BOOST_MU, DEFAULT_HALF_LIFE_SECS, DEFAULT_SOCIAL_PROOF_ALPHA,
         DEFAULT_SOCIAL_PROOF_LAMBDA, MIN_SHARED_OVERLAP, NUM_SHARDS, SIX_HOURS_SECS,
-        SOCIAL_PROOF_PLATEAU_THRESHOLD,
+        SOCIAL_PROOF_PLATEAU_THRESHOLD, VELOCITY_CACHE_TTL_SECS,
     };
     pub use crate::ingest::{
         apply_event_to_graph, build_jetstream_url, build_subscription_url,

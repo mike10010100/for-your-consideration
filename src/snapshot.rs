@@ -373,135 +373,30 @@ pub fn save_snapshot_with_preferences(
         Ok(())
     };
 
-    // Export memory states
-    let strings = interner.export_strings();
-    let graph_data = graph.snapshot_data();
-    let pref_data = preferences.snapshot_data();
-
     // Section 1: Strings
-    let num_strings = u32::try_from(strings.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many strings for snapshot: {e}")))?;
-    write_chunk(&num_strings.to_le_bytes())?;
-    for s in &strings {
-        let b = s.as_bytes();
-        let str_len = u32::try_from(b.len())
-            .map_err(|e| FeedError::Snapshot(format!("String length exceeds u32: {e}")))?;
-        write_chunk(&str_len.to_le_bytes())?;
-        write_chunk(b)?;
-    }
+    let num_strings = interner.stream_strings_to(&mut write_chunk)?;
 
     // Section 2: User Interactions (Forward)
-    let num_users = u32::try_from(graph_data.user_interactions.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many users for snapshot: {e}")))?;
-    write_chunk(&num_users.to_le_bytes())?;
-    let mut total_forward_edges = 0u64;
-    for (uid, edges) in &graph_data.user_interactions {
-        write_chunk(&uid.to_le_bytes())?;
-        let edge_count = u32::try_from(edges.len())
-            .map_err(|e| FeedError::Snapshot(format!("Too many edges for user: {e}")))?;
-        write_chunk(&edge_count.to_le_bytes())?;
-        for e in edges {
-            write_chunk(&e.target.to_le_bytes())?;
-            write_chunk(&e.packed.to_le_bytes())?;
-        }
-        total_forward_edges = total_forward_edges.saturating_add(edges.len() as u64);
-    }
+    let (num_users, total_forward_edges) = graph.stream_user_interactions_to(&mut write_chunk)?;
 
     // Section 3: Post Interactions (Reverse)
-    let num_posts = u32::try_from(graph_data.post_interactions.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many posts for snapshot: {e}")))?;
-    write_chunk(&num_posts.to_le_bytes())?;
-    for (pid, edges) in &graph_data.post_interactions {
-        write_chunk(&pid.to_le_bytes())?;
-        let edge_count = u32::try_from(edges.len())
-            .map_err(|e| FeedError::Snapshot(format!("Too many edges for post: {e}")))?;
-        write_chunk(&edge_count.to_le_bytes())?;
-        for e in edges {
-            write_chunk(&e.target.to_le_bytes())?;
-            write_chunk(&e.packed.to_le_bytes())?;
-        }
-    }
+    let _num_posts = graph.stream_post_interactions_to(&mut write_chunk)?;
 
     // Section 4: Roaring Bitmaps
-    let num_bm_users = u32::try_from(graph_data.user_likes_bitmaps.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many bitmap users: {e}")))?;
-    write_chunk(&num_bm_users.to_le_bytes())?;
-    let mut bm_buf = Vec::new();
-    for (uid, bm) in &graph_data.user_likes_bitmaps {
-        bm_buf.clear();
-        bm.serialize_into(&mut bm_buf)
-            .map_err(|e| FeedError::Snapshot(format!("RoaringBitmap serialization error: {e}")))?;
-        write_chunk(&uid.to_le_bytes())?;
-        let bm_len = u32::try_from(bm_buf.len())
-            .map_err(|e| FeedError::Snapshot(format!("Bitmap byte length exceeds u32: {e}")))?;
-        write_chunk(&bm_len.to_le_bytes())?;
-        write_chunk(&bm_buf)?;
-    }
+    let mut bm_buf = Vec::with_capacity(64 * 1024);
+    let _num_bm_users = graph.stream_user_likes_bitmaps_to(&mut write_chunk, &mut bm_buf)?;
 
     // Section 5: Follows
-    let num_followers = u32::try_from(graph_data.follows.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many followers: {e}")))?;
-    write_chunk(&num_followers.to_le_bytes())?;
-    for (fid, list) in &graph_data.follows {
-        write_chunk(&fid.to_le_bytes())?;
-        let count = u32::try_from(list.len())
-            .map_err(|e| FeedError::Snapshot(format!("Too many followed users: {e}")))?;
-        write_chunk(&count.to_le_bytes())?;
-        for &target in list {
-            write_chunk(&target.to_le_bytes())?;
-        }
-    }
+    let num_followers = graph.stream_follows_to(&mut write_chunk)?;
 
     // Section 6: Post Metadata
-    let num_post_metadata = u32::try_from(graph_data.post_metadata.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many metadata entries: {e}")))?;
-    write_chunk(&num_post_metadata.to_le_bytes())?;
-    for (pid, meta) in &graph_data.post_metadata {
-        write_chunk(&pid.to_le_bytes())?;
-        write_chunk(&meta.author_id.to_le_bytes())?;
-        if let Some(r) = meta.root_id {
-            write_chunk(&1u8.to_le_bytes())?;
-            write_chunk(&r.to_le_bytes())?;
-        } else {
-            write_chunk(&0u8.to_le_bytes())?;
-            write_chunk(&0u32.to_le_bytes())?;
-        }
-        if let Some(p) = meta.parent_id {
-            write_chunk(&1u8.to_le_bytes())?;
-            write_chunk(&p.to_le_bytes())?;
-        } else {
-            write_chunk(&0u8.to_le_bytes())?;
-            write_chunk(&0u32.to_le_bytes())?;
-        }
-        write_chunk(&meta.created_at.to_le_bytes())?;
-    }
+    let num_post_metadata = graph.stream_post_metadata_to(&mut write_chunk)?;
 
     // Section 7: Active Recent Posts
-    let num_recent = u32::try_from(graph_data.active_recent_posts.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many active recent posts: {e}")))?;
-    write_chunk(&num_recent.to_le_bytes())?;
-    for (pid, ts) in &graph_data.active_recent_posts {
-        write_chunk(&pid.to_le_bytes())?;
-        write_chunk(&ts.to_le_bytes())?;
-    }
+    let _num_recent = graph.stream_active_recent_posts_to(&mut write_chunk)?;
 
     // Section 8: User Preferences (Version 4)
-    let num_preferences = u32::try_from(pref_data.len())
-        .map_err(|e| FeedError::Snapshot(format!("Too many user preferences for snapshot: {e}")))?;
-    write_chunk(&num_preferences.to_le_bytes())?;
-    for (uid, dials) in &pref_data {
-        write_chunk(&uid.to_le_bytes())?;
-        write_chunk(&dials.freshness_half_life_secs.to_le_bytes())?;
-        write_chunk(&dials.serendipity_ratio.to_le_bytes())?;
-        write_chunk(&dials.topic_weights.art.to_le_bytes())?;
-        write_chunk(&dials.topic_weights.tech.to_le_bytes())?;
-        write_chunk(&dials.topic_weights.science.to_le_bytes())?;
-        write_chunk(&dials.topic_weights.news.to_le_bytes())?;
-        write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
-        write_chunk(&[u8::from(dials.include_replies)])?;
-        write_chunk(&dials.min_likes.to_le_bytes())?;
-        write_chunk(&dials.updated_at_secs.to_le_bytes())?;
-    }
+    let num_preferences = preferences.stream_preferences_to(&mut write_chunk)?;
 
     // Finalize CRC32
     let payload_crc32 = hasher.finalize();
