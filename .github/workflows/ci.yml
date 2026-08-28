@@ -12,6 +12,20 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  version-bump-check:
+    name: Enforce Semantic Version Bump & CHANGELOG on PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Semantic Version Bump & CHANGELOG Entry
+        run: |
+          chmod +x ./scripts/check_version_bump.sh
+          ./scripts/check_version_bump.sh
+
   fmt-and-clippy:
     name: Code Formatting & Strict Clippy Safety Guards
     runs-on: ubuntu-latest

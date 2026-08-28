@@ -60,6 +60,14 @@ Both crate roots enforce the strict compiler lint safety guard:
 - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied).
 - Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
 
+### 6. Semantic Versioning & CHANGELOG Invariant
+- Every Pull Request modifying application code, features, bug fixes, or architecture **must bump the package version in [`Cargo.toml`](Cargo.toml)** according to [Semantic Versioning (SemVer 2.0.0)](https://semver.org/):
+  - **Patch** (`0.2.x` → `0.2.y`): Backward-compatible bug fixes, security patches, performance tuning, and minor refactors.
+  - **Minor** (`0.x.0` → `0.y.0`): New features, algorithm dials, snapshot schema changes, or significant new capabilities.
+  - **Major** (`x.0.0` → `y.0.0`): Breaking public API changes or architecture overhauls.
+- Every version bump **must be accompanied by an entry in [`CHANGELOG.md`](CHANGELOG.md)** under `## [X.Y.Z] - YYYY-MM-DD` following [Keep a Changelog](https://keepachangelog.com/).
+- The `./scripts/check_version_bump.sh` verification script is enforced in CI on every PR.
+
 ---
 
 ## ⚡ Mandatory Pre-Completion Checklist
@@ -81,4 +89,7 @@ cargo deny check
 
 # 5. Test coverage gate (must maintain >= 80% line coverage)
 cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only
+
+# 6. Verify Semantic Version bump & CHANGELOG entry
+./scripts/check_version_bump.sh
 ```

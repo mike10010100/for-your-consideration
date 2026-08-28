@@ -2,6 +2,7 @@
 ### High-Performance AT Protocol Custom Feed Generator for Bluesky
 *(An homage to the classic "For You" feed)*
 
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
 [![Rust Safe](https://img.shields.io/badge/Rust-Safe_2021-brightgreen.svg)](#)
 [![Forbid Unsafe](https://img.shields.io/badge/%23!%5Bforbid(unsafe_code)%5D-enforced-blue.svg)](#)
 [![Tests Passing](https://img.shields.io/badge/Tests-503%20passed-success.svg)](#)
@@ -101,7 +102,10 @@ To make your feed public and pin-able in the official Bluesky app, you need to e
 
 #### Option A: Docker Compose (Recommended for Permanent Box)
 ```bash
-# Start with persistent volume for snapshot checkpoints
+# Auto-extract SemVer version, build tagged image, and launch stack:
+./scripts/deploy.sh
+
+# Or start directly with Docker Compose:
 docker compose up -d --build
 
 # View live stream ingest and telemetry
@@ -186,3 +190,4 @@ This codebase strictly follows the production-grade stability patterns, defensiv
 4. **Defensive Concurrency & Monotonic Time**: Clock-warp safe math (`saturating_duration_since`), drift-free interval scheduling, 64-shard partitioned locks, and zero lock holding across `.await` yield points.
 5. **Leak-Free Async Tasks**: All background workers managed within a supervised `tokio::task::JoinSet` bound to a unified `CancellationToken`.
 6. **Sub-2ms SLA**: Sub-2ms p99 query latency verified under concurrent ingestion and preference mutation stress.
+7. **Strict Semantic Versioning & CHANGELOG**: Automated PR version bump enforcement (`scripts/check_version_bump.sh`) following [SemVer 2.0.0](https://semver.org/) and [Keep a Changelog](CHANGELOG.md).
