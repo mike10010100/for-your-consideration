@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: for-your-consideration:latest
+    image: for-your-consideration:${IMAGE_TAG:-latest}
     container_name: for-your-consideration
     restart: unless-stopped
     security_opt:

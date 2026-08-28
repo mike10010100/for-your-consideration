@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
         )
         .try_init();
 
-    info!("Starting for-your-consideration AT Protocol Custom Feed Generator v0.1.0");
+    info!(
+        "Starting for-your-consideration AT Protocol Custom Feed Generator v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // 2. Read runtime configuration from environment
     let host = std::env::var("HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
