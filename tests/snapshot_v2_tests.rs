@@ -488,8 +488,9 @@ fn test_snapshot_v2_scale_5000_profiles() {
     save_snapshot_with_preferences(&snapshot_path, &interner, &graph, &preferences, 12345)
         .expect("Save 5000 profiles failed");
     let save_duration = save_start.elapsed();
+    let max_save_ms = if cfg!(debug_assertions) { 2_000 } else { 100 };
     assert!(
-        save_duration.as_millis() < 500,
+        save_duration.as_millis() < max_save_ms,
         "Save duration too high: {:?}",
         save_duration
     );
@@ -511,8 +512,9 @@ fn test_snapshot_v2_scale_5000_profiles() {
 
     assert_eq!(loaded.header.num_preferences, 5000);
     assert_eq!(loaded_preferences.len(), 5000);
+    let max_load_ms = if cfg!(debug_assertions) { 2_000 } else { 100 };
     assert!(
-        load_duration.as_millis() < 500,
+        load_duration.as_millis() < max_load_ms,
         "Load duration too high: {:?}",
         load_duration
     );
