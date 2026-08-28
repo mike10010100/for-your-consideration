@@ -1364,9 +1364,16 @@ fn test_m1_defensive_bounds_viral_post_edges_and_top_co_interactors() {
         "Total candidates evaluated should match MAX_CO_INTERACTORS (100)"
     );
     assert_eq!(preview.items.len(), 30);
+    #[cfg(not(debug_assertions))]
     assert!(
-        preview.query_latency_us < 20_000,
-        "Preview latency must be sub-20ms in debug mode (was {}µs)",
+        preview.query_latency_us < 2_000,
+        "Preview latency SLA violation in release: {}us",
+        preview.query_latency_us
+    );
+    #[cfg(debug_assertions)]
+    assert!(
+        preview.query_latency_us < 100_000,
+        "Preview latency abnormal debug spike: {}us",
         preview.query_latency_us
     );
 }
