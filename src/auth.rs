@@ -2410,14 +2410,11 @@ mod tests {
         };
         let converted = session_corrupt_key.to_oauth_session();
         assert!(
-            converted.is_err(),
+            matches!(converted, Err(FeedError::Auth(_))),
             "Corrupt private key string must return FeedError::Auth"
         );
-        match converted {
-            Err(FeedError::Auth(msg)) => {
-                assert!(msg.contains("Persisted DPoP key is undecodable"));
-            }
-            other => panic!("Expected FeedError::Auth but got {other:?}"),
+        if let Err(FeedError::Auth(msg)) = converted {
+            assert!(msg.contains("Persisted DPoP key is undecodable"));
         }
 
         // Invalid token_type (not DPoP) triggers structured error
