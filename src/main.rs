@@ -346,6 +346,7 @@ async fn main() -> Result<()> {
     .with_ingestion_tracker(Arc::clone(&ingestion_tracker));
 
     let snapshot_oauth_store = Arc::clone(&app_state.oauth_store);
+    let snapshot_user_oauth_sessions = Arc::clone(&app_state.user_oauth_sessions);
     let snapshot_active_users = Arc::clone(&app_state.active_users_tracker);
     let router = create_xrpc_router(app_state);
     let listener = TcpListener::bind(bind_addr).await.map_err(FeedError::Io)?;
@@ -414,6 +415,7 @@ async fn main() -> Result<()> {
                         for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
                         now_secs,
                     );
+                    snapshot_user_oauth_sessions.prune_expired(now_secs);
                     snapshot_active_users.prune_older_than(now_secs.saturating_sub(900));
 
                     tracing::debug!("Triggering periodic snapshot checkpoint");

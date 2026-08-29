@@ -16,19 +16,26 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}=== 📦 Checking Semantic Version Bump & CHANGELOG ===${NC}"
 
 # Determine base git reference
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
 BASE_REF=""
 if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
     BASE_REF="origin/${GITHUB_BASE_REF}"
-elif git rev-parse --verify origin/main >/dev/null 2>&1; then
+elif [[ "${CURRENT_BRANCH}" != "main" ]] && git rev-parse --verify origin/main >/dev/null 2>&1; then
     BASE_REF="origin/main"
-elif git rev-parse --verify main >/dev/null 2>&1; then
+elif [[ "${CURRENT_BRANCH}" != "main" ]] && git rev-parse --verify main >/dev/null 2>&1; then
     BASE_REF="main"
-elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    BASE_REF="HEAD~1"
 fi
 
 if [[ -z "${BASE_REF}" ]]; then
-    echo -e "${YELLOW}Warning: No base git branch found to compare against. Skipping version bump check.${NC}"
+    echo -e "${YELLOW}Notice: On main branch or no base branch to compare against. Validating current CHANGELOG entry only.${NC}"
+    # Verify CHANGELOG.md entry
+    CURRENT_VERSION=$(grep -m1 '^[[:space:]]*version[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
+    if ! grep -q "## \[${CURRENT_VERSION}\]" CHANGELOG.md; then
+        echo -e "${RED}❌ CHANGELOG Check Failed!${NC}"
+        echo -e "${RED}CHANGELOG.md does not contain an entry for version [${CURRENT_VERSION}].${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ CHANGELOG.md contains entry for [${CURRENT_VERSION}]${NC}"
     exit 0
 fi
 
@@ -44,7 +51,7 @@ if [[ ! -f "Cargo.toml" ]]; then
     exit 1
 fi
 
-CURRENT_VERSION=$(grep -m1 '^version\s*=' Cargo.toml | sed -E 's/version\s*=\s*"([^"]+)".*/\1/')
+CURRENT_VERSION=$(grep -m1 '^[[:space:]]*version[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
 if [[ -z "${CURRENT_VERSION}" ]]; then
     echo -e "${RED}Error: Failed to parse current package version from Cargo.toml!${NC}"
     exit 1
@@ -53,7 +60,7 @@ fi
 # Extract base version from base branch
 BASE_VERSION=""
 if git cat-file -e "${BASE_REF}:Cargo.toml" 2>/dev/null; then
-    BASE_VERSION=$(git show "${BASE_REF}:Cargo.toml" | grep -m1 '^version\s*=' | sed -E 's/version\s*=\s*"([^"]+)".*/\1/')
+    BASE_VERSION=$(git show "${BASE_REF}:Cargo.toml" | grep -m1 '^[[:space:]]*version[[:space:]]*=' | awk -F'"' '{print $2}')
 fi
 
 if [[ -z "${BASE_VERSION}" ]]; then

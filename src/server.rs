@@ -315,6 +315,16 @@ impl AppState {
         self
     }
 
+    /// Sets a custom user OAuth session store.
+    #[must_use]
+    pub fn with_user_oauth_sessions(
+        mut self,
+        user_oauth_sessions: Arc<OAuthUserSessionStore>,
+    ) -> Self {
+        self.user_oauth_sessions = user_oauth_sessions;
+        self
+    }
+
     /// Sets a custom snapshot status tracker.
     #[must_use]
     pub fn with_snapshot_tracker(mut self, tracker: Arc<SnapshotStatusTracker>) -> Self {
@@ -1129,7 +1139,13 @@ pub async fn handle_post_feed_publish(
         }
     }
 
-    let maybe_oauth_session = state.user_oauth_sessions.get(viewer_did.as_str());
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let maybe_oauth_session = state
+        .user_oauth_sessions
+        .get_active(viewer_did.as_str(), now_secs);
 
     match publish_feed_generator_record(
         &viewer_did,
@@ -1650,6 +1666,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::auth::UserOAuthSession;
     use crate::graph::GraphStore;
     use crate::interner::StringInterner;
     use crate::types::{
@@ -2357,5 +2374,29 @@ mod tests {
         }
 
         assert_eq!(tracker.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn test_app_state_with_user_oauth_sessions_builder() {
+        let state = create_test_state();
+        let custom_store = Arc::new(OAuthUserSessionStore::new());
+        let session = UserOAuthSession {
+            did: CompactString::new("did:plc:builder_test_user"),
+            handle: CompactString::new("builder.bsky.social"),
+            access_token: "token_123".to_string(),
+            refresh_token: None,
+            token_type: "DPoP".to_string(),
+            dpop_private_key: None,
+            pds_endpoint: "https://bsky.social".to_string(),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            expires_at_secs: 1_800_000_000,
+        };
+        custom_store.insert("did:plc:builder_test_user", session.clone());
+
+        let configured_state = state.with_user_oauth_sessions(Arc::clone(&custom_store));
+        let retrieved = configured_state
+            .user_oauth_sessions
+            .get("did:plc:builder_test_user");
+        assert_eq!(retrieved, Some(session));
     }
 }
