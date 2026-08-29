@@ -1139,7 +1139,13 @@ pub async fn handle_post_feed_publish(
         }
     }
 
-    let maybe_oauth_session = state.user_oauth_sessions.get(viewer_did.as_str());
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let maybe_oauth_session = state
+        .user_oauth_sessions
+        .get_active(viewer_did.as_str(), now_secs);
 
     match publish_feed_generator_record(
         &viewer_did,

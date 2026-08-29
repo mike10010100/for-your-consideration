@@ -843,11 +843,14 @@ impl UserOAuthSession {
     ///
     /// Returns [`FeedError::Auth`] if the underlying [`OAuthSession`] cannot be created.
     pub fn to_oauth_session(&self) -> Result<OAuthSession> {
-        let key = self
-            .dpop_private_key
-            .as_deref()
-            .and_then(|b64| DPoPKey::from_bytes_b64(b64).ok())
-            .unwrap_or_else(DPoPKey::generate);
+        let key = match self.dpop_private_key.as_deref() {
+            Some(b64) => DPoPKey::from_bytes_b64(b64).map_err(|e| {
+                FeedError::Auth(format!(
+                    "Persisted DPoP key is undecodable; re-authentication required: {e}"
+                ))
+            })?,
+            None => DPoPKey::generate(),
+        };
 
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -934,6 +937,16 @@ impl OAuthUserSessionStore {
     pub fn get(&self, did: &str) -> Option<UserOAuthSession> {
         let idx = Self::shard_idx(did);
         self.shards[idx].read().get(did).cloned()
+    }
+
+    /// Retrieves a cloned copy of the user's OAuth session only if it has not expired.
+    pub fn get_active(&self, did: &str, now_secs: u64) -> Option<UserOAuthSession> {
+        let idx = Self::shard_idx(did);
+        self.shards[idx]
+            .read()
+            .get(did)
+            .filter(|session| !session.is_expired(now_secs))
+            .cloned()
     }
 
     /// Removes an active user OAuth session on sign out.
@@ -1442,16 +1455,21 @@ pub async fn publish_feed_generator_record(
             || oauth.pds_endpoint.clone(),
             |pds| pds.trim_end_matches('/').to_string(),
         );
-        let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
+        let allow_local = pds_endpoint.starts_with("http://127.0.0.1")
+            || pds_endpoint.starts_with("http://localhost");
+        let validated_pds = validate_outbound_url(&pds_endpoint, allow_local)?;
         let auth_header = format!("{} {}", oauth.token_type, oauth.access_token);
         let ath_val = compute_access_token_hash(&oauth.access_token);
         let ath_ref = Some(ath_val.as_str());
 
-        let dpop_key = oauth
-            .dpop_private_key
-            .as_deref()
-            .and_then(|b64| DPoPKey::from_bytes_b64(b64).ok())
-            .unwrap_or_else(DPoPKey::generate);
+        let dpop_key = match oauth.dpop_private_key.as_deref() {
+            Some(b64) => DPoPKey::from_bytes_b64(b64).map_err(|e| {
+                FeedError::Auth(format!(
+                    "Persisted DPoP key is undecodable; re-authentication required: {e}"
+                ))
+            })?,
+            None => DPoPKey::generate(),
+        };
 
         let upload_url = format!("{validated_pds}/xrpc/com.atproto.repo.uploadBlob");
         let mut avatar_blob: Option<serde_json::Value> = None;
@@ -2363,15 +2381,22 @@ mod tests {
         assert_eq!(restored.pds_endpoint, user_session.pds_endpoint);
         assert_eq!(restored.token_endpoint, user_session.token_endpoint);
 
-        // 3. Verify DPoP key roundtripped accurately
+        // 3. Verify DPoP key and expiration roundtripped accurately
         let restored_key =
             DPoPKey::from_bytes_b64(restored.dpop_private_key.as_ref().unwrap()).unwrap();
         assert_eq!(restored_key.jwk_thumbprint(), key_thumbprint);
+        assert!(
+            restored
+                .expires_at_secs
+                .abs_diff(user_session.expires_at_secs)
+                <= 2,
+            "Expiration timestamp should be preserved across roundtrip"
+        );
     }
 
     #[test]
-    fn test_user_oauth_session_corrupt_key_fallback_and_invalid_token_type() {
-        // Corrupted private key string triggers graceful ephemeral fallback
+    fn test_user_oauth_session_corrupt_key_fails_and_invalid_token_type() {
+        // Corrupted private key string triggers structured FeedError::Auth requiring re-authentication
         let session_corrupt_key = UserOAuthSession {
             did: CompactString::new("did:plc:user_corrupt"),
             handle: CompactString::new("corrupt.bsky.social"),
@@ -2385,9 +2410,15 @@ mod tests {
         };
         let converted = session_corrupt_key.to_oauth_session();
         assert!(
-            converted.is_ok(),
-            "Corrupt private key string should generate fallback key"
+            converted.is_err(),
+            "Corrupt private key string must return FeedError::Auth"
         );
+        match converted {
+            Err(FeedError::Auth(msg)) => {
+                assert!(msg.contains("Persisted DPoP key is undecodable"));
+            }
+            other => panic!("Expected FeedError::Auth but got {other:?}"),
+        }
 
         // Invalid token_type (not DPoP) triggers structured error
         let session_invalid_type = UserOAuthSession {
@@ -2445,6 +2476,10 @@ mod tests {
         assert!(!store.is_empty());
         assert_eq!(store.get(did1).unwrap(), session1);
         assert_eq!(store.get(did2).unwrap(), session2);
+
+        // get_active filters out expired sessions even before periodic pruning
+        assert_eq!(store.get_active(did1, 1_700_000_500).unwrap(), session1);
+        assert!(store.get_active(did2, 1_700_000_500).is_none());
 
         // Prune expired at now = 1_700_000_500
         store.prune_expired(1_700_000_500);

@@ -184,33 +184,118 @@ fn test_adv_oauth_user_session_store_100_threads_concurrency_stress() {
 }
 
 #[tokio::test]
-async fn test_adv_feed_publish_with_user_oauth_session_mock() {
-    let key = DPoPKey::generate();
+async fn test_adv_feed_publish_with_user_oauth_session_live_dpop() {
+    use axum::extract::Json;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+
+    // Spin up an in-process mock PDS server that validates real DPoP proofs and Authorization headers
+    let recorded_dpop = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let recorded_auth = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    let dpop_clone1 = Arc::clone(&recorded_dpop);
+    let auth_clone1 = Arc::clone(&recorded_auth);
+    let dpop_clone2 = Arc::clone(&recorded_dpop);
+    let auth_clone2 = Arc::clone(&recorded_auth);
+
+    let app = Router::new()
+        .route(
+            "/xrpc/com.atproto.repo.uploadBlob",
+            post(move |headers: HeaderMap, _body: axum::body::Bytes| {
+                let dpop = headers.get("DPoP").map(|v| v.to_str().unwrap().to_string());
+                let auth = headers
+                    .get("Authorization")
+                    .map(|v| v.to_str().unwrap().to_string());
+                if let Some(d) = dpop {
+                    dpop_clone1.lock().push(d);
+                }
+                if let Some(a) = auth {
+                    auth_clone1.lock().push(a);
+                }
+                async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "blob": {
+                                "$type": "blob",
+                                "ref": { "$link": "bafkreimockblob12345" },
+                                "mimeType": "image/png",
+                                "size": 1024
+                            }
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/xrpc/com.atproto.repo.putRecord",
+            post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                let dpop = headers.get("DPoP").map(|v| v.to_str().unwrap().to_string());
+                let auth = headers
+                    .get("Authorization")
+                    .map(|v| v.to_str().unwrap().to_string());
+                if let Some(d) = dpop {
+                    dpop_clone2.lock().push(d);
+                }
+                if let Some(a) = auth {
+                    auth_clone2.lock().push(a);
+                }
+
+                assert_eq!(body["collection"], "app.bsky.feed.generator");
+                assert_eq!(body["rkey"], "adv-custom-feed");
+                assert_eq!(body["repo"], "did:plc:real_test_subject_999");
+                assert_eq!(body["record"]["displayName"], "Adversarial Test Feed");
+
+                async move {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "uri": "at://did:plc:real_test_subject_999/app.bsky.feed.generator/adv-custom-feed",
+                            "cid": "bafyreiputrecordcid99999"
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let pds_mock_url = format!("http://127.0.0.1:{}", addr.port());
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let dpop_key = DPoPKey::generate();
     let oauth = UserOAuthSession {
-        did: CompactString::new("did:plc:feed_creator_mock"),
-        handle: CompactString::new("creator.bsky.social"),
-        access_token: "mock_dpop_access_token".to_string(),
+        did: CompactString::new("did:plc:real_test_subject_999"),
+        handle: CompactString::new("testsubject.bsky.social"),
+        access_token: "live_dpop_access_token_xyz".to_string(),
         refresh_token: None,
         token_type: "DPoP".to_string(),
-        dpop_private_key: Some(key.to_bytes_b64()),
-        pds_endpoint: "https://bsky.social".to_string(),
-        token_endpoint: "https://bsky.social/oauth/token".to_string(),
+        dpop_private_key: Some(dpop_key.to_bytes_b64()),
+        pds_endpoint: pds_mock_url.clone(),
+        token_endpoint: format!("{pds_mock_url}/oauth/token"),
         expires_at_secs: 1_800_000_000,
     };
 
     let req = FeedPublishRequest {
-        display_name: "Test Custom Feed".to_string(),
-        rkey: "test-custom-feed".to_string(),
-        description: "Test description".to_string(),
+        display_name: "Adversarial Test Feed".to_string(),
+        rkey: "adv-custom-feed".to_string(),
+        description: "Testing authentic DPoP publication against mock PDS server".to_string(),
         app_password: None,
     };
 
     let resp = publish_feed_generator_record(
-        "did:plc:feed_creator_mock",
-        "mock_token",
+        "did:plc:real_test_subject_999",
+        "live_dpop_access_token_xyz",
         &req,
-        "did:web:feed.example.com",
-        None,
+        "did:web:live.feedgenerator.com",
+        Some(&pds_mock_url),
         Some(&oauth),
     )
     .await
@@ -219,8 +304,50 @@ async fn test_adv_feed_publish_with_user_oauth_session_mock() {
     assert_eq!(resp.status.as_str(), "ok");
     assert_eq!(
         resp.uri.as_str(),
-        "at://did:plc:feed_creator_mock/app.bsky.feed.generator/test-custom-feed"
+        "at://did:plc:real_test_subject_999/app.bsky.feed.generator/adv-custom-feed"
     );
+
+    // Verify observable OAuth & DPoP headers
+    let auths = recorded_auth.lock();
+    let dpops = recorded_dpop.lock();
+    assert_eq!(auths.len(), 2); // uploadBlob + putRecord
+    assert_eq!(dpops.len(), 2);
+    for a in auths.iter() {
+        assert_eq!(a, "DPoP live_dpop_access_token_xyz");
+    }
+
+    let ath = compute_access_token_hash("live_dpop_access_token_xyz");
+    let verifier = DPoPVerifier::new();
+
+    // Verify uploadBlob proof
+    let (claims0, jwk0) = verifier
+        .verify_proof(
+            &dpops[0],
+            "POST",
+            &format!("{pds_mock_url}/xrpc/com.atproto.repo.uploadBlob"),
+            None,
+            Some(ath.as_str()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(claims0.htm, "POST");
+    assert_eq!(claims0.ath.as_deref(), Some(ath.as_str()));
+    assert_eq!(jwk0.thumbprint(), dpop_key.jwk_thumbprint());
+
+    // Verify putRecord proof
+    let (claims1, jwk1) = verifier
+        .verify_proof(
+            &dpops[1],
+            "POST",
+            &format!("{pds_mock_url}/xrpc/com.atproto.repo.putRecord"),
+            None,
+            Some(ath.as_str()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(claims1.htm, "POST");
+    assert_eq!(claims1.ath.as_deref(), Some(ath.as_str()));
+    assert_eq!(jwk1.thumbprint(), dpop_key.jwk_thumbprint());
 }
 
 #[test]
