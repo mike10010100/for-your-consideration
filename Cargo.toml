@@ -21,7 +21,7 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # AT Protocol OAuth & Cryptography Library
-atproto-oauth = { path = "../atproto-oauth-rs" }
+atproto-oauth = { path = "../atproto-oauth-rs", package = "atproto-oauth-rs" }
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.6", optional = true }
