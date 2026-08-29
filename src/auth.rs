@@ -20,16 +20,16 @@ use base64::Engine;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
-pub use atproto_oauth::crypto::{
+pub use skyauth::crypto::{
     base64url_decode, base64url_encode, constant_time_eq, hmac_sha256, sha256_digest,
 };
-pub use atproto_oauth::dpop::{
+pub use skyauth::dpop::{
     compute_access_token_hash, DPoPKey, DPoPVerifier, DEFAULT_CLOCK_SKEW_LEEWAY,
 };
-pub use atproto_oauth::pkce::{derive_s256_challenge, verify_pkce, PkcePair};
-pub use atproto_oauth::session::OAuthSession;
-pub use atproto_oauth::ssrf::{is_blocked_hostname, is_restricted_ip, SsrfFilter};
-pub use atproto_oauth::store::{OAuthStore, DEFAULT_STATE_TTL, NUM_SHARDS};
+pub use skyauth::pkce::{derive_s256_challenge, verify_pkce, PkcePair};
+pub use skyauth::session::OAuthSession;
+pub use skyauth::ssrf::{is_blocked_hostname, is_restricted_ip, SsrfFilter};
+pub use skyauth::store::{OAuthStore, DEFAULT_STATE_TTL, NUM_SHARDS};
 
 use crate::error::{FeedError, Result};
 use crate::types::{FeedPublishRequest, FeedPublishResponse, OAuthCallbackResponse};
@@ -837,7 +837,7 @@ impl UserOAuthSession {
         self.expires_at_secs <= now_secs
     }
 
-    /// Converts this session into an [`atproto_oauth::session::OAuthSession`].
+    /// Converts this session into an [`skyauth::session::OAuthSession`].
     ///
     /// # Errors
     ///
@@ -873,7 +873,7 @@ impl UserOAuthSession {
         .map_err(|e| FeedError::Auth(format!("Failed to create OAuthSession: {e}")))
     }
 
-    /// Creates a [`UserOAuthSession`] from an [`atproto_oauth::session::OAuthSession`].
+    /// Creates a [`UserOAuthSession`] from an [`skyauth::session::OAuthSession`].
     #[must_use]
     pub fn from_oauth_session(session: &OAuthSession, handle: impl Into<CompactString>) -> Self {
         let now_secs = std::time::SystemTime::now()
@@ -2351,7 +2351,7 @@ mod tests {
             expires_at_secs: 1_800_000_000,
         };
 
-        // 1. Convert to atproto_oauth::session::OAuthSession
+        // 1. Convert to skyauth::session::OAuthSession
         let oauth_session = user_session.to_oauth_session().unwrap();
         assert_eq!(oauth_session.sub(), "did:plc:test_user_roundtrip");
         assert_eq!(oauth_session.access_token(), "test_access_token_xyz123");

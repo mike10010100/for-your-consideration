@@ -69,7 +69,7 @@ fn test_adv_oauth_session_bridge_and_proof_generation() {
         expires_at_secs: 1_800_000_000,
     };
 
-    // Convert to atproto_oauth::session::OAuthSession
+    // Convert to skyauth::session::OAuthSession
     let oauth_session = user_session.to_oauth_session().unwrap();
     assert_eq!(oauth_session.sub(), "did:plc:bridge_user");
     assert_eq!(oauth_session.access_token(), access_token);

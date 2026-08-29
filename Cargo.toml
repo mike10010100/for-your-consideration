@@ -20,8 +20,8 @@ jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-# AT Protocol OAuth & Cryptography Library
-atproto-oauth = { version = "0.1.0", package = "atproto-oauth-rs" }
+# AT Protocol OAuth & Cryptography Library (Formally Verified)
+skyauth = "0.1.0"
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.6", optional = true }
