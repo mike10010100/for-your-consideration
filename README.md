@@ -2,7 +2,7 @@
 ### High-Performance AT Protocol Custom Feed Generator for Bluesky
 *(An homage to the classic "For You" feed)*
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](CHANGELOG.md)
 [![Rust Safe](https://img.shields.io/badge/Rust-Safe_2021-brightgreen.svg)](#)
 [![Forbid Unsafe](https://img.shields.io/badge/%23!%5Bforbid(unsafe_code)%5D-enforced-blue.svg)](#)
 [![Tests Passing](https://img.shields.io/badge/Tests-503%20passed-success.svg)](#)

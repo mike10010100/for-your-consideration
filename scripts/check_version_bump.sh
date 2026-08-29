@@ -44,7 +44,7 @@ if [[ ! -f "Cargo.toml" ]]; then
     exit 1
 fi
 
-CURRENT_VERSION=$(grep -m1 '^version\s*=' Cargo.toml | sed -E 's/version\s*=\s*"([^"]+)".*/\1/')
+CURRENT_VERSION=$(grep -m1 '^[[:space:]]*version[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
 if [[ -z "${CURRENT_VERSION}" ]]; then
     echo -e "${RED}Error: Failed to parse current package version from Cargo.toml!${NC}"
     exit 1
@@ -53,7 +53,7 @@ fi
 # Extract base version from base branch
 BASE_VERSION=""
 if git cat-file -e "${BASE_REF}:Cargo.toml" 2>/dev/null; then
-    BASE_VERSION=$(git show "${BASE_REF}:Cargo.toml" | grep -m1 '^version\s*=' | sed -E 's/version\s*=\s*"([^"]+)".*/\1/')
+    BASE_VERSION=$(git show "${BASE_REF}:Cargo.toml" | grep -m1 '^[[:space:]]*version[[:space:]]*=' | awk -F'"' '{print $2}')
 fi
 
 if [[ -z "${BASE_VERSION}" ]]; then

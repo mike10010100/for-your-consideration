@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-08-29
+
+### Added
+- **`atproto-oauth-rs` Integration**: Integrated standalone, formally verified `atproto-oauth-rs` library replacing in-tree OAuth, PKCE, DPoP, and SSRF modules.
+- **64-Shard User Session Storage**: Preserved 64-shard partitioned user session management with clock-warp-safe background maintenance pruning.
+- **Adversarial OAuth Integration Test Suite**: Added dedicated integration tests validating multi-tenant DPoP signing, session rotation, and state store race conditions.
+
+---
+
 ## [0.2.0] - 2026-08-28
 
 ### Added
