@@ -18,11 +18,18 @@ use axum::http::HeaderMap;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use compact_str::CompactString;
-use p256::ecdsa::signature::Signer;
-use p256::ecdsa::{Signature, SigningKey};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
+pub use atproto_oauth::crypto::{
+    base64url_decode, base64url_encode, constant_time_eq, hmac_sha256, sha256_digest,
+};
+pub use atproto_oauth::dpop::{
+    compute_access_token_hash, DPoPKey, DPoPVerifier, DEFAULT_CLOCK_SKEW_LEEWAY,
+};
+pub use atproto_oauth::pkce::{derive_s256_challenge, verify_pkce, PkcePair};
+pub use atproto_oauth::session::OAuthSession;
+pub use atproto_oauth::ssrf::{is_blocked_hostname, is_restricted_ip, SsrfFilter};
+pub use atproto_oauth::store::{OAuthStore, DEFAULT_STATE_TTL, NUM_SHARDS};
 
 use crate::error::{FeedError, Result};
 use crate::types::{FeedPublishRequest, FeedPublishResponse, OAuthCallbackResponse};
@@ -104,100 +111,7 @@ pub const DEFAULT_SESSION_SECRET: &[u8; 32] = b"for-your-consideration-hmac-sec!
 /// Computes HMAC-SHA256 according to RFC 2104 in pure safe Rust.
 #[must_use]
 pub fn compute_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut k_block = [0u8; 64];
-    if key.len() > 64 {
-        let mut hasher = Sha256::new();
-        hasher.update(key);
-        let key_hash = hasher.finalize();
-        k_block[..32].copy_from_slice(&key_hash);
-    } else {
-        k_block[..key.len()].copy_from_slice(key);
-    }
-
-    let mut ipad = [0u8; 64];
-    let mut opad = [0u8; 64];
-    for i in 0..64 {
-        ipad[i] = k_block[i] ^ 0x36;
-        opad[i] = k_block[i] ^ 0x5c;
-    }
-
-    let mut inner_hasher = Sha256::new();
-    inner_hasher.update(ipad);
-    inner_hasher.update(message);
-    let inner_hash = inner_hasher.finalize();
-
-    let mut outer_hasher = Sha256::new();
-    outer_hasher.update(opad);
-    outer_hasher.update(inner_hash);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&outer_hasher.finalize());
-    out
-}
-
-/// Compares two byte slices in constant time (SEC-08).
-#[must_use]
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut result = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
-}
-
-/// Checks if an IP address falls into private, loopback, link-local, or reserved ranges (SEC-03).
-#[must_use]
-pub fn is_restricted_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || octets[0] == 0
-                || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
-                || (octets[0] == 169 && octets[1] == 254)
-                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
-                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
-                || (octets[0] >= 224)
-        }
-        std::net::IpAddr::V6(v6) => {
-            if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
-                return true;
-            }
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_restricted_ip(std::net::IpAddr::V4(v4));
-            }
-            if let Some(v4) = v6.to_ipv4() {
-                return is_restricted_ip(std::net::IpAddr::V4(v4));
-            }
-            let segs = v6.segments();
-            if segs[0] == 0
-                && segs[1] == 0
-                && segs[2] == 0
-                && segs[3] == 0
-                && segs[4] == 0
-                && segs[5] == 0xffff
-            {
-                let v4 = std::net::Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xff) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xff) as u8,
-                );
-                return is_restricted_ip(std::net::IpAddr::V4(v4));
-            }
-            (segs[0] & 0xfe00) == 0xfc00
-                || (segs[0] & 0xffc0) == 0xfe80
-                || (segs[0] == 0x0100 && segs[1] == 0)
-                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
-        }
-    }
+    hmac_sha256(key, message).unwrap_or([0u8; 32])
 }
 
 /// Helper function to parse URL host, port, and trimmed URL.
@@ -750,178 +664,26 @@ pub struct PkceChallengePair {
     pub method: &'static str,
 }
 
+impl From<PkcePair> for PkceChallengePair {
+    fn from(pair: PkcePair) -> Self {
+        Self {
+            verifier: pair.verifier,
+            challenge: pair.challenge,
+            method: "S256",
+        }
+    }
+}
+
 /// Generates a high-entropy cryptographic PKCE S256 `code_verifier` and derived `code_challenge`.
 #[must_use]
 pub fn generate_pkce_pair() -> PkceChallengePair {
-    let mut random_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut random_bytes);
-    let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
-    let hash = Sha256::digest(verifier.as_bytes());
-    let challenge = URL_SAFE_NO_PAD.encode(hash);
-    PkceChallengePair {
-        verifier,
-        challenge,
-        method: "S256",
-    }
+    PkcePair::generate().into()
 }
 
 /// Cryptographically verifies a PKCE `code_verifier` against a given `code_challenge` using SHA-256 S256 in constant time.
 #[must_use]
 pub fn verify_pkce_challenge(verifier: &str, challenge: &str) -> bool {
-    if verifier.len() < 43 || verifier.len() > 128 {
-        return false;
-    }
-    if !verifier
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'~')
-    {
-        return false;
-    }
-    let hash = Sha256::digest(verifier.as_bytes());
-    let expected_challenge = URL_SAFE_NO_PAD.encode(hash);
-    constant_time_eq(expected_challenge.as_bytes(), challenge.as_bytes())
-}
-
-/// Ephemeral ECDSA P-256 keypair for generating `DPoP` (RFC 9449) proof JWTs in AT Protocol OAuth.
-#[derive(Clone)]
-pub struct DPoPKey {
-    signing_key: SigningKey,
-}
-
-impl std::fmt::Debug for DPoPKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DPoPKey").finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for DPoPKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.signing_key.to_bytes() == other.signing_key.to_bytes()
-    }
-}
-
-impl Eq for DPoPKey {}
-
-impl DPoPKey {
-    /// Generates a new random ephemeral ECDSA P-256 keypair.
-    #[must_use]
-    pub fn generate() -> Self {
-        let signing_key = SigningKey::random(&mut rand::thread_rng());
-        Self { signing_key }
-    }
-
-    /// Serializes the private key as a base64url string.
-    #[must_use]
-    pub fn to_bytes_b64(&self) -> String {
-        URL_SAFE_NO_PAD.encode(self.signing_key.to_bytes())
-    }
-
-    /// Deserializes a private key from a base64url string.
-    pub fn from_bytes_b64(b64: &str) -> Result<Self> {
-        let bytes = URL_SAFE_NO_PAD
-            .decode(b64)
-            .or_else(|_| URL_SAFE.decode(b64))
-            .map_err(|e| {
-                FeedError::Auth(format!("Failed to decode DPoP private key base64: {e}"))
-            })?;
-        let signing_key = SigningKey::from_slice(&bytes)
-            .map_err(|e| FeedError::Auth(format!("Failed to parse DPoP signing key: {e}")))?;
-        Ok(Self { signing_key })
-    }
-
-    /// Returns the public key encoded as a JSON Web Key (JWK) according to RFC 7517.
-    #[must_use]
-    pub fn public_jwk(&self) -> serde_json::Value {
-        let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(false);
-        let x = point
-            .x()
-            .map_or_else(String::new, |b| URL_SAFE_NO_PAD.encode(b));
-        let y = point
-            .y()
-            .map_or_else(String::new, |b| URL_SAFE_NO_PAD.encode(b));
-        serde_json::json!({
-            "kty": "EC",
-            "crv": "P-256",
-            "x": x,
-            "y": y
-        })
-    }
-
-    /// Creates an RFC 9449 `DPoP` proof JWT for a given HTTP method (`htm`), URL (`htu`), optional `nonce`, and optional access token hash (`ath`).
-    pub fn create_proof(
-        &self,
-        htm: &str,
-        htu: &str,
-        nonce: Option<&str>,
-        ath: Option<&str>,
-    ) -> Result<String> {
-        let mut jti_bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut jti_bytes);
-        let jti = URL_SAFE_NO_PAD.encode(jti_bytes);
-
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let header_json = serde_json::json!({
-            "typ": "dpop+jwt",
-            "alg": "ES256",
-            "jwk": self.public_jwk()
-        });
-
-        let mut payload_map = serde_json::Map::new();
-        payload_map.insert("jti".to_string(), serde_json::Value::String(jti));
-        payload_map.insert(
-            "htm".to_string(),
-            serde_json::Value::String(htm.to_uppercase()),
-        );
-        payload_map.insert(
-            "htu".to_string(),
-            serde_json::Value::String(htu.to_string()),
-        );
-        payload_map.insert(
-            "iat".to_string(),
-            serde_json::Value::Number(now_secs.into()),
-        );
-
-        if let Some(n) = nonce {
-            if !n.is_empty() {
-                payload_map.insert(
-                    "nonce".to_string(),
-                    serde_json::Value::String(n.to_string()),
-                );
-            }
-        }
-        if let Some(a) = ath {
-            if !a.is_empty() {
-                payload_map.insert("ath".to_string(), serde_json::Value::String(a.to_string()));
-            }
-        }
-
-        let header_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_string(&header_json)
-                .map_err(|e| FeedError::Auth(format!("Failed to serialize DPoP header: {e}")))?,
-        );
-        let payload_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_string(&serde_json::Value::Object(payload_map))
-                .map_err(|e| FeedError::Auth(format!("Failed to serialize DPoP payload: {e}")))?,
-        );
-        let signing_input = format!("{header_b64}.{payload_b64}");
-
-        let sig: Signature = self.signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
-
-        Ok(format!("{signing_input}.{sig_b64}"))
-    }
-}
-
-/// Computes the RFC 9449 `ath` (access token hash) claim value for `DPoP` proofs.
-#[must_use]
-pub fn compute_access_token_hash(access_token: &str) -> String {
-    let hash = Sha256::digest(access_token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash)
+    verify_pkce(verifier, challenge).is_ok()
 }
 
 /// In-memory state tracked during an ongoing OAuth PKCE authorization flow.
@@ -1068,6 +830,80 @@ pub struct UserOAuthSession {
     pub expires_at_secs: u64,
 }
 
+impl UserOAuthSession {
+    /// Checks whether this session is expired at the given timestamp.
+    #[must_use]
+    pub const fn is_expired(&self, now_secs: u64) -> bool {
+        self.expires_at_secs <= now_secs
+    }
+
+    /// Converts this session into an [`atproto_oauth::session::OAuthSession`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FeedError::Auth`] if the underlying [`OAuthSession`] cannot be created.
+    pub fn to_oauth_session(&self) -> Result<OAuthSession> {
+        let key = self
+            .dpop_private_key
+            .as_deref()
+            .and_then(|b64| DPoPKey::from_bytes_b64(b64).ok())
+            .unwrap_or_else(DPoPKey::generate);
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let remaining_secs = self.expires_at_secs.saturating_sub(now_secs);
+
+        OAuthSession::new(
+            self.did.as_str(),
+            &self.access_token,
+            self.refresh_token.clone(),
+            &self.token_type,
+            Some("atproto transition:generic".to_string()),
+            Some(remaining_secs),
+            key,
+            Some(self.pds_endpoint.clone()),
+            None,
+            Some(self.token_endpoint.clone()),
+        )
+        .map_err(|e| FeedError::Auth(format!("Failed to create OAuthSession: {e}")))
+    }
+
+    /// Creates a [`UserOAuthSession`] from an [`atproto_oauth::session::OAuthSession`].
+    #[must_use]
+    pub fn from_oauth_session(session: &OAuthSession, handle: impl Into<CompactString>) -> Self {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let expires_at_secs = session.expires_at().map_or(now_secs + 300, |exp| {
+            exp.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
+
+        Self {
+            did: CompactString::new(session.sub()),
+            handle: handle.into(),
+            access_token: session.access_token().to_string(),
+            refresh_token: session.refresh_token().map(str::to_string),
+            token_type: session.token_type().to_string(),
+            dpop_private_key: Some(session.dpop_key().to_bytes_b64()),
+            pds_endpoint: session
+                .pds_endpoint()
+                .unwrap_or("https://bsky.social")
+                .to_string(),
+            token_endpoint: session
+                .token_endpoint()
+                .unwrap_or("https://bsky.social/oauth/token")
+                .to_string(),
+            expires_at_secs,
+        }
+    }
+}
+
 /// 64-shard partitioned in-memory store for active authenticated user OAuth sessions.
 pub struct OAuthUserSessionStore {
     shards: [parking_lot::RwLock<AHashMap<CompactString, UserOAuthSession>>; OAUTH_STATE_SHARDS],
@@ -1104,6 +940,14 @@ impl OAuthUserSessionStore {
     pub fn remove(&self, did: &str) -> Option<UserOAuthSession> {
         let idx = Self::shard_idx(did);
         self.shards[idx].write().remove(did)
+    }
+
+    /// Prunes expired user sessions across all 64 shards using clock-warp-safe time calculations.
+    pub fn prune_expired(&self, now_secs: u64) {
+        for shard in &self.shards {
+            let mut lock = shard.write();
+            lock.retain(|_, session| session.expires_at_secs > now_secs);
+        }
     }
 
     /// Returns the total number of active user OAuth sessions.
@@ -2460,8 +2304,7 @@ mod tests {
     fn test_pkce_unreserved_charset_validation() {
         // Valid 43-char unreserved PKCE verifier
         let valid_verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
-        let hash = Sha256::digest(valid_verifier.as_bytes());
-        let challenge = URL_SAFE_NO_PAD.encode(hash);
+        let challenge = derive_s256_challenge(valid_verifier);
         assert!(verify_pkce_challenge(valid_verifier, &challenge));
 
         // Invalid characters (spaces, symbols)
@@ -2470,5 +2313,149 @@ mod tests {
 
         let invalid_symbols = "abcdefghijklmnopqrstuvwxyz!@#$%^&*()_+-=[]";
         assert!(!verify_pkce_challenge(invalid_symbols, &challenge));
+    }
+
+    #[test]
+    fn test_user_oauth_session_to_and_from_oauth_session_roundtrip() {
+        let key = DPoPKey::generate();
+        let key_b64 = key.to_bytes_b64();
+        let key_thumbprint = key.jwk_thumbprint();
+
+        let user_session = UserOAuthSession {
+            did: CompactString::new("did:plc:test_user_roundtrip"),
+            handle: CompactString::new("test_user.bsky.social"),
+            access_token: "test_access_token_xyz123".to_string(),
+            refresh_token: Some("test_refresh_token_abc789".to_string()),
+            token_type: "DPoP".to_string(),
+            dpop_private_key: Some(key_b64),
+            pds_endpoint: "https://pds.example.com".to_string(),
+            token_endpoint: "https://pds.example.com/oauth/token".to_string(),
+            expires_at_secs: 1_800_000_000,
+        };
+
+        // 1. Convert to atproto_oauth::session::OAuthSession
+        let oauth_session = user_session.to_oauth_session().unwrap();
+        assert_eq!(oauth_session.sub(), "did:plc:test_user_roundtrip");
+        assert_eq!(oauth_session.access_token(), "test_access_token_xyz123");
+        assert_eq!(
+            oauth_session.refresh_token(),
+            Some("test_refresh_token_abc789")
+        );
+        assert_eq!(oauth_session.token_type(), "DPoP");
+        assert_eq!(oauth_session.dpop_key().jwk_thumbprint(), key_thumbprint);
+        assert_eq!(
+            oauth_session.pds_endpoint(),
+            Some("https://pds.example.com")
+        );
+        assert_eq!(
+            oauth_session.token_endpoint(),
+            Some("https://pds.example.com/oauth/token")
+        );
+
+        // 2. Convert back to UserOAuthSession
+        let restored =
+            UserOAuthSession::from_oauth_session(&oauth_session, user_session.handle.clone());
+        assert_eq!(restored.did, user_session.did);
+        assert_eq!(restored.handle, user_session.handle);
+        assert_eq!(restored.access_token, user_session.access_token);
+        assert_eq!(restored.refresh_token, user_session.refresh_token);
+        assert_eq!(restored.token_type, user_session.token_type);
+        assert_eq!(restored.pds_endpoint, user_session.pds_endpoint);
+        assert_eq!(restored.token_endpoint, user_session.token_endpoint);
+
+        // 3. Verify DPoP key roundtripped accurately
+        let restored_key =
+            DPoPKey::from_bytes_b64(restored.dpop_private_key.as_ref().unwrap()).unwrap();
+        assert_eq!(restored_key.jwk_thumbprint(), key_thumbprint);
+    }
+
+    #[test]
+    fn test_user_oauth_session_corrupt_key_fallback_and_invalid_token_type() {
+        // Corrupted private key string triggers graceful ephemeral fallback
+        let session_corrupt_key = UserOAuthSession {
+            did: CompactString::new("did:plc:user_corrupt"),
+            handle: CompactString::new("corrupt.bsky.social"),
+            access_token: "token123".to_string(),
+            refresh_token: None,
+            token_type: "DPoP".to_string(),
+            dpop_private_key: Some("corrupted!@#$not_base64url".to_string()),
+            pds_endpoint: "https://bsky.social".to_string(),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            expires_at_secs: 1_800_000_000,
+        };
+        let converted = session_corrupt_key.to_oauth_session();
+        assert!(
+            converted.is_ok(),
+            "Corrupt private key string should generate fallback key"
+        );
+
+        // Invalid token_type (not DPoP) triggers structured error
+        let session_invalid_type = UserOAuthSession {
+            did: CompactString::new("did:plc:user_invalid_type"),
+            handle: CompactString::new("invalid.bsky.social"),
+            access_token: "token123".to_string(),
+            refresh_token: None,
+            token_type: "Bearer".to_string(),
+            dpop_private_key: None,
+            pds_endpoint: "https://bsky.social".to_string(),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            expires_at_secs: 1_800_000_000,
+        };
+        let err = session_invalid_type.to_oauth_session();
+        assert!(err.is_err(), "Non-DPoP token type must return error");
+    }
+
+    #[test]
+    fn test_oauth_user_session_store_lifecycle_and_pruning() {
+        let store = OAuthUserSessionStore::new();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+
+        let did1 = "did:plc:user_active_1";
+        let did2 = "did:plc:user_expired_2";
+
+        let session1 = UserOAuthSession {
+            did: CompactString::new(did1),
+            handle: CompactString::new("active1.bsky.social"),
+            access_token: "access_1".to_string(),
+            refresh_token: Some("refresh_1".to_string()),
+            token_type: "DPoP".to_string(),
+            dpop_private_key: None,
+            pds_endpoint: "https://bsky.social".to_string(),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            expires_at_secs: 1_700_001_000, // Expires in future
+        };
+
+        let session2 = UserOAuthSession {
+            did: CompactString::new(did2),
+            handle: CompactString::new("expired2.bsky.social"),
+            access_token: "access_2".to_string(),
+            refresh_token: None,
+            token_type: "DPoP".to_string(),
+            dpop_private_key: None,
+            pds_endpoint: "https://bsky.social".to_string(),
+            token_endpoint: "https://bsky.social/oauth/token".to_string(),
+            expires_at_secs: 1_700_000_100, // Already expired at now = 1_700_000_500
+        };
+
+        store.insert(did1, session1.clone());
+        store.insert(did2, session2.clone());
+
+        assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
+        assert_eq!(store.get(did1).unwrap(), session1);
+        assert_eq!(store.get(did2).unwrap(), session2);
+
+        // Prune expired at now = 1_700_000_500
+        store.prune_expired(1_700_000_500);
+        assert_eq!(store.len(), 1);
+        assert!(store.get(did1).is_some());
+        assert!(store.get(did2).is_none());
+
+        // Remove active session on sign out
+        let removed = store.remove(did1);
+        assert_eq!(removed.unwrap(), session1);
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
     }
 }

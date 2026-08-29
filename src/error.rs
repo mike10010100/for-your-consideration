@@ -46,6 +46,26 @@ pub enum FeedError {
     /// Standard I/O failure
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// AT Protocol OAuth error
+    #[error("OAuth error: {0}")]
+    OAuth(#[from] atproto_oauth::error::AtprotoOAuthError),
+
+    /// RFC 9449 `DPoP` proof error
+    #[error("DPoP error: {0}")]
+    DPoP(#[from] atproto_oauth::error::DPoPError),
+
+    /// RFC 7636 `PKCE` verification error
+    #[error("PKCE error: {0}")]
+    Pkce(#[from] atproto_oauth::error::PkceError),
+
+    /// Cryptographic operation error
+    #[error("Crypto error: {0}")]
+    Crypto(#[from] atproto_oauth::error::CryptoError),
+
+    /// Framework integration error
+    #[error("Integration error: {0}")]
+    Integration(#[from] atproto_oauth::error::IntegrationError),
 }
 
 /// Convenience alias for operations returning `FeedError`.
