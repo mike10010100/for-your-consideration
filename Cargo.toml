@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -21,7 +21,7 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # AT Protocol OAuth & Cryptography Library (Formally Verified)
-skyauth = "0.1.0"
+skyauth = "0.2"
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.6", optional = true }
