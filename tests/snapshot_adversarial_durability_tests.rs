@@ -845,3 +845,93 @@ fn test_concurrent_mutations_and_snapshot_export_stress() {
 
     let _ = fs::remove_file(&snapshot_path);
 }
+
+// ===========================================================================
+// Streaming Load: Multi-Chunk CRC Verification & Bounded-Memory Parse
+// ===========================================================================
+
+#[test]
+fn test_streaming_load_roundtrip_multi_chunk_payload() {
+    // Build a snapshot whose payload comfortably exceeds the 1 MiB streaming chunk size
+    // (STREAM_CHUNK_SIZE) so the CRC pass and parse pass both traverse multiple chunks.
+    let snap_path = unique_temp_path("streaming_multi_chunk");
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+
+    // ~30,000 posts x 8 edges = 240,000 forward/reverse edges (~4 MB payload across all
+    // sections), plus a matching interned string per post to exercise Section 1 streaming.
+    const POSTS: u32 = 30_000;
+    const EDGES_PER_POST: u32 = 8;
+    for p in 1..=POSTS {
+        let pid = interner.intern(&format!(
+            "at://did:plc:author/app.bsky.feed.post/stream_{p}"
+        ));
+        let author = interner.intern(&format!("did:plc:stream_author_{}", p % 500));
+        graph.record_post_meta(pid, author, None, None, BLUESKY_EPOCH_SECS + 1_000);
+        for e in 0..EDGES_PER_POST {
+            let uid = interner.intern(&format!("did:plc:stream_liker_{}_{}", p, e));
+            graph.record_interaction(uid, pid, SignalType::Like, BLUESKY_EPOCH_SECS + 2_000);
+        }
+    }
+
+    let header = save_snapshot(&snap_path, &interner, &graph, 77_000_000)
+        .expect("Multi-chunk snapshot save failed");
+    assert!(header.total_forward_edges >= 240_000);
+
+    // Load must succeed with identical hydration despite never materializing the payload.
+    let load_interner = StringInterner::new();
+    let load_graph = GraphStore::new();
+    let loaded = load_snapshot(&snap_path, &load_interner, &load_graph)
+        .expect("Streaming load of multi-chunk snapshot failed")
+        .expect("Snapshot must exist");
+    assert_eq!(loaded.header.num_strings, header.num_strings);
+    assert_eq!(loaded.header.num_users, header.num_users);
+    assert_eq!(
+        loaded.header.total_forward_edges,
+        header.total_forward_edges
+    );
+
+    // Spot-check graph integrity after streaming hydration.
+    let stats_orig = graph.get_stats();
+    let stats_load = load_graph.get_stats();
+    assert_eq!(stats_orig, stats_load);
+
+    let _ = fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_streaming_load_rejects_truncated_payload_mid_section() {
+    // Save a valid multi-chunk snapshot, then truncate the file mid-payload: the streaming
+    // CRC pass must fail with a Snapshot error (not a raw I/O error).
+    let snap_path = unique_temp_path("streaming_truncated");
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    for p in 1..=5_000u32 {
+        let pid = interner.intern(&format!("at://did:plc:a/app.bsky.feed.post/tr_{p}"));
+        graph.record_interaction(1, pid, SignalType::Like, BLUESKY_EPOCH_SECS + 100);
+    }
+    save_snapshot(&snap_path, &interner, &graph, 42).expect("Save failed");
+
+    let file_len = fs::metadata(&snap_path).expect("metadata").len();
+    assert!(
+        file_len > HEADER_SIZE as u64 + 1024,
+        "snapshot too small for truncation test"
+    );
+
+    // Truncate to 3/4 of the file (mid-payload).
+    let truncated_len = HEADER_SIZE as u64 + (file_len - HEADER_SIZE as u64) * 3 / 4;
+    let raw = fs::read(&snap_path).expect("read snapshot");
+    fs::write(&snap_path, &raw[..truncated_len as usize]).expect("truncate snapshot");
+
+    let load_interner = StringInterner::new();
+    let load_graph = GraphStore::new();
+    let result = load_snapshot(&snap_path, &load_interner, &load_graph);
+    let _ = fs::remove_file(&snap_path);
+
+    let err = result.expect_err("Truncated snapshot must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Snapshot error") || msg.contains("Unexpected EOF"),
+        "Truncated snapshot error must be a Snapshot/EOF error, got: {msg}"
+    );
+}

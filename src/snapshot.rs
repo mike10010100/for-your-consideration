@@ -17,6 +17,18 @@
 //! - **Section 5: Follow Relationships**: `(follower_id, [followed_id])`.
 //! - **Section 6: Post Metadata**: `(post_id, author_id, root_id, parent_id, created_at)`.
 //! - **Section 7: Active Recent Posts**: `(post_id, last_activity_timestamp)`.
+//! - **Section 8 (v2+): User Preferences**: fixed-width per-user dial records.
+//!
+//! ## Streaming Load Pipeline
+//!
+//! Loading is fully streaming (two bounded passes over the file):
+//! 1. **Integrity pass**: the payload region is streamed through a CRC32 hasher using a
+//!    fixed 1 MiB chunk buffer — the payload is never materialized in RAM, so boot-time
+//!    memory is independent of snapshot size (the save path streams shard-by-shard the
+//!    same way).
+//! 2. **Parse pass**: sections are deserialized directly from the file into in-memory
+//!    stores via [`StreamReader`]. Truncated payloads surface as `FeedError::Snapshot`
+//!    with an explicit EOF marker.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -209,79 +221,84 @@ impl SnapshotStatusTracker {
     }
 }
 
-/// Zero-copy byte slice reader for ultra-fast binary deserialization.
-struct ByteSliceReader<'a> {
-    data: &'a [u8],
-    offset: usize,
+/// Size of the bounded chunk buffer used to stream the payload during CRC verification
+/// and deserialization (1 MiB). Peak load memory is bounded by this buffer instead of
+/// scaling with the snapshot file size.
+const STREAM_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Streaming reader over a [`BufReader`] mirroring the [`ByteSliceReader`] section API
+/// without materializing the payload in memory.
+struct StreamReader<R: Read> {
+    inner: R,
+    /// One-byte pushback buffer used by [`StreamReader::has_more`].
+    pending_byte: Option<u8>,
 }
 
-impl<'a> ByteSliceReader<'a> {
-    const fn new(data: &'a [u8]) -> Self {
-        Self { data, offset: 0 }
+impl<R: Read> StreamReader<R> {
+    const fn new(inner: R) -> Self {
+        Self {
+            inner,
+            pending_byte: None,
+        }
+    }
+
+    /// Reads exactly `buf.len()` bytes into `buf`, draining the one-byte pushback
+    /// buffer first so `has_more` probing never misaligns subsequent reads.
+    ///
+    /// Truncated payloads surface as [`FeedError::Snapshot`] (rather than raw I/O errors)
+    /// with an explicit "Unexpected EOF" marker so callers can distinguish corruption
+    /// from environmental I/O failure.
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let filled = self.pending_byte.take().map_or(0, |b| {
+            buf[0] = b;
+            1
+        });
+        if filled < buf.len() {
+            self.inner
+                .read_exact(&mut buf[filled..])
+                .map_err(|e| FeedError::Snapshot(format!("Unexpected EOF: {e}")))?;
+        }
+        Ok(())
     }
 
     fn read_u8(&mut self) -> Result<u8> {
-        if self.offset >= self.data.len() {
-            return Err(FeedError::Snapshot("Unexpected EOF reading u8".to_string()));
-        }
-        let b = self.data[self.offset];
-        self.offset += 1;
-        Ok(b)
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
     }
 
     fn read_u32(&mut self) -> Result<u32> {
-        if self.offset.saturating_add(4) > self.data.len() {
-            return Err(FeedError::Snapshot(
-                "Unexpected EOF reading u32".to_string(),
-            ));
-        }
-        let b: [u8; 4] = [
-            self.data[self.offset],
-            self.data[self.offset + 1],
-            self.data[self.offset + 2],
-            self.data[self.offset + 3],
-        ];
-        self.offset += 4;
-        Ok(u32::from_le_bytes(b))
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
     }
 
     fn read_u64(&mut self) -> Result<u64> {
-        if self.offset.saturating_add(8) > self.data.len() {
-            return Err(FeedError::Snapshot(
-                "Unexpected EOF reading u64".to_string(),
-            ));
-        }
-        let b: [u8; 8] = [
-            self.data[self.offset],
-            self.data[self.offset + 1],
-            self.data[self.offset + 2],
-            self.data[self.offset + 3],
-            self.data[self.offset + 4],
-            self.data[self.offset + 5],
-            self.data[self.offset + 6],
-            self.data[self.offset + 7],
-        ];
-        self.offset += 8;
-        Ok(u64::from_le_bytes(b))
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
     }
 
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end = self.offset.saturating_add(len);
-        if end > self.data.len() {
-            return Err(FeedError::Snapshot(
-                "Unexpected EOF reading byte slice".to_string(),
-            ));
-        }
-        let slice = &self.data[self.offset..end];
-        self.offset = end;
-        Ok(slice)
+    fn read_f32(&mut self) -> Result<f32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    fn read_exact_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; len];
+        self.read_exact(&mut buf)?;
+        Ok(buf)
     }
 
     fn read_edges(&mut self, count: usize) -> Result<Vec<CompactEdge>> {
         let byte_len = count
             .checked_mul(8)
             .ok_or_else(|| FeedError::Snapshot("Edge count overflow".to_string()))?;
-        let bytes = self.read_bytes(byte_len)?;
+        let bytes = self.read_exact_vec(byte_len)?;
         let mut edges = Vec::with_capacity(count);
         for chunk in bytes.as_chunks::<8>().0 {
             let target = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -295,7 +312,7 @@ impl<'a> ByteSliceReader<'a> {
         let byte_len = count
             .checked_mul(4)
             .ok_or_else(|| FeedError::Snapshot("u32 count overflow".to_string()))?;
-        let bytes = self.read_bytes(byte_len)?;
+        let bytes = self.read_exact_vec(byte_len)?;
         let mut list = Vec::with_capacity(count);
         for chunk in bytes.as_chunks::<4>().0 {
             let val = u32::from_le_bytes(*chunk);
@@ -304,9 +321,48 @@ impl<'a> ByteSliceReader<'a> {
         Ok(list)
     }
 
-    const fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.offset)
+    /// Returns `true` if at least one more byte is available in the underlying stream.
+    fn has_more(&mut self) -> Result<bool> {
+        if self.pending_byte.is_some() {
+            return Ok(true);
+        }
+        let mut probe = [0u8; 1];
+        let read = self
+            .inner
+            .read(&mut probe)
+            .map_err(|e| FeedError::Snapshot(format!("Unexpected EOF: {e}")))?;
+        debug_assert!(read <= 1);
+        if read == 1 {
+            self.pending_byte = Some(probe[0]);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
+}
+
+/// Streams the payload region (`HEADER_SIZE..file_len`) through a CRC32 hasher using a
+/// bounded 1 MiB chunk buffer and returns the computed checksum.
+///
+/// Memory usage is constant regardless of snapshot size; the payload is never fully
+/// materialized in RAM.
+fn compute_payload_crc_streaming(reader: &mut BufReader<File>, file_len: u64) -> Result<u32> {
+    reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+    let payload_len = file_len.saturating_sub(HEADER_SIZE as u64);
+    let mut hasher = Hasher::new();
+    let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
+    let mut remaining = payload_len;
+
+    while remaining > 0 {
+        let take = remaining.min(STREAM_CHUNK_SIZE as u64) as usize;
+        reader.read_exact(&mut chunk[..take]).map_err(|e| {
+            FeedError::Snapshot(format!("Unexpected EOF verifying payload CRC: {e}"))
+        })?;
+        hasher.update(&chunk[..take]);
+        remaining -= take as u64;
+    }
+
+    Ok(hasher.finalize())
 }
 
 /// Atomically saves the interner, graph, and Jetstream cursor to disk with empty user preferences.
@@ -587,101 +643,98 @@ pub fn load_snapshot_with_preferences(
         )));
     }
 
-    // 2. Read entire payload and verify CRC32
-    let payload_len = (metadata.len() as usize).saturating_sub(HEADER_SIZE);
-    let mut payload = vec![0u8; payload_len];
-    reader.read_exact(&mut payload)?;
-
-    let mut p_hasher = Hasher::new();
-    p_hasher.update(&payload);
-    let actual_payload_crc = p_hasher.finalize();
+    // 2. Verify payload CRC32 by streaming the payload through a bounded chunk buffer.
+    //    The payload is never fully materialized in RAM: peak load memory is bounded by
+    //    STREAM_CHUNK_SIZE (1 MiB) plus the deserialized in-memory structures.
+    let file_len = metadata.len();
+    let actual_payload_crc = compute_payload_crc_streaming(&mut reader, file_len)?;
     if actual_payload_crc != expected_payload_crc {
         return Err(FeedError::Snapshot(format!(
             "Payload CRC32 mismatch: expected {expected_payload_crc:#010x}, calculated {actual_payload_crc:#010x}"
         )));
     }
 
-    // 3. Deserialize Payload from byte slice
-    let mut slice_reader = ByteSliceReader::new(&payload);
+    // 3. Deserialize Payload section-by-section directly from the file (second streaming pass).
+    reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+    let mut stream = StreamReader::new(&mut reader);
 
     // Section 1: Strings
-    let string_count = slice_reader.read_u32()? as usize;
-    let mut interned_strings = Vec::with_capacity(string_count.min(slice_reader.remaining() / 4));
+    let string_count = stream.read_u32()? as usize;
+    let mut interned_strings = Vec::with_capacity(string_count);
 
     for _ in 0..string_count {
-        let len = slice_reader.read_u32()? as usize;
-        let str_bytes = slice_reader.read_bytes(len)?;
-        let s = std::str::from_utf8(str_bytes).map_err(|e| {
+        let len = stream.read_u32()? as usize;
+        let str_bytes = stream.read_exact_vec(len)?;
+        let s = String::from_utf8(str_bytes).map_err(|e| {
             FeedError::Snapshot(format!("Invalid UTF-8 in string interner snapshot: {e}"))
         })?;
         interned_strings.push(CompactString::new(s));
     }
 
     // Section 2: User Interactions
-    let user_count = slice_reader.read_u32()? as usize;
-    let mut user_interactions = Vec::with_capacity(user_count.min(slice_reader.remaining() / 8));
+    let user_count = stream.read_u32()? as usize;
+    let mut user_interactions = Vec::with_capacity(user_count);
 
     for _ in 0..user_count {
-        let uid = slice_reader.read_u32()?;
-        let edge_count = slice_reader.read_u32()? as usize;
-        let edges = slice_reader.read_edges(edge_count)?;
+        let uid = stream.read_u32()?;
+        let edge_count = stream.read_u32()? as usize;
+        let edges = stream.read_edges(edge_count)?;
         user_interactions.push((uid, edges));
     }
 
     // Section 3: Post Interactions
-    let post_count = slice_reader.read_u32()? as usize;
-    let mut post_interactions = Vec::with_capacity(post_count.min(slice_reader.remaining() / 8));
+    let post_count = stream.read_u32()? as usize;
+    let mut post_interactions = Vec::with_capacity(post_count);
 
     for _ in 0..post_count {
-        let pid = slice_reader.read_u32()?;
-        let edge_count = slice_reader.read_u32()? as usize;
-        let edges = slice_reader.read_edges(edge_count)?;
+        let pid = stream.read_u32()?;
+        let edge_count = stream.read_u32()? as usize;
+        let edges = stream.read_edges(edge_count)?;
         post_interactions.push((pid, edges));
     }
 
     // Section 4: Roaring Bitmaps
-    let bm_user_count = slice_reader.read_u32()? as usize;
-    let mut user_likes_bitmaps =
-        Vec::with_capacity(bm_user_count.min(slice_reader.remaining() / 8));
+    let bm_user_count = stream.read_u32()? as usize;
+    let mut user_likes_bitmaps = Vec::with_capacity(bm_user_count);
 
     for _ in 0..bm_user_count {
-        let uid = slice_reader.read_u32()?;
-        let len = slice_reader.read_u32()? as usize;
-        let bm_bytes = slice_reader.read_bytes(len)?;
-        let bm = RoaringBitmap::deserialize_from(bm_bytes).map_err(|e| {
+        let uid = stream.read_u32()?;
+        let len = stream.read_u32()? as usize;
+        let bm_bytes = stream.read_exact_vec(len)?;
+        let bm = RoaringBitmap::deserialize_from(&bm_bytes[..]).map_err(|e| {
             FeedError::Snapshot(format!("RoaringBitmap deserialization failure: {e}"))
         })?;
         user_likes_bitmaps.push((uid, bm));
     }
 
     // Section 5: Follows
-    let follower_count = slice_reader.read_u32()? as usize;
-    let mut follows = Vec::with_capacity(follower_count.min(slice_reader.remaining() / 8));
+    let follower_count = stream.read_u32()? as usize;
+    let mut follows = Vec::with_capacity(follower_count);
 
     for _ in 0..follower_count {
-        let fid = slice_reader.read_u32()?;
-        let count = slice_reader.read_u32()? as usize;
-        let list = slice_reader.read_u32_vec(count)?;
+        let fid = stream.read_u32()?;
+        let count = stream.read_u32()? as usize;
+        let list = stream.read_u32_vec(count)?;
         follows.push((fid, list));
     }
 
     // Section 6: Post Metadata
-    let meta_count = slice_reader.read_u32()? as usize;
-    let mut post_metadata = Vec::with_capacity(meta_count.min(slice_reader.remaining() / 16));
+    let meta_count = stream.read_u32()? as usize;
+    let mut post_metadata = Vec::with_capacity(meta_count);
 
     for _ in 0..meta_count {
-        let pid = slice_reader.read_u32()?;
-        let author_id = slice_reader.read_u32()?;
+        let pid = stream.read_u32()?;
+        let author_id = stream.read_u32()?;
 
-        let has_root = slice_reader.read_u8()? != 0;
-        let root_val = slice_reader.read_u32()?;
+        let has_root = stream.read_u8()? != 0;
+        let root_val = stream.read_u32()?;
         let root_id = if has_root { Some(root_val) } else { None };
 
-        let has_parent = slice_reader.read_u8()? != 0;
-        let parent_val = slice_reader.read_u32()?;
+        let has_parent = stream.read_u8()? != 0;
+        let parent_val = stream.read_u32()?;
         let parent_id = if has_parent { Some(parent_val) } else { None };
 
-        let created_at = slice_reader.read_u64()?;
+        let created_at = stream.read_u64()?;
 
         post_metadata.push((
             pid,
@@ -695,74 +748,43 @@ pub fn load_snapshot_with_preferences(
     }
 
     // Section 7: Active Recent Posts
-    let recent_count = slice_reader.read_u32()? as usize;
-    let mut active_recent_posts =
-        Vec::with_capacity(recent_count.min(slice_reader.remaining() / 12));
+    let recent_count = stream.read_u32()? as usize;
+    let mut active_recent_posts = Vec::with_capacity(recent_count);
 
     for _ in 0..recent_count {
-        let pid = slice_reader.read_u32()?;
-        let ts = slice_reader.read_u64()?;
+        let pid = stream.read_u32()?;
+        let ts = stream.read_u64()?;
         active_recent_posts.push((pid, ts));
     }
 
     // Section 8: User Preferences (Version 2 / Version 3 / Version 4)
     let num_preferences = if (SNAPSHOT_FORMAT_VERSION_V2..=SNAPSHOT_FORMAT_VERSION)
         .contains(&version)
-        && slice_reader.offset < payload.len()
+        && stream.has_more()?
     {
-        let pref_count = slice_reader.read_u32()? as usize;
-        let mut user_preferences =
-            Vec::with_capacity(pref_count.min(slice_reader.remaining() / 32));
+        let pref_count = stream.read_u32()? as usize;
+        let mut user_preferences = Vec::with_capacity(pref_count);
 
         for _ in 0..pref_count {
-            let uid = slice_reader.read_u32()?;
-            let freshness_bytes = slice_reader.read_bytes(4)?;
-            let freshness = f32::from_le_bytes([
-                freshness_bytes[0],
-                freshness_bytes[1],
-                freshness_bytes[2],
-                freshness_bytes[3],
-            ]);
-            let serendipity_bytes = slice_reader.read_bytes(4)?;
-            let serendipity = f32::from_le_bytes([
-                serendipity_bytes[0],
-                serendipity_bytes[1],
-                serendipity_bytes[2],
-                serendipity_bytes[3],
-            ]);
-            let art_bytes = slice_reader.read_bytes(4)?;
-            let art = f32::from_le_bytes([art_bytes[0], art_bytes[1], art_bytes[2], art_bytes[3]]);
-            let tech_bytes = slice_reader.read_bytes(4)?;
-            let tech =
-                f32::from_le_bytes([tech_bytes[0], tech_bytes[1], tech_bytes[2], tech_bytes[3]]);
-            let science_bytes = slice_reader.read_bytes(4)?;
-            let science = f32::from_le_bytes([
-                science_bytes[0],
-                science_bytes[1],
-                science_bytes[2],
-                science_bytes[3],
-            ]);
-            let news_bytes = slice_reader.read_bytes(4)?;
-            let news =
-                f32::from_le_bytes([news_bytes[0], news_bytes[1], news_bytes[2], news_bytes[3]]);
-            let culture_bytes = slice_reader.read_bytes(4)?;
-            let culture = f32::from_le_bytes([
-                culture_bytes[0],
-                culture_bytes[1],
-                culture_bytes[2],
-                culture_bytes[3],
-            ]);
+            let uid = stream.read_u32()?;
+            let freshness = stream.read_f32()?;
+            let serendipity = stream.read_f32()?;
+            let art = stream.read_f32()?;
+            let tech = stream.read_f32()?;
+            let science = stream.read_f32()?;
+            let news = stream.read_f32()?;
+            let culture = stream.read_f32()?;
             let include_replies = if version >= 3 {
-                slice_reader.read_u8()? != 0
+                stream.read_u8()? != 0
             } else {
                 false
             };
             let min_likes = if version >= 4 {
-                slice_reader.read_u32()?
+                stream.read_u32()?
             } else {
                 DEFAULT_MIN_LIKES
             };
-            let updated_at_secs = slice_reader.read_u64()?;
+            let updated_at_secs = stream.read_u64()?;
 
             let dials = UserDials {
                 freshness_half_life_secs: freshness,

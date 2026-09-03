@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.6] - 2026-09-03
+
+### Changed
+
+- **Streaming Snapshot Load (Bounded Boot Memory)**: `load_snapshot_with_preferences` previously read the **entire payload into RAM** (`vec![0u8; payload_len]`) before verifying CRC32 and deserializing — for a 656 MB snapshot that meant a ~656 MB boot-time allocation spike, meaning the PROJECT.md M3 streaming goal was only met on the save path. Loading is now fully streaming: an integrity pass streams the payload through a fixed 1 MiB chunk buffer into the CRC32 hasher (memory bounded regardless of snapshot size), then a parse pass deserializes sections directly from the file via a new `StreamReader` with one-byte pushback probing for the optional preferences section. Truncated payloads now surface as `FeedError::Snapshot` with explicit `Unexpected EOF` markers instead of raw `std::io::Error`, preserving the adversarial durability error-message contract. Byte-for-byte format unchanged (v1–v4 remain compatible); two new tests cover multi-chunk roundtrips (~4 MB payload) and mid-payload truncation rejection.
+
+---
+
 ## [0.3.5] - 2026-09-03
 
 ### Fixed
