@@ -307,24 +307,41 @@ async fn main() -> Result<()> {
 
     let (session_secret, is_custom_secret) = std::env::var("SESSION_SECRET").map_or_else(
         |_| {
+            // Fail fast in release builds: an ephemeral key silently invalidates every
+            // signed session on restart and prevents multi-instance deployments.
+            // Development builds fall back to a generated ephemeral key.
+            if !cfg!(debug_assertions) {
+                return Err(FeedError::Server(
+                    "SESSION_SECRET environment variable must be set in release deployments \
+                     (generate with: openssl rand -hex 32). Refusing to start with an ephemeral key."
+                        .to_string(),
+                ));
+            }
             let mut key = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut key);
-            (key, false)
+            Ok((key, false))
         },
         |sec| {
             let trimmed = sec.trim();
             if trimmed.is_empty() {
+                if !cfg!(debug_assertions) {
+                    return Err(FeedError::Server(
+                        "SESSION_SECRET environment variable is empty in a release deployment \
+                         (generate with: openssl rand -hex 32). Refusing to start."
+                            .to_string(),
+                    ));
+                }
                 let mut key = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut key);
-                (key, false)
+                Ok((key, false))
             } else {
                 let hash = sha2::Sha256::digest(trimmed.as_bytes());
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&hash);
-                (key, true)
+                Ok((key, true))
             }
         },
-    );
+    )?;
 
     if is_custom_secret {
         info!("Custom HMAC session signing secret loaded from environment");

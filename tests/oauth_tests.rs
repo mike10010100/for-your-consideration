@@ -691,23 +691,46 @@ async fn test_t1_f5_04_login_persists_state_in_store() {
 }
 
 #[tokio::test]
-async fn test_t1_f5_05_login_custom_redirect_uri_override() {
+async fn test_t1_f5_05_login_custom_redirect_uri_strict_allowlist() {
     let state = create_test_state();
     let app = create_xrpc_router(state);
 
-    let req = Request::builder()
+    // Exact-callback redirect URIs are honored (same origin, /oauth/callback path).
+    let req_ok = Request::builder()
+        .uri("/api/oauth/login?handle=alice.bsky.social&redirect_uri=https://feed.example.com/oauth/callback")
+        .body(Body::empty())
+        .unwrap();
+    let resp_ok = app.clone().oneshot(req_ok).await.unwrap();
+    assert_eq!(resp_ok.status(), StatusCode::OK);
+    let body_ok = resp_ok.into_body().collect().await.unwrap().to_bytes();
+    let login_ok: OAuthLoginResponse = serde_json::from_slice(&body_ok).unwrap();
+    assert!(login_ok
+        .authorization_url
+        .contains("redirect_uri=https%3A%2F%2Ffeed.example.com%2Foauth%2Fcallback"));
+
+    // Non-callback paths on the same origin must be rejected (strict allowlist).
+    let req_bad_path = Request::builder()
         .uri("/api/oauth/login?handle=alice.bsky.social&redirect_uri=https://feed.example.com/oauth/custom_cb")
         .body(Body::empty())
         .unwrap();
+    let resp_bad_path = app.clone().oneshot(req_bad_path).await.unwrap();
+    assert_eq!(resp_bad_path.status(), StatusCode::BAD_REQUEST);
+    let body_bad = resp_bad_path
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let err_bad: ApiErrorResponse = serde_json::from_slice(&body_bad).unwrap();
+    assert_eq!(err_bad.error, "InvalidRedirectUri");
 
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let login_res: OAuthLoginResponse = serde_json::from_slice(&body).unwrap();
-
-    assert!(login_res
-        .authorization_url
-        .contains("redirect_uri=https%3A%2F%2Ffeed.example.com%2Foauth%2Fcustom_cb"));
+    // Substring-injection tricks must be rejected (query-string embedding of /oauth/callback).
+    let req_trick = Request::builder()
+        .uri("/api/oauth/login?handle=alice.bsky.social&redirect_uri=https://feed.example.com/evil?x=/oauth/callback")
+        .body(Body::empty())
+        .unwrap();
+    let resp_trick = app.clone().oneshot(req_trick).await.unwrap();
+    assert_eq!(resp_trick.status(), StatusCode::BAD_REQUEST);
 }
 
 // ---------------------------------------------------------------------------

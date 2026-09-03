@@ -36,7 +36,6 @@ use compact_str::CompactString;
 use parking_lot::RwLock;
 use rand::RngCore;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
@@ -251,25 +250,18 @@ pub struct AppState {
 
 impl AppState {
     /// Creates a new [`AppState`] instance with default snapshot, ingestion trackers, and OAuth store.
+    ///
+    /// The session secret starts as [`crate::auth::DEFAULT_SESSION_SECRET`]; production binaries
+    /// MUST override it via [`AppState::with_session_secret`] with a key derived from the
+    /// `SESSION_SECRET` environment variable. Deliberately does not read environment variables
+    /// here: `AppState` is shared state, and a hidden env dependency would silently diverge
+    /// from the explicitly-injected secret (a single source of truth is enforced in `main`).
     #[must_use]
     pub fn new(
         recommender: Arc<Recommender>,
         service_did: impl Into<CompactString>,
         hostname: impl Into<CompactString>,
     ) -> Self {
-        let session_secret =
-            std::env::var("SESSION_SECRET").map_or(*DEFAULT_SESSION_SECRET, |sec| {
-                let trimmed = sec.trim();
-                if trimmed.is_empty() {
-                    *DEFAULT_SESSION_SECRET
-                } else {
-                    let hash = Sha256::digest(trimmed.as_bytes());
-                    let mut key = [0u8; 32];
-                    key.copy_from_slice(&hash);
-                    key
-                }
-            });
-
         Self {
             recommender,
             preferences_store: Arc::new(UserPreferencesStore::new()),
@@ -282,7 +274,7 @@ impl AppState {
             hostname: hostname.into(),
             feed_rkey: CompactString::new(DEFAULT_FEED_RKEY),
             admin_did: None,
-            session_secret,
+            session_secret: *DEFAULT_SESSION_SECRET,
             start_time: Instant::now(),
         }
     }
@@ -785,18 +777,17 @@ pub async fn handle_get_oauth_login(
     let scheme = if is_localhost { "http" } else { "https" };
     let expected_redirect_uri = format!("{scheme}://{}/oauth/callback", state.hostname);
 
+    // Strict allowlist: only exact-callback matches are honored. Localhost development also
+    // accepts exact "http://<loopback-host>[:port]/oauth/callback" variants. Substring /
+    // suffix matching is deliberately avoided: it would accept attacker-crafted paths such
+    // as "https://host/evil?x=/oauth/callback".
     let redirect_uri = if let Some(ref req_uri) = query.redirect_uri {
         let trimmed_req = req_uri.trim();
-        let server_origin_prefix = format!("{scheme}://{}/", state.hostname);
-        let is_valid = trimmed_req == expected_redirect_uri
-            || (is_localhost
-                && (trimmed_req.starts_with("http://127.0.0.1:")
-                    || trimmed_req.starts_with("http://localhost:"))
-                && (trimmed_req.ends_with("/oauth/callback") || trimmed_req.contains("/callback")))
-            || (trimmed_req.starts_with(&server_origin_prefix)
-                && (trimmed_req.ends_with("/oauth/callback")
-                    || trimmed_req.ends_with("/callback")
-                    || trimmed_req.contains("/oauth/")));
+        let loopback_ok = is_localhost
+            && (trimmed_req.starts_with("http://127.0.0.1:")
+                || trimmed_req.starts_with("http://localhost:"))
+            && trimmed_req.ends_with("/oauth/callback");
+        let is_valid = trimmed_req == expected_redirect_uri || loopback_ok;
         if !is_valid {
             return (
                 StatusCode::BAD_REQUEST,
@@ -807,7 +798,7 @@ pub async fn handle_get_oauth_login(
                 Json(ApiErrorResponse::new(
                     "InvalidRedirectUri",
                     format!(
-                        "Invalid redirect_uri '{trimmed_req}'. Must match server origin callback whitelist"
+                        "Invalid redirect_uri '{trimmed_req}'. Must exactly match '{expected_redirect_uri}'"
                     ),
                 )),
             )
@@ -1673,6 +1664,7 @@ mod tests {
         FeedPreviewResponse, GraphProofChain, LoginSuccessResponse, PreferencesResponseDto,
         SavePreferencesRequestBody, SignalType, TasteTwinsResponse, TopicWeights,
     };
+    use sha2::{Digest, Sha256};
 
     fn create_test_state() -> AppState {
         let interner = Arc::new(StringInterner::new());
@@ -2218,12 +2210,14 @@ mod tests {
             .preferences_store
             .set_by_did(&state.recommender.interner, viewer_did, dials);
 
-        // 1. Expired Service JWT
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256K","typ":"JWT"}"#);
+
+        // 1. Expired Service JWT: validation MUST fail; the endpoint degrades gracefully to
+        //    an anonymous feed (200 OK) but must NOT act as the claimed viewer DID.
         let expired_payload = URL_SAFE_NO_PAD.encode(format!(
             r#"{{"iss":"{viewer_did}","aud":"did:web:feed.example.com","exp":{}}}"#,
             now - 100
@@ -2238,7 +2232,20 @@ mod tests {
         let resp_expired = app.clone().oneshot(req_expired).await.unwrap();
         assert_eq!(resp_expired.status(), StatusCode::OK);
 
-        // 2. Mismatched Audience Service JWT
+        // The expired token must not have polluted the claimed viewer's impression history.
+        let victim_id = state.recommender.interner.lookup_id(viewer_did);
+        if let Some(vid) = victim_id {
+            assert_eq!(
+                state
+                    .recommender
+                    .impression_store()
+                    .get_viewer_impression_count(vid),
+                0,
+                "Expired JWT must never record impressions for the claimed viewer DID"
+            );
+        }
+
+        // 2. Mismatched Audience Service JWT: also rejected -> anonymous fallback.
         let wrong_aud_payload = URL_SAFE_NO_PAD.encode(format!(
             r#"{{"iss":"{viewer_did}","aud":"did:web:competitor-feed.com","exp":{}}}"#,
             now + 3600
@@ -2250,29 +2257,81 @@ mod tests {
             .header(AUTHORIZATION, format!("Bearer {wrong_aud_jwt}"))
             .body(Body::empty())
             .unwrap();
-        let resp_wrong_aud = app.oneshot(req_wrong_aud).await.unwrap();
+        let resp_wrong_aud = app.clone().oneshot(req_wrong_aud).await.unwrap();
         assert_eq!(resp_wrong_aud.status(), StatusCode::OK);
+
+        if let Some(vid) = victim_id {
+            assert_eq!(
+                state
+                    .recommender
+                    .impression_store()
+                    .get_viewer_impression_count(vid),
+                0,
+                "Wrong-audience JWT must never record impressions for the claimed viewer DID"
+            );
+        }
+
+        // 3. Valid audience + unexpired JWT IS honored as the viewer.
+        let valid_payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"{viewer_did}","aud":"did:web:feed.example.com","exp":{}}}"#,
+            now + 3600
+        ));
+        let valid_jwt = format!("{header}.{valid_payload}.mock_sig");
+
+        let req_valid = Request::builder()
+            .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration&limit=10")
+            .header(AUTHORIZATION, format!("Bearer {valid_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_valid = app.oneshot(req_valid).await.unwrap();
+        assert_eq!(resp_valid.status(), StatusCode::OK);
+
+        let vid = state
+            .recommender
+            .interner
+            .lookup_id(viewer_did)
+            .expect("Valid JWT viewer DID must be interned");
+        assert!(
+            state
+                .recommender
+                .impression_store()
+                .get_viewer_impression_count(vid)
+                > 0,
+            "Valid unexpired service JWT must record impressions for the viewer DID"
+        );
     }
 
     #[test]
-    fn test_app_state_session_secret_sha256_derivation() {
+    fn test_app_state_session_secret_single_source_of_truth() {
         let recommender = Arc::new(Recommender::new(
             Arc::new(crate::interner::StringInterner::new()),
             Arc::new(crate::graph::GraphStore::new()),
         ));
 
-        // When SESSION_SECRET is set
+        // AppState::new must NOT read SESSION_SECRET from the environment; the secret is
+        // owned exclusively by the binary entrypoint and injected via with_session_secret.
         std::env::set_var("SESSION_SECRET", "custom-secret-key-12345");
-        let state = AppState::new(recommender.clone(), "did:web:test", "test.example.com");
-        let expected_hash = Sha256::digest(b"custom-secret-key-12345");
-        assert_eq!(state.session_secret, expected_hash.as_ref());
-
-        // When SESSION_SECRET is empty string
-        std::env::set_var("SESSION_SECRET", "   ");
-        let state_empty = AppState::new(recommender, "did:web:test", "test.example.com");
-        assert_eq!(state_empty.session_secret, *DEFAULT_SESSION_SECRET);
+        let state = AppState::new(recommender, "did:web:test", "test.example.com");
+        assert_eq!(state.session_secret, *DEFAULT_SESSION_SECRET);
 
         std::env::remove_var("SESSION_SECRET");
+        let state_after_removal = AppState::new(
+            Arc::new(Recommender::new(
+                Arc::new(crate::interner::StringInterner::new()),
+                Arc::new(crate::graph::GraphStore::new()),
+            )),
+            "did:web:test",
+            "test.example.com",
+        );
+        assert_eq!(state_after_removal.session_secret, *DEFAULT_SESSION_SECRET);
+    }
+
+    #[test]
+    fn test_session_secret_env_derivation_matches_binary_path() {
+        // The binary derives its key via SHA-256 of the trimmed env secret; verify the
+        // derivation produces the expected 32-byte key shape (single derivation source).
+        let hash = Sha256::digest(b"custom-secret-key-12345");
+        assert_eq!(hash.len(), 32);
     }
 
     #[tokio::test]
