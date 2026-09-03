@@ -1493,8 +1493,14 @@ fn test_f19_dial_freshness_realtime_6h() {
 }
 
 #[test]
-fn test_f19_dial_freshness_balanced_24h() {
+fn test_f19_dial_freshness_balanced_36h() {
     let dials = RecommendationDials::from_query(Some("balanced"), None, None, None, None);
+    assert_eq!(dials.half_life_secs, 36.0 * 3600.0);
+}
+
+#[test]
+fn test_f19_dial_freshness_explicit_24h() {
+    let dials = RecommendationDials::from_query(Some("24h"), None, None, None, None);
     assert_eq!(dials.half_life_secs, 24.0 * 3600.0);
 }
 

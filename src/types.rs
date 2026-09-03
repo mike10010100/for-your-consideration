@@ -262,8 +262,8 @@ const fn default_min_likes() -> u32 {
     DEFAULT_MIN_LIKES
 }
 
-/// Default half-life is 24 hours (86,400 seconds).
-pub const DEFAULT_HALF_LIFE_SECS: f32 = 24.0 * 3600.0;
+/// Default half-life is 36 hours (129,600 seconds), per PRD §3.1/§3.6.
+pub const DEFAULT_HALF_LIFE_SECS: f32 = 36.0 * 3600.0;
 /// Default exploration ratio is 15% (0.15).
 pub const DEFAULT_EXPLORE_RATIO: f32 = 0.15;
 /// Default page limit is 30 items.
@@ -288,6 +288,10 @@ impl Default for RecommendationDials {
 
 impl RecommendationDials {
     /// Parses query parameters into [`RecommendationDials`] with safe fallback defaults.
+    ///
+    /// Freshness preset mapping (shared reference table; mirrors PRD §3.6):
+    /// `realtime` = 6h, `balanced` = 36h, `weekly` = 168h, plus explicit hour aliases.
+    /// Numeric freshness values are clamped to `[MIN_FRESHNESS_SECS, MAX_FRESHNESS_SECS]`.
     #[must_use]
     pub fn from_query(
         freshness: Option<&str>,
@@ -296,24 +300,32 @@ impl RecommendationDials {
         limit: Option<usize>,
         cursor: Option<String>,
     ) -> Self {
-        let half_life_secs = match freshness {
+        let half_life_secs = match freshness
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
             Some("4h") => 4.0 * 3600.0,
             Some("8h") => 8.0 * 3600.0,
             Some("12h") => 12.0 * 3600.0,
-            Some("balanced" | "24h") => 24.0 * 3600.0,
-            Some("36h") => 36.0 * 3600.0,
+            Some("24h") => 24.0 * 3600.0,
+            Some("balanced" | "36h") => 36.0 * 3600.0,
             Some("48h") => 48.0 * 3600.0,
             Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
             Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
             Some(custom) => custom
                 .parse::<f32>()
                 .unwrap_or(DEFAULT_HALF_LIFE_SECS)
-                .max(3600.0),
+                .clamp(MIN_FRESHNESS_SECS, MAX_FRESHNESS_SECS),
             None => DEFAULT_HALF_LIFE_SECS,
         };
 
-        let explore_ratio = match discovery {
+        let explore_ratio = match discovery
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             Some("familiar" | "low" | "5%") => 0.05,
             Some("balanced" | "med" | "15%") => 0.15,
             Some("deep_dive" | "deepdive" | "high" | "35%") => 0.35,
@@ -408,7 +420,7 @@ pub const MAX_TOPIC_MULTIPLIER: f32 = TOPIC_MAX;
 /// User-configurable recommendation dials persisted per viewer account.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UserDials {
-    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 24h (86,400s)).
+    /// Half-life time decay parameter in seconds (range: 1h (3,600s) to 168h (604,800s), default: 36h (129,600s)).
     pub freshness_half_life_secs: f32,
     /// Serendipity exploration ratio (range: 0.0 [0%] to 0.50 [50%], default: 0.15 [15%]).
     pub serendipity_ratio: f32,
@@ -1373,11 +1385,26 @@ impl FeedPreviewQuery {
         base_dials.min_likes = min_likes;
 
         let topic_weights = TopicWeights {
-            art: self.art.unwrap_or(1.0).max(0.0),
-            tech: self.tech.unwrap_or(1.0).max(0.0),
-            science: self.science.unwrap_or(1.0).max(0.0),
-            news: self.news.unwrap_or(1.0).max(0.0),
-            culture: self.culture.unwrap_or(1.0).max(0.0),
+            art: self
+                .art
+                .unwrap_or(1.0)
+                .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
+            tech: self
+                .tech
+                .unwrap_or(1.0)
+                .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
+            science: self
+                .science
+                .unwrap_or(1.0)
+                .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
+            news: self
+                .news
+                .unwrap_or(1.0)
+                .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
+            culture: self
+                .culture
+                .unwrap_or(1.0)
+                .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
         };
 
         base_dials.with_topic_weights(topic_weights)
@@ -1667,6 +1694,17 @@ mod tests {
         assert!(dials.explain);
         assert_eq!(dials.limit, 50);
         assert_eq!(dials.cursor.as_deref(), Some("cursor123"));
+
+        // Freshness preset table: realtime = 6h, balanced = 36h, weekly = 168h (PRD §3.6)
+        let balanced = RecommendationDials::from_query(Some("balanced"), None, None, None, None);
+        assert_eq!(balanced.half_life_secs, 36.0 * 3600.0);
+        let weekly = RecommendationDials::from_query(Some("weekly"), None, None, None, None);
+        assert_eq!(weekly.half_life_secs, 168.0 * 3600.0);
+        // Numeric freshness values are clamped to [1h, 168h]
+        let clamped_high = RecommendationDials::from_query(Some("999999"), None, None, None, None);
+        assert_eq!(clamped_high.half_life_secs, 168.0 * 3600.0);
+        let clamped_low = RecommendationDials::from_query(Some("0"), None, None, None, None);
+        assert_eq!(clamped_low.half_life_secs, 3600.0);
     }
 
     #[test]
@@ -2012,8 +2050,8 @@ mod tests {
     #[test]
     fn test_user_dials_default_and_validation() {
         let default_dials = UserDials::default();
-        assert_eq!(default_dials.freshness_half_life_secs, 24.0 * 3600.0);
-        assert_eq!(default_dials.freshness_half_life_hours(), 24.0);
+        assert_eq!(default_dials.freshness_half_life_secs, 36.0 * 3600.0);
+        assert_eq!(default_dials.freshness_half_life_hours(), 36.0);
         assert_eq!(default_dials.discovery_ratio(), 0.15);
         assert_eq!(default_dials.topic_weights.art, 1.0);
         assert_eq!(default_dials.min_likes, DEFAULT_MIN_LIKES);

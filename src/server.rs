@@ -60,7 +60,7 @@ use crate::types::{
     OAuthClientMetadata, OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto,
     PreferencesResponseDto, RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost,
     TasteTwinsQuery, TelemetryResponse, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
-    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, MAX_TOPIC_MULTIPLIER, TOPIC_MIN,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -521,9 +521,23 @@ pub async fn handle_get_feed_skeleton(
         UserDials::default()
     };
 
-    let half_life_secs = match query.freshness.as_deref() {
+    // Freshness preset mapping (PRD §3.6): realtime = 6h, balanced = 36h, weekly = 168h.
+    // Must stay in sync with `RecommendationDials::from_query` (the shared reference table).
+    let half_life_secs = match query
+        .freshness
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
+        Some("4h") => 4.0 * 3600.0,
+        Some("8h") => 8.0 * 3600.0,
+        Some("12h") => 12.0 * 3600.0,
+        Some("24h") => 24.0 * 3600.0,
         Some("balanced" | "36h") => 36.0 * 3600.0,
+        Some("48h") => 48.0 * 3600.0,
+        Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
         Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
         Some(custom) => custom
             .parse::<f32>()
@@ -547,23 +561,23 @@ pub async fn handle_get_feed_skeleton(
         art: query
             .art
             .unwrap_or(base_dials.topic_weights.art)
-            .clamp(0.0, 5.0),
+            .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
         tech: query
             .tech
             .unwrap_or(base_dials.topic_weights.tech)
-            .clamp(0.0, 5.0),
+            .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
         science: query
             .science
             .unwrap_or(base_dials.topic_weights.science)
-            .clamp(0.0, 5.0),
+            .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
         news: query
             .news
             .unwrap_or(base_dials.topic_weights.news)
-            .clamp(0.0, 5.0),
+            .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
         culture: query
             .culture
             .unwrap_or(base_dials.topic_weights.culture)
-            .clamp(0.0, 5.0),
+            .clamp(TOPIC_MIN, MAX_TOPIC_MULTIPLIER),
     };
 
     let limit = query
@@ -2064,7 +2078,7 @@ mod tests {
             .to_bytes();
         let prefs_resp: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
         assert!(!prefs_resp.is_custom);
-        assert_eq!(prefs_resp.preferences.freshness_hours, 24.0);
+        assert_eq!(prefs_resp.preferences.freshness_hours, 36.0);
 
         // 3. Authenticated POST -> 200 saves custom dials
         let save_req = SavePreferencesRequestBody {

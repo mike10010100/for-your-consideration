@@ -870,7 +870,7 @@ async fn test_mission_3_post_preferences_accepts_valid_boundaries_and_crud_lifec
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let get_resp: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
-    assert_eq!(get_resp.preferences.freshness_hours, 24.0); // System default
+    assert_eq!(get_resp.preferences.freshness_hours, 36.0); // System default
     assert_eq!(get_resp.preferences.discovery_ratio, 0.15); // System default
     assert!(!get_resp.is_custom);
 }
