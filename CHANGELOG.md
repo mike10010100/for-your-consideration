@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - 2026-09-03
+
+### Fixed
+
+- **Flaky Latency-SLA Test**: The empirical concurrent read-latency stress test (`test_adversarial_empirical_concurrent_read_latency_under_ingestion_load`) intermittently failed its p50 < 1 ms assertion in debug-profile builds and under `cargo llvm-cov` instrumentation, aborting the coverage gate ~80% of the time. The p50 threshold is now 5 ms in debug profiles (matching the existing debug p99 escape hatch) and remains a strict 1 ms in release builds where the sub-millisecond recommendation SLA is actually measured. Empirical coverage measurement now completes: **84.74% line coverage** (≥ 80% gate), 86.19% region coverage.
+
+---
+
 ## [0.3.1] - 2026-09-03
 
 ### Changed
