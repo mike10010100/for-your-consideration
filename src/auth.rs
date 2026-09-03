@@ -734,7 +734,7 @@ impl OAuthSessionState {
     /// Sets the ephemeral `DPoP` private key.
     #[must_use]
     pub fn with_dpop_key(mut self, key: &DPoPKey) -> Self {
-        self.dpop_private_key = Some(key.to_bytes_b64());
+        self.dpop_private_key = Some(key.to_bytes_b64().to_string());
         self
     }
 }
@@ -893,7 +893,7 @@ impl UserOAuthSession {
             access_token: session.access_token().to_string(),
             refresh_token: session.refresh_token().map(str::to_string),
             token_type: session.token_type().to_string(),
-            dpop_private_key: Some(session.dpop_key().to_bytes_b64()),
+            dpop_private_key: Some(session.dpop_key().to_bytes_b64().to_string()),
             pds_endpoint: session
                 .pds_endpoint()
                 .unwrap_or("https://bsky.social")
@@ -2336,7 +2336,7 @@ mod tests {
     #[test]
     fn test_user_oauth_session_to_and_from_oauth_session_roundtrip() {
         let key = DPoPKey::generate();
-        let key_b64 = key.to_bytes_b64();
+        let key_b64 = key.to_bytes_b64().to_string();
         let key_thumbprint = key.jwk_thumbprint();
 
         let user_session = UserOAuthSession {

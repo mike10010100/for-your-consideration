@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-09-03
+
+### Changed
+
+- **`skyauth` 0.2 Upgrade**: Bumped the `skyauth` dependency from `0.1.0` to `0.2`, picking up the formally verified crate's security hardening (confidential-client support, single-use server nonces, 6to4/Teredo SSRF filtering, refresh scope revalidation, rotate-time token zeroization). Adapted to the `0.2` breaking API change where `DPoPKey::to_bytes_b64()` now returns a `Zeroizing<String>` buffer that zeroizes on drop; persisted DPoP keys are copied out of the zeroizing wrapper at the 5 call sites (`with_dpop_key`, session bridge conversions, and login flow).
+
+---
+
 ## [0.3.0] - 2026-08-29
 
 ### Added

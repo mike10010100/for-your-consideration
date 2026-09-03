@@ -835,7 +835,7 @@ pub async fn handle_get_oauth_login(
             token_endpoint: resolved.token_endpoint,
             redirect_uri: redirect_uri.clone(),
             created_at_secs: now_secs,
-            dpop_private_key: Some(dpop_key.to_bytes_b64()),
+            dpop_private_key: Some(dpop_key.to_bytes_b64().to_string()),
         },
     );
 
