@@ -5,7 +5,7 @@
 [![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](CHANGELOG.md)
 [![Rust Safe](https://img.shields.io/badge/Rust-Safe_2021-brightgreen.svg)](#)
 [![Forbid Unsafe](https://img.shields.io/badge/%23!%5Bforbid(unsafe_code)%5D-enforced-blue.svg)](#)
-[![Tests Passing](https://img.shields.io/badge/Tests-503%20passed-success.svg)](#)
+[![Tests Passing](https://img.shields.io/badge/Tests-1150%2B%20passed-success.svg)](#)
 [![Sub-2ms Latency](https://img.shields.io/badge/Latency-p99%20%3C%201.5ms-orange.svg)](#)
 
 ---

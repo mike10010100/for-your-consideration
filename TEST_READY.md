@@ -17,7 +17,9 @@
 | 3. Cross-Feature | 15 | Live mutation bursts + TTL caching + streaming snapshot concurrency |
 | 4. Real-World Application | 10 | Live firehose simulation (~450-1000 ev/s), multi-threaded recommendation latency |
 | 5. Adversarial Hardening | 12 | Exhaustive CRC32 bit flips, extreme graph hub fanout, allocator matrix |
-| **Total** | **107** | Total test targets & test cases across 53 integration suites |
+| **Total** | **~1,150** | Test cases across 53 integration suites plus in-crate `#[cfg(test)]` unit modules |
+
+Measured (v0.3.6): 84.95% line coverage, 86.24% region coverage via `cargo llvm-cov`.
 
 ## Feature Checklist
 
