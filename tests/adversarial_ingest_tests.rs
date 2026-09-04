@@ -681,10 +681,13 @@ fn test_adversarial_empirical_concurrent_read_latency_under_ingestion_load() {
     );
     println!("====================================================================\n");
 
-    // Assert: p50 latency must remain strictly sub-millisecond (< 1000 µs)
+    // Debug-profile builds (including coverage-instrumented `cargo llvm-cov` runs) add
+    // substantial per-query overhead and run suites in parallel, so the p50 threshold is only
+    // enforced in release mode where the sub-millisecond recommendation SLA is measured.
+    let p50_threshold = if cfg!(debug_assertions) { 5_000 } else { 1_000 };
     assert!(
-        p50_us < 1000,
-        "p50 latency ({p50_us} µs) exceeded sub-millisecond SLA threshold (<1000 µs)!"
+        p50_us < p50_threshold,
+        "p50 latency ({p50_us} µs) exceeded SLA threshold ({p50_threshold} µs)!"
     );
     // In unoptimized debug test runs with parallel threads, allow up to 20ms; in release mode strictly assert < 2.0ms
     let p99_threshold = if cfg!(debug_assertions) {
