@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.8] - 2026-09-03
+
+### Changed
+
+- **Cargo.lock Is Now Tracked**: This is an application binary, not a library — committing the lockfile guarantees reproducible builds across CI and deployment hosts (previously gitignored, so builds resolved dependency versions non-deterministically).
+- **PRD §3.2 Updated to the Implemented Fatigue Model**: The PRD still described the original 100%-hard-suppression 0–30m design; the shipped model is a continuous 0.15× floor recovering exponentially to 1.0× over 6 hours. The spec now documents `ImpressionStore::evaluate_fatigue_penalty` semantics exactly (including the 2h τ and the 0.34×/0.69× checkpoints).
+- **Docs Refresh**: TEST_INFRA.md referenced three deleted test suites (`snapshot_streaming_tests.rs`, `velocity_ttl_tests.rs`, `allocator_safety_tests.rs`) — replaced with the actual suite map; TEST_READY.md total corrected from 107 to ~1,150 measured cases plus the measured 84.95% line coverage; README test badge updated.
+- **`.env.example` Replay Default Aligned**: `REPLAY_HOURS=168` (7 days — beyond what Jetstream reliably serves) aligned to the docker-compose default of 12 hours, with a comment explaining the firehose cursor-expiry constraint.
+
+### Removed
+
+- Duplicated `percent_encode_query_param` re-implementation in `server.rs`; the handler now imports the canonical `auth::percent_encode_query_param`.
+
+---
+
 ## [0.3.7] - 2026-09-03
 
 ### Security

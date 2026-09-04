@@ -44,9 +44,9 @@ use tracing::{error, info};
 use crate::auth::{
     authenticate_pds_session_with_secret, build_secure_http_client,
     exchange_oauth_code_with_secret, extract_session_did_from_headers_with_secret,
-    generate_pkce_pair, publish_feed_generator_record, resolve_identity_pds, validate_service_jwt,
-    DPoPKey, OAuthSessionState, OAuthStateStore, OAuthUserSessionStore,
-    DEFAULT_OAUTH_STATE_TTL_SECS, DEFAULT_SESSION_SECRET,
+    generate_pkce_pair, percent_encode_query_param, publish_feed_generator_record,
+    resolve_identity_pds, validate_service_jwt, DPoPKey, OAuthSessionState, OAuthStateStore,
+    OAuthUserSessionStore, DEFAULT_OAUTH_STATE_TTL_SECS, DEFAULT_SESSION_SECRET,
 };
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
@@ -718,23 +718,6 @@ pub async fn handle_post_auth_login(
         )
             .into_response(),
     }
-}
-
-/// Helper function to percent-encode query parameter values according to RFC 3986.
-fn percent_encode_query_param(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                use std::fmt::Write;
-                let _ = write!(encoded, "%{:02X}", b);
-            }
-        }
-    }
-    encoded
 }
 
 /// Handler for `GET /oauth/client-metadata.json` and `GET /client-metadata.json`.

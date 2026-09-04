@@ -18,12 +18,14 @@
 ## Test Architecture
 - Test Runner: `cargo test --all-targets`
 - Lints & Verification: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo deny check`, `cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only`
-- Integration Test Directory: `tests/`
+- Integration Test Directory: `tests/` (53 suites, ~1,150 test cases)
   - `tests/recommender_api_tests.rs`: API response correctness and latency thresholds.
   - `tests/preview_challenger_tests.rs`: High-load candidate matrix and bounds verification.
-  - `tests/snapshot_streaming_tests.rs`: Streaming snapshot roundtrip, CRC integrity, and low memory verification.
-  - `tests/velocity_ttl_tests.rs`: TTL caching, monotonic clock-warp safety, and mutation invariance.
-  - `tests/allocator_safety_tests.rs`: Allocator feature gate validation and zero-unsafe compliance.
+  - `tests/snapshot_adversarial_durability_tests.rs`: Streaming snapshot roundtrip (multi-chunk), CRC integrity, truncation rejection, concurrent-save stress, and low memory verification.
+  - `tests/snapshot_v2_tests.rs` / `tests/snapshot_tests.rs`: Snapshot format roundtrips, preference persistence, and backward compatibility.
+  - `tests/m2_m4_performance_and_streaming_tests.rs`: TTL cache behavior, streaming persistence under load, and allocator configuration.
+  - `tests/tier5_adversarial_hardening_tests.rs`: Safety invariants (zero-unsafe / zero-panic) and hardening checks.
+- Unit tests live in `#[cfg(test)]` modules inside each `src/*.rs` file.
 
 ## Coverage Thresholds
 - Tier 1: >= 5 tests per feature

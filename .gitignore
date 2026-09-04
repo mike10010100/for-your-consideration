@@ -1,7 +1,8 @@
 # Rust & Build Artifacts
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS tracked: this is an application binary, not a library, and committing
+# the lockfile guarantees reproducible builds across CI and deployment hosts.
 
 # Snapshots & In-Memory Persistence
 *.bin

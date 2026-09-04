@@ -83,11 +83,12 @@ The engine is built as a **zero-GC, lock-free, in-memory graph engine** written 
 ### 3.2. Impression Memory & Anti-Repetition Filtering (No Groundhog Day)
 - **Problem**: Users who scroll past posts without liking them repeatedly see the exact same posts promoted at the top of their feed across refreshes.
 - **Impression Store**: A bounded in-memory sliding LRU cache of `(ViewerID -> VecDeque<(PostID, Timestamp)>)` backed by a per-user `RoaringBitmap`.
-- **Two-Tier Impression Fatigue**:
-  1. **Immediate Suppression Window (0–30 mins)**: Posts served within the last 30 minutes are **100% suppressed** (filtered out from initial pages).
-  2. **Soft Fatigue Decay Window (30 mins – 6 hours)**: Posts served earlier in the day receive an exponential penalty:
-     $$\text{Score}_{\text{adjusted}}(p) = \text{Score}(p) \times \left(1.0 - e^{-\frac{\Delta t_{\text{served}}}{\tau_{\text{fatigue}}}}\right)$$
-- **Result**: Every refresh surfaces genuinely fresh content while keeping the user's core taste affinity intact.
+- **Two-Tier Impression Fatigue** (implemented as a single continuous curve; see `ImpressionStore::evaluate_fatigue_penalty`):
+  1. **Immediate Suppression Floor (0 mins)**: Posts served right now are dampened to a **15% score floor** (`FATIGUE_MIN_FLOOR`), effectively demoting them below unseen content.
+  2. **Soft Fatigue Recovery Window (0 – 6 hours)**: Served posts recover exponentially toward full score:
+     $$\text{Score}_{\text{adjusted}}(p) = \text{Score}(p) \times \left(0.15 + 0.85 \times \left(1.0 - e^{-\frac{\Delta t_{\text{served}}}{\tau_{\text{fatigue}}}}\right)\right)$$
+     with $\tau_{\text{fatigue}} = 2\text{h}$. At 30m the multiplier is $\approx 0.34$, at 2h $\approx 0.69$, and after 6h the post is fully recovered ($1.0\times$).
+- **Result**: Every refresh surfaces genuinely fresh content while keeping the user's core taste affinity intact — no post is ever permanently hidden.
 
 ### 3.3. Enhanced New-User Cold-Start & Onboarding Experience
 - **Tier 1 (Active Users, $\ge 10$ interactions)**: Full 3-step random walk over interaction graph.
