@@ -228,18 +228,39 @@ const STREAM_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Streaming reader over a [`BufReader`] mirroring the [`ByteSliceReader`] section API
 /// without materializing the payload in memory.
+///
+/// Tracks the number of bytes remaining in the payload region so hostile length
+/// prefixes are rejected *before* any allocation, never aborting the process on a
+/// malicious snapshot (the old zero-copy reader got this for free from slice bounds;
+/// a streaming reader must enforce the same bound explicitly).
 struct StreamReader<R: Read> {
     inner: R,
     /// One-byte pushback buffer used by [`StreamReader::has_more`].
     pending_byte: Option<u8>,
+    /// Bytes remaining between the current stream position and the end of the
+    /// snapshot payload region (everything after the 64-byte header).
+    remaining_payload: u64,
 }
 
 impl<R: Read> StreamReader<R> {
-    const fn new(inner: R) -> Self {
+    const fn new(inner: R, payload_len: u64) -> Self {
         Self {
             inner,
             pending_byte: None,
+            remaining_payload: payload_len,
         }
+    }
+
+    /// Validates that a requested length prefix is backed by enough remaining payload
+    /// bytes, rejecting malicious oversized prefixes before any allocation.
+    fn check_len(&self, len: u64, what: &str) -> Result<()> {
+        if len > self.remaining_payload {
+            return Err(FeedError::Snapshot(format!(
+                "Unexpected EOF: {what} length prefix {len} exceeds remaining payload ({})",
+                self.remaining_payload
+            )));
+        }
+        Ok(())
     }
 
     /// Reads exactly `buf.len()` bytes into `buf`, draining the one-byte pushback
@@ -261,6 +282,7 @@ impl<R: Read> StreamReader<R> {
                 .read_exact(&mut buf[filled..])
                 .map_err(|e| FeedError::Snapshot(format!("Unexpected EOF: {e}")))?;
         }
+        self.remaining_payload = self.remaining_payload.saturating_sub(buf.len() as u64);
         Ok(())
     }
 
@@ -288,7 +310,8 @@ impl<R: Read> StreamReader<R> {
         Ok(f32::from_le_bytes(buf))
     }
 
-    fn read_exact_vec(&mut self, len: usize) -> Result<Vec<u8>> {
+    fn read_exact_vec(&mut self, len: usize, what: &str) -> Result<Vec<u8>> {
+        self.check_len(len as u64, what)?;
         let mut buf = vec![0u8; len];
         self.read_exact(&mut buf)?;
         Ok(buf)
@@ -298,7 +321,7 @@ impl<R: Read> StreamReader<R> {
         let byte_len = count
             .checked_mul(8)
             .ok_or_else(|| FeedError::Snapshot("Edge count overflow".to_string()))?;
-        let bytes = self.read_exact_vec(byte_len)?;
+        let bytes = self.read_exact_vec(byte_len, "edge array")?;
         let mut edges = Vec::with_capacity(count);
         for chunk in bytes.as_chunks::<8>().0 {
             let target = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -312,7 +335,7 @@ impl<R: Read> StreamReader<R> {
         let byte_len = count
             .checked_mul(4)
             .ok_or_else(|| FeedError::Snapshot("u32 count overflow".to_string()))?;
-        let bytes = self.read_exact_vec(byte_len)?;
+        let bytes = self.read_exact_vec(byte_len, "u32 array")?;
         let mut list = Vec::with_capacity(count);
         for chunk in bytes.as_chunks::<4>().0 {
             let val = u32::from_le_bytes(*chunk);
@@ -321,10 +344,30 @@ impl<R: Read> StreamReader<R> {
         Ok(list)
     }
 
+    fn read_string(&mut self, len: usize) -> Result<Vec<u8>> {
+        self.read_exact_vec(len, "string")
+    }
+
+    fn read_bitmap(&mut self, len: usize) -> Result<Vec<u8>> {
+        self.read_exact_vec(len, "roaring bitmap")
+    }
+
+    /// Bounds a hostile record count to the physical payload capacity: no section can
+    /// contain more records than there are bytes left, each record being at least
+    /// `min_record_bytes` long. Prevents attacker-inflated counts from driving huge
+    /// `Vec::with_capacity` reservations before any validation.
+    fn bound_count(&self, count: usize, min_record_bytes: u64) -> usize {
+        let max_by_payload = (self.remaining_payload / min_record_bytes.max(1)) as usize;
+        count.min(max_by_payload)
+    }
+
     /// Returns `true` if at least one more byte is available in the underlying stream.
     fn has_more(&mut self) -> Result<bool> {
         if self.pending_byte.is_some() {
             return Ok(true);
+        }
+        if self.remaining_payload == 0 {
+            return Ok(false);
         }
         let mut probe = [0u8; 1];
         let read = self
@@ -656,15 +699,16 @@ pub fn load_snapshot_with_preferences(
 
     // 3. Deserialize Payload section-by-section directly from the file (second streaming pass).
     reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
-    let mut stream = StreamReader::new(&mut reader);
+    let payload_len = file_len.saturating_sub(HEADER_SIZE as u64);
+    let mut stream = StreamReader::new(&mut reader, payload_len);
 
     // Section 1: Strings
     let string_count = stream.read_u32()? as usize;
-    let mut interned_strings = Vec::with_capacity(string_count);
+    let mut interned_strings = Vec::with_capacity(stream.bound_count(string_count, 8));
 
     for _ in 0..string_count {
         let len = stream.read_u32()? as usize;
-        let str_bytes = stream.read_exact_vec(len)?;
+        let str_bytes = stream.read_string(len)?;
         let s = String::from_utf8(str_bytes).map_err(|e| {
             FeedError::Snapshot(format!("Invalid UTF-8 in string interner snapshot: {e}"))
         })?;
@@ -673,7 +717,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 2: User Interactions
     let user_count = stream.read_u32()? as usize;
-    let mut user_interactions = Vec::with_capacity(user_count);
+    let mut user_interactions = Vec::with_capacity(stream.bound_count(user_count, 12));
 
     for _ in 0..user_count {
         let uid = stream.read_u32()?;
@@ -684,7 +728,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 3: Post Interactions
     let post_count = stream.read_u32()? as usize;
-    let mut post_interactions = Vec::with_capacity(post_count);
+    let mut post_interactions = Vec::with_capacity(stream.bound_count(post_count, 8));
 
     for _ in 0..post_count {
         let pid = stream.read_u32()?;
@@ -695,12 +739,12 @@ pub fn load_snapshot_with_preferences(
 
     // Section 4: Roaring Bitmaps
     let bm_user_count = stream.read_u32()? as usize;
-    let mut user_likes_bitmaps = Vec::with_capacity(bm_user_count);
+    let mut user_likes_bitmaps = Vec::with_capacity(stream.bound_count(bm_user_count, 8));
 
     for _ in 0..bm_user_count {
         let uid = stream.read_u32()?;
         let len = stream.read_u32()? as usize;
-        let bm_bytes = stream.read_exact_vec(len)?;
+        let bm_bytes = stream.read_bitmap(len)?;
         let bm = RoaringBitmap::deserialize_from(&bm_bytes[..]).map_err(|e| {
             FeedError::Snapshot(format!("RoaringBitmap deserialization failure: {e}"))
         })?;
@@ -709,7 +753,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 5: Follows
     let follower_count = stream.read_u32()? as usize;
-    let mut follows = Vec::with_capacity(follower_count);
+    let mut follows = Vec::with_capacity(stream.bound_count(follower_count, 8));
 
     for _ in 0..follower_count {
         let fid = stream.read_u32()?;
@@ -720,7 +764,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 6: Post Metadata
     let meta_count = stream.read_u32()? as usize;
-    let mut post_metadata = Vec::with_capacity(meta_count);
+    let mut post_metadata = Vec::with_capacity(stream.bound_count(meta_count, 22));
 
     for _ in 0..meta_count {
         let pid = stream.read_u32()?;
@@ -749,7 +793,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 7: Active Recent Posts
     let recent_count = stream.read_u32()? as usize;
-    let mut active_recent_posts = Vec::with_capacity(recent_count);
+    let mut active_recent_posts = Vec::with_capacity(stream.bound_count(recent_count, 12));
 
     for _ in 0..recent_count {
         let pid = stream.read_u32()?;
@@ -763,7 +807,7 @@ pub fn load_snapshot_with_preferences(
         && stream.has_more()?
     {
         let pref_count = stream.read_u32()? as usize;
-        let mut user_preferences = Vec::with_capacity(pref_count);
+        let mut user_preferences = Vec::with_capacity(stream.bound_count(pref_count, 36));
 
         for _ in 0..pref_count {
             let uid = stream.read_u32()?;

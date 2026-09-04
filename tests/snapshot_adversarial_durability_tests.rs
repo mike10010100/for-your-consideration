@@ -935,3 +935,59 @@ fn test_streaming_load_rejects_truncated_payload_mid_section() {
         "Truncated snapshot error must be a Snapshot/EOF error, got: {msg}"
     );
 }
+
+#[test]
+fn test_streaming_load_oversized_length_prefix_never_aborts() {
+    // Regression guard for the streaming load path: the parser must reject oversized
+    // length prefixes against the remaining payload budget BEFORE allocating. The
+    // crafted snapshot below carries a ~96 GiB prefix with a valid header/CRC pair,
+    // which previously aborted the process (SIGABRT on a failed allocation).
+    let attack_path = unique_temp_path("oversized_prefix_streaming");
+    let mut payload = Vec::new();
+    // Section 1: string_count = 1, string_length = 96 GiB (0xF_FFFF_FFF0 = 103079215080)
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&103_079_215_080u64.to_le_bytes()[..4]); // u32 truncation of 0xC0000008 pattern
+                                                                       // Pad with plausible payload bytes so the CRC verifies.
+    payload.extend_from_slice(&[0u8; 4096]);
+
+    let header_len = HEADER_SIZE;
+    let mut file_bytes = Vec::with_capacity(header_len + payload.len());
+    file_bytes.extend_from_slice(&SNAPSHOT_MAGIC);
+    file_bytes.extend_from_slice(&SNAPSHOT_FORMAT_VERSION.to_le_bytes());
+    file_bytes.extend_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // created_at
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // jetstream cursor
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+    file_bytes.extend_from_slice(&1u32.to_le_bytes()); // num_strings
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_users
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // total_forward_edges
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_followers
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_post_metadata
+    let mut hasher = Hasher::new();
+    hasher.update(&payload);
+    file_bytes.extend_from_slice(&hasher.finalize().to_le_bytes()); // payload crc
+    let mut h_hasher = Hasher::new();
+    h_hasher.update(&file_bytes[0..56]);
+    file_bytes.extend_from_slice(&h_hasher.finalize().to_le_bytes()); // header crc
+
+    {
+        let mut f = File::create(&attack_path).unwrap();
+        f.write_all(&file_bytes).unwrap();
+        f.write_all(&payload).unwrap();
+    }
+
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    let result = load_snapshot(&attack_path, &interner, &graph);
+    let _ = fs::remove_file(&attack_path);
+
+    // Must return a structured error (never abort on allocation failure).
+    let err = result.expect_err("Oversized length prefix must be rejected before allocation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Snapshot error")
+            || msg.contains("Unexpected EOF")
+            || msg.contains("length prefix"),
+        "Expected structured snapshot/EOF error, got: {msg}"
+    );
+}
