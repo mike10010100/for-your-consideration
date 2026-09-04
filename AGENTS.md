@@ -61,6 +61,7 @@ Both crate roots enforce the strict compiler lint safety guard:
 - Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
 
 ### 6. Semantic Versioning, CHANGELOG & Automated Release Invariants
+
 - **Service Deployment Model (Never Publish to Crates.io)**: `for-your-consideration` is a standalone backend service, not a reusable library crate. [`Cargo.toml`](Cargo.toml) enforces `publish = false`. Never attempt to publish this service to crates.io or public cargo registries.
 - **Manual CHANGELOG Curation Required**: The CI/CD automation does **not** generate or modify the changelog automatically. AI agents and human contributors are strictly required to manually curate and document all changes for every PR in [`CHANGELOG.md`](CHANGELOG.md) under `## [X.Y.Z] - YYYY-MM-DD` following [Keep a Changelog](https://keepachangelog.com/).
 - **Semantic Versioning Bumps**: Every Pull Request modifying application code, features, bug fixes, or architecture **must bump the package version in [`Cargo.toml`](Cargo.toml)** according to [Semantic Versioning (SemVer 2.0.0)](https://semver.org/):

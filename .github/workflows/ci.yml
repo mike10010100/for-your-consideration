@@ -246,6 +246,7 @@ jobs:
           if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             echo "Creating GitHub Release ${TAG_NAME}..."
             gh release create "${TAG_NAME}" \
+              --target "${GITHUB_SHA}" \
               --title "${TAG_NAME} - Production Release" \
               --notes-file CHANGELOG.md
           else
