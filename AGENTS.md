@@ -60,13 +60,18 @@ Both crate roots enforce the strict compiler lint safety guard:
 - All public structs, fields, constants, enums, modules, and functions must have descriptive documentation comments (`missing_docs` is denied).
 - Bare URLs in documentation must be enclosed in angle brackets (e.g. `<https://bsky.social>`).
 
-### 6. Semantic Versioning & CHANGELOG Invariant
-- Every Pull Request modifying application code, features, bug fixes, or architecture **must bump the package version in [`Cargo.toml`](Cargo.toml)** according to [Semantic Versioning (SemVer 2.0.0)](https://semver.org/):
-  - **Patch** (`0.2.x` → `0.2.y`): Backward-compatible bug fixes, security patches, performance tuning, and minor refactors.
+### 6. Semantic Versioning, CHANGELOG & Automated Release Invariants
+- **Service Deployment Model (Never Publish to Crates.io)**: `for-your-consideration` is a standalone backend service, not a reusable library crate. [`Cargo.toml`](Cargo.toml) enforces `publish = false`. Never attempt to publish this service to crates.io or public cargo registries.
+- **Manual CHANGELOG Curation Required**: The CI/CD automation does **not** generate or modify the changelog automatically. AI agents and human contributors are strictly required to manually curate and document all changes for every PR in [`CHANGELOG.md`](CHANGELOG.md) under `## [X.Y.Z] - YYYY-MM-DD` following [Keep a Changelog](https://keepachangelog.com/).
+- **Semantic Versioning Bumps**: Every Pull Request modifying application code, features, bug fixes, or architecture **must bump the package version in [`Cargo.toml`](Cargo.toml)** according to [Semantic Versioning (SemVer 2.0.0)](https://semver.org/):
+  - **Patch** (`0.4.x` → `0.4.y`): Backward-compatible bug fixes, security patches, performance tuning, and minor refactors.
   - **Minor** (`0.x.0` → `0.y.0`): New features, algorithm dials, snapshot schema changes, or significant new capabilities.
   - **Major** (`x.0.0` → `y.0.0`): Breaking public API changes or architecture overhauls.
-- Every version bump **must be accompanied by an entry in [`CHANGELOG.md`](CHANGELOG.md)** under `## [X.Y.Z] - YYYY-MM-DD` following [Keep a Changelog](https://keepachangelog.com/).
-- The `./scripts/check_version_bump.sh` verification script is enforced in CI on every PR.
+- **Automated Version & CHANGELOG Verification**: The `./scripts/check_version_bump.sh` verification script is enforced in CI on every PR. CI fails closed if the version in `Cargo.toml` is not greater than the base branch or if the version entry is absent from `CHANGELOG.md`.
+- **Automated GitHub Release Lifecycle on Merge**: When a PR is merged into `main`, GitHub Actions (`release` job in `.github/workflows/ci.yml`) automatically:
+  1. Runs and requires 100% pass rate across all quality gates (`fmt-and-clippy`, `test`, `coverage`, `security-audit`, `docker-build`).
+  2. Awaits successful conclusion of all required CodeQL static security scans (`rust`, `javascript-typescript`, `actions`).
+  3. Checks if release tag `vX.Y.Z` already exists, and if not, automatically creates the GitHub Release tag `vX.Y.Z` titled `vX.Y.Z - Production Release` populated from the curated [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -84,12 +89,15 @@ cargo clippy --all-targets -- -D warnings
 # 3. Run all unit and integration test suites
 cargo test --all-targets
 
-# 4. Dependency security & policy scan
+# 4. Run documentation tests
+cargo test --doc
+
+# 5. Dependency security & policy scan
 cargo deny check
 
-# 5. Test coverage gate (must maintain >= 80% line coverage)
+# 6. Test coverage gate (must maintain >= 80% line coverage)
 cargo llvm-cov --all-targets --fail-under-lines 80 --summary-only
 
-# 6. Verify Semantic Version bump & CHANGELOG entry
+# 7. Verify Semantic Version bump & CHANGELOG entry
 ./scripts/check_version_bump.sh
 ```
