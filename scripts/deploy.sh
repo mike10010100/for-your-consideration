@@ -59,7 +59,9 @@ ${COMPOSE_CMD} up -d
 # Wait for feed-engine to hydrate snapshot and become healthy
 echo "⏳ Waiting for feed engine to hydrate snapshot and pass healthcheck..."
 CONTAINER_NAME="for-your-consideration"
-MAX_WAIT_SECS=180
+# Grace period in docker-compose.yml is start_period: 3m (180s) with 30s interval and 3 retries.
+# Allow up to 300s (5 minutes) so snapshot hydration + healthcheck interval transitions succeed.
+MAX_WAIT_SECS=300
 ELAPSED=0
 HEALTH_STATUS="unknown"
 
@@ -76,10 +78,18 @@ while [[ ${ELAPSED} -lt ${MAX_WAIT_SECS} ]]; do
 done
 
 if [[ "${HEALTH_STATUS}" != "healthy" ]]; then
-    echo ""
-    echo "❌ Error: Container '${CONTAINER_NAME}' did not report healthy within ${MAX_WAIT_SECS}s (status: ${HEALTH_STATUS})." >&2
-    echo "Check logs: docker logs ${CONTAINER_NAME}" >&2
-    exit 1
+    # Perform one final inspection check in case of a race condition at the deadline boundary
+    FINAL_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "unknown")
+    if [[ "${FINAL_STATUS}" == "healthy" ]]; then
+        HEALTH_STATUS="healthy"
+        echo ""
+        echo "✅ Feed engine is healthy and accepting traffic."
+    else
+        echo ""
+        echo "❌ Error: Container '${CONTAINER_NAME}' did not report healthy within ${MAX_WAIT_SECS}s (status: ${HEALTH_STATUS})." >&2
+        echo "Check logs: docker logs ${CONTAINER_NAME}" >&2
+        exit 1
+    fi
 fi
 
 echo "----------------------------------------------------------------------"
