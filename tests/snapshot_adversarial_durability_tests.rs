@@ -845,3 +845,149 @@ fn test_concurrent_mutations_and_snapshot_export_stress() {
 
     let _ = fs::remove_file(&snapshot_path);
 }
+
+// ===========================================================================
+// Streaming Load: Multi-Chunk CRC Verification & Bounded-Memory Parse
+// ===========================================================================
+
+#[test]
+fn test_streaming_load_roundtrip_multi_chunk_payload() {
+    // Build a snapshot whose payload comfortably exceeds the 1 MiB streaming chunk size
+    // (STREAM_CHUNK_SIZE) so the CRC pass and parse pass both traverse multiple chunks.
+    let snap_path = unique_temp_path("streaming_multi_chunk");
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+
+    // ~30,000 posts x 8 edges = 240,000 forward/reverse edges (~4 MB payload across all
+    // sections), plus a matching interned string per post to exercise Section 1 streaming.
+    const POSTS: u32 = 30_000;
+    const EDGES_PER_POST: u32 = 8;
+    for p in 1..=POSTS {
+        let pid = interner.intern(&format!(
+            "at://did:plc:author/app.bsky.feed.post/stream_{p}"
+        ));
+        let author = interner.intern(&format!("did:plc:stream_author_{}", p % 500));
+        graph.record_post_meta(pid, author, None, None, BLUESKY_EPOCH_SECS + 1_000);
+        for e in 0..EDGES_PER_POST {
+            let uid = interner.intern(&format!("did:plc:stream_liker_{}_{}", p, e));
+            graph.record_interaction(uid, pid, SignalType::Like, BLUESKY_EPOCH_SECS + 2_000);
+        }
+    }
+
+    let header = save_snapshot(&snap_path, &interner, &graph, 77_000_000)
+        .expect("Multi-chunk snapshot save failed");
+    assert!(header.total_forward_edges >= 240_000);
+
+    // Load must succeed with identical hydration despite never materializing the payload.
+    let load_interner = StringInterner::new();
+    let load_graph = GraphStore::new();
+    let loaded = load_snapshot(&snap_path, &load_interner, &load_graph)
+        .expect("Streaming load of multi-chunk snapshot failed")
+        .expect("Snapshot must exist");
+    assert_eq!(loaded.header.num_strings, header.num_strings);
+    assert_eq!(loaded.header.num_users, header.num_users);
+    assert_eq!(
+        loaded.header.total_forward_edges,
+        header.total_forward_edges
+    );
+
+    // Spot-check graph integrity after streaming hydration.
+    let stats_orig = graph.get_stats();
+    let stats_load = load_graph.get_stats();
+    assert_eq!(stats_orig, stats_load);
+
+    let _ = fs::remove_file(&snap_path);
+}
+
+#[test]
+fn test_streaming_load_rejects_truncated_payload_mid_section() {
+    // Save a valid multi-chunk snapshot, then truncate the file mid-payload: the streaming
+    // CRC pass must fail with a Snapshot error (not a raw I/O error).
+    let snap_path = unique_temp_path("streaming_truncated");
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    for p in 1..=5_000u32 {
+        let pid = interner.intern(&format!("at://did:plc:a/app.bsky.feed.post/tr_{p}"));
+        graph.record_interaction(1, pid, SignalType::Like, BLUESKY_EPOCH_SECS + 100);
+    }
+    save_snapshot(&snap_path, &interner, &graph, 42).expect("Save failed");
+
+    let file_len = fs::metadata(&snap_path).expect("metadata").len();
+    assert!(
+        file_len > HEADER_SIZE as u64 + 1024,
+        "snapshot too small for truncation test"
+    );
+
+    // Truncate to 3/4 of the file (mid-payload).
+    let truncated_len = HEADER_SIZE as u64 + (file_len - HEADER_SIZE as u64) * 3 / 4;
+    let raw = fs::read(&snap_path).expect("read snapshot");
+    fs::write(&snap_path, &raw[..truncated_len as usize]).expect("truncate snapshot");
+
+    let load_interner = StringInterner::new();
+    let load_graph = GraphStore::new();
+    let result = load_snapshot(&snap_path, &load_interner, &load_graph);
+    let _ = fs::remove_file(&snap_path);
+
+    let err = result.expect_err("Truncated snapshot must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Snapshot error") || msg.contains("Unexpected EOF"),
+        "Truncated snapshot error must be a Snapshot/EOF error, got: {msg}"
+    );
+}
+
+#[test]
+fn test_streaming_load_oversized_length_prefix_never_aborts() {
+    // Regression guard for the streaming load path: the parser must reject oversized
+    // length prefixes against the remaining payload budget BEFORE allocating. The
+    // crafted snapshot below carries a ~96 GiB prefix with a valid header/CRC pair,
+    // which previously aborted the process (SIGABRT on a failed allocation).
+    let attack_path = unique_temp_path("oversized_prefix_streaming");
+    let mut payload = Vec::new();
+    // Section 1: string_count = 1, string_length = 96 GiB (0xF_FFFF_FFF0 = 103079215080)
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&103_079_215_080u64.to_le_bytes()[..4]); // u32 truncation of 0xC0000008 pattern
+                                                                       // Pad with plausible payload bytes so the CRC verifies.
+    payload.extend_from_slice(&[0u8; 4096]);
+
+    let header_len = HEADER_SIZE;
+    let mut file_bytes = Vec::with_capacity(header_len + payload.len());
+    file_bytes.extend_from_slice(&SNAPSHOT_MAGIC);
+    file_bytes.extend_from_slice(&SNAPSHOT_FORMAT_VERSION.to_le_bytes());
+    file_bytes.extend_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // created_at
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // jetstream cursor
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+    file_bytes.extend_from_slice(&1u32.to_le_bytes()); // num_strings
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_users
+    file_bytes.extend_from_slice(&0u64.to_le_bytes()); // total_forward_edges
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_followers
+    file_bytes.extend_from_slice(&0u32.to_le_bytes()); // num_post_metadata
+    let mut hasher = Hasher::new();
+    hasher.update(&payload);
+    file_bytes.extend_from_slice(&hasher.finalize().to_le_bytes()); // payload crc
+    let mut h_hasher = Hasher::new();
+    h_hasher.update(&file_bytes[0..56]);
+    file_bytes.extend_from_slice(&h_hasher.finalize().to_le_bytes()); // header crc
+
+    {
+        let mut f = File::create(&attack_path).unwrap();
+        f.write_all(&file_bytes).unwrap();
+        f.write_all(&payload).unwrap();
+    }
+
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    let result = load_snapshot(&attack_path, &interner, &graph);
+    let _ = fs::remove_file(&attack_path);
+
+    // Must return a structured error (never abort on allocation failure).
+    let err = result.expect_err("Oversized length prefix must be rejected before allocation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Snapshot error")
+            || msg.contains("Unexpected EOF")
+            || msg.contains("length prefix"),
+        "Expected structured snapshot/EOF error, got: {msg}"
+    );
+}

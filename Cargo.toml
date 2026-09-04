@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.3.5"
+version = "0.3.7"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
