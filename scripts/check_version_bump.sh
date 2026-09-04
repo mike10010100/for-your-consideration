@@ -18,7 +18,9 @@ echo -e "${BLUE}=== 📦 Checking Semantic Version Bump & CHANGELOG ===${NC}"
 # Determine base git reference
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
 BASE_REF=""
-if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+if [[ -n "${1:-}" ]]; then
+    BASE_REF="$1"
+elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
     BASE_REF="origin/${GITHUB_BASE_REF}"
 elif [[ "${CURRENT_BRANCH}" != "main" ]] && git rev-parse --verify origin/main >/dev/null 2>&1; then
     BASE_REF="origin/main"

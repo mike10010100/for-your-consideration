@@ -2,25 +2,35 @@ name: CI & Quality Gates
 
 on:
   push:
-    branches: [main]
+    branches: ["main", "fix/**"]
   pull_request:
-    branches: [main]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   version-bump-check:
     name: Enforce Semantic Version Bump & CHANGELOG on PRs
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout repository with full history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify Semantic Version Bump & CHANGELOG Entry
         run: |
@@ -30,12 +40,16 @@ jobs:
   fmt-and-clippy:
     name: Code Formatting & Strict Clippy Safety Guards
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: rustfmt, clippy
 
@@ -51,12 +65,16 @@ jobs:
   test:
     name: Full Test Suite & Durability Verification
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -69,30 +87,43 @@ jobs:
       - name: Run all Unit, Integration, and Durability Tests
         run: cargo test --all-targets --verbose
 
+      - name: Run documentation tests
+        run: cargo test --doc
+
   security-audit:
     name: Supply Chain & License Audit (cargo-deny)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Run cargo-deny security checks
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
 
   coverage:
     name: Test Coverage & Regression Gate (>= 80%)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -103,9 +134,13 @@ jobs:
   docker-build:
     name: Production Docker Build & Healthcheck Verification
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -118,3 +153,104 @@ jobs:
           push: false
           tags: for-your-consideration:test
           load: true
+
+  release:
+    name: Create Production GitHub Release
+    runs-on: ubuntu-latest
+    needs: [fmt-and-clippy, test, coverage, security-audit, docker-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      checks: read
+      statuses: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Extract Current Version & Name
+        id: pkg_info
+        run: |
+          VERSION=$(grep -m1 '^[[:space:]]*version[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
+          NAME=$(grep -m1 '^[[:space:]]*name[[:space:]]*=' Cargo.toml | awk -F'"' '{print $2}')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "name=${NAME}" >> $GITHUB_OUTPUT
+          echo "Detected service: ${NAME} v${VERSION}"
+
+      - name: Check if Version Already Released on GitHub
+        id: check_released
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${{ steps.pkg_info.outputs.version }}"
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "released=true" >> $GITHUB_OUTPUT
+            echo "Version ${{ steps.pkg_info.outputs.version }} is already released on GitHub."
+          else
+            echo "released=false" >> $GITHUB_OUTPUT
+            echo "Version ${{ steps.pkg_info.outputs.version }} is NOT released on GitHub yet."
+          fi
+
+      # `needs:` cannot span workflow files, so the CodeQL Static Security Scan
+      # (a required branch-protection check that runs in codeql.yml) is invisible
+      # to job dependencies. Poll commit status and check-runs until all required
+      # CodeQL contexts conclude, failing closed on any non-success or on timeout.
+      - name: Wait for required CodeQL security scans on this commit
+        if: steps.check_released.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          contexts=(
+            "CodeQL Static Security Scan (rust)"
+            "CodeQL Static Security Scan (javascript-typescript)"
+            "CodeQL Static Security Scan (actions)"
+          )
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            status_json=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/status" 2>/dev/null || echo "{}")
+            check_runs_json=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" 2>/dev/null || echo "{}")
+            all_ok=true
+            for c in "${contexts[@]}"; do
+              status_state=$(jq -r --arg c "$c" '[.statuses[]? | select(.context == $c)][0].state // ""' <<<"$status_json")
+              check_conclusion=$(jq -r --arg c "$c" '[.check_runs[]? | select(.name == $c)][0].conclusion // ""' <<<"$check_runs_json")
+
+              if [[ "$status_state" == "success" || "$check_conclusion" == "success" ]]; then
+                continue
+              fi
+
+              if [[ "$status_state" =~ ^(failure|error)$ || "$check_conclusion" =~ ^(failure|cancelled|timed_out|action_required)$ ]]; then
+                echo "::error::Required check '${c}' concluded with failure (status: '${status_state}', conclusion: '${check_conclusion}'); refusing to release"
+                exit 1
+              fi
+
+              all_ok=false
+            done
+            if $all_ok; then
+              echo "All required CodeQL scans succeeded on commit ${GITHUB_SHA}."
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for required CodeQL scans; refusing to release"
+              exit 1
+            fi
+            echo "Waiting for required CodeQL scans..."
+            sleep 15
+          done
+
+      - name: Create or Update GitHub Release Tag
+        if: steps.check_released.outputs.released == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: "v${{ steps.pkg_info.outputs.version }}"
+        run: |
+          if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Creating GitHub Release ${TAG_NAME}..."
+            gh release create "${TAG_NAME}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG_NAME} - Production Release" \
+              --notes-file CHANGELOG.md
+          else
+            echo "GitHub Release ${TAG_NAME} already exists."
+          fi

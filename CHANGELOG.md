@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] - 2026-09-04
+
+### Fixed
+
+- **`describeFeedGenerator` Canonical AT-URI Fallback to `admin_did`**: When `FEED_URI` is not explicitly set in the environment, `/xrpc/app.bsky.feed.describeFeedGenerator` now falls back to advertising `at://<admin_did>/app.bsky.feed.generator/<feed_rkey>` rather than the service DID (`at://did:web:...`). Because `did:web` represents the service endpoint rather than an ATProto personal data repository, advertising `at://did:web:...` caused external feed crawlers and clients to fail with identity resolution errors (`could not find feed` / `could not resolve identity`).
+- **Dynamic In-Memory Update on Feed Publish**: Wrapped `AppState.feed_uri` in `Arc<RwLock<Option<CompactString>>>` and updated `/api/feed/publish` so that when a user publishes the feed generator record via the dashboard, the advertised canonical `feed_uri` updates dynamically in running memory without requiring a server reboot.
+- **Authoritative `FEED_URI` Preservation & Publisher Identity Gating**: Hardened dynamic feed-URI updates on `/api/feed/publish` to guarantee that an explicitly configured `FEED_URI` environment variable is never overwritten. Gated dynamic updates strictly to the configured administrator DID (`admin_did`), preventing non-admin publishers or unconfigured-admin environments from mutating global feed state.
+
+### Changed
+
+- **Docker Healthcheck Start Period Bumped for Hydration Resilience**: Increased `healthcheck.start_period` in `docker-compose.yml` from `10s` to `180s` (3 minutes). Hydrating snapshots containing >200M edges takes ~87 seconds; the previous 10s start period falsely triggered healthcheck failures and risked premature container restarts.
+- **Deployment Script Awaits Service Health Readiness**: Added a post-launch polling loop to `scripts/deploy.sh` that monitors container health after `docker compose up -d` with an extended 300-second deadline exceeding `start_period` and check intervals, followed by a deadline boundary inspection. This ensures deployments wait until snapshot hydration finishes and prevents users from hitting cold-boot connection errors (Cloudflare 502) while the snapshot is hydrating. The script exits with a non-zero status if the container fails to report healthy within the timeout window.
+- **CI / CD Automated Release & Workflow Hardening**: Replicated `skyauth` release automation and CI quality gate patterns tailored for services: added an automated GitHub Release job to `.github/workflows/ci.yml` that triggers upon merging to `main`, waits for required CodeQL static security scans before tagging, and publishes release notes from `CHANGELOG.md`. Added `publish = false` to `Cargo.toml` to guard against unintended crates.io publishing. Hardened CI workflows with SHA-pinned actions across `ci.yml` and `codeql.yml`, enabled doc-tests (`cargo test --doc`), added workflow concurrency cancellation, and added support for custom base references in `scripts/check_version_bump.sh`.
+
+---
+
 ## [0.4.0] - 2026-09-04
 
 ### Added
