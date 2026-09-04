@@ -241,10 +241,11 @@ pub struct AppState {
     /// Feed record key identifier (e.g. `for-your-consideration`).
     pub feed_rkey: CompactString,
     /// Canonical AT-URI of the published feed generator record, if explicitly configured
-    /// via `FEED_URI`. Used verbatim by `describeFeedGenerator` because the record lives
-    /// in the *publisher's* repository (`at://<publisher-did>/app.bsky.feed.generator/<rkey>`),
-    /// which cannot be derived from the service DID alone.
-    pub feed_uri: Option<CompactString>,
+    /// via `FEED_URI` or dynamically updated via `/api/feed/publish`. Used verbatim by
+    /// `describeFeedGenerator` because the record lives in the *publisher's* repository
+    /// (`at://<publisher-did>/app.bsky.feed.generator/<rkey>`), which cannot be derived
+    /// from the service DID alone.
+    pub feed_uri: Arc<RwLock<Option<CompactString>>>,
     /// Optional administrator DID authorized to publish or modify the official feed generator record.
     pub admin_did: Option<CompactString>,
     /// Server HMAC secret for cryptographically signing and verifying session tokens.
@@ -305,7 +306,7 @@ impl AppState {
             service_did: service_did.into(),
             hostname: hostname.into(),
             feed_rkey: CompactString::new(DEFAULT_FEED_RKEY),
-            feed_uri: None,
+            feed_uri: Arc::new(RwLock::new(None)),
             admin_did: None,
             session_secret: *DEFAULT_SESSION_SECRET,
             service_auth: crate::service_auth::ServiceAuthVerifier::new(),
@@ -389,9 +390,20 @@ impl AppState {
 
     /// Sets the canonical AT-URI of the published feed generator record.
     #[must_use]
-    pub fn with_feed_uri(mut self, feed_uri: impl Into<CompactString>) -> Self {
-        self.feed_uri = Some(feed_uri.into());
+    pub fn with_feed_uri(self, feed_uri: impl Into<CompactString>) -> Self {
+        *self.feed_uri.write() = Some(feed_uri.into());
         self
+    }
+
+    /// Returns the currently configured canonical feed AT-URI, if any.
+    #[must_use]
+    pub fn get_feed_uri(&self) -> Option<CompactString> {
+        self.feed_uri.read().clone()
+    }
+
+    /// Dynamically updates the canonical feed AT-URI (e.g. following a successful publish).
+    pub fn set_feed_uri(&self, feed_uri: impl Into<CompactString>) {
+        *self.feed_uri.write() = Some(feed_uri.into());
     }
 }
 
@@ -1215,15 +1227,22 @@ pub async fn handle_post_feed_publish(
     )
     .await
     {
-        Ok(resp) => (
-            StatusCode::OK,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )],
-            Json(resp),
-        )
-            .into_response(),
+        Ok(resp) => {
+            state.set_feed_uri(resp.uri.clone());
+            tracing::info!(
+                feed_uri = %resp.uri,
+                "Dynamically updated advertised feed URI from successful publish"
+            );
+            (
+                StatusCode::OK,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(resp),
+            )
+                .into_response()
+        }
         Err(FeedError::InvalidInput(msg)) => (
             StatusCode::BAD_REQUEST,
             [(
@@ -1430,12 +1449,13 @@ pub async fn handle_get_did_doc(State(state): State<AppState>) -> impl IntoRespo
 /// Handler for `GET /xrpc/app.bsky.feed.describeFeedGenerator`.
 pub async fn handle_describe_feed_generator(State(state): State<AppState>) -> impl IntoResponse {
     let hostname = state.hostname.as_str().trim_end_matches('/');
-    // Prefer the explicitly-configured canonical record URI (at://<publisher-did>/...);
-    // fall back to the service-DID form when FEED_URI is not configured.
-    let feed_uri = state.feed_uri.clone().unwrap_or_else(|| {
+    // Prefer explicitly-configured or dynamically-published canonical record URI (at://<publisher-did>/...);
+    // fall back to admin DID if known, or service DID if neither is configured.
+    let feed_uri = state.get_feed_uri().unwrap_or_else(|| {
+        let authority = state.admin_did.as_ref().unwrap_or(&state.service_did);
         CompactString::from(format!(
-            "at://{}/app.bsky.feed.generator/{}",
-            state.service_did, state.feed_rkey
+            "at://{authority}/app.bsky.feed.generator/{}",
+            state.feed_rkey
         ))
     });
     let resp = serde_json::json!({
@@ -1859,7 +1879,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_describe_feed_generator_default_and_configured_feed_uri() {
-        // Default: falls back to service-DID record form.
+        // Default: falls back to service-DID record form when no admin DID is set.
         let state = create_test_state();
         let app = create_xrpc_router(state);
         let req = Request::builder()
@@ -1875,10 +1895,27 @@ mod tests {
             "at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration"
         );
 
-        // Configured FEED_URI: advertised verbatim (record lives in the publisher's repo).
+        // Fallback to admin_did when feed_uri is None but admin_did is set.
+        let state_admin = create_test_state().with_admin_did(Some("did:plc:admin123"));
+        let app_admin = create_xrpc_router(state_admin);
+        let req_admin = Request::builder()
+            .uri("/xrpc/app.bsky.feed.describeFeedGenerator")
+            .body(Body::empty())
+            .unwrap();
+        let resp_admin = app_admin.oneshot(req_admin).await.unwrap();
+        assert_eq!(resp_admin.status(), StatusCode::OK);
+        let body_admin = resp_admin.into_body().collect().await.unwrap().to_bytes();
+        let doc_admin: serde_json::Value = serde_json::from_slice(&body_admin).unwrap();
+        assert_eq!(
+            doc_admin["feeds"][0]["uri"],
+            "at://did:plc:admin123/app.bsky.feed.generator/for-your-consideration"
+        );
+
+        // Configured FEED_URI: advertised verbatim (overrides admin_did and service_did).
         let state2 = create_test_state()
+            .with_admin_did(Some("did:plc:admin123"))
             .with_feed_uri("at://did:plc:publisher/app.bsky.feed.generator/for-your-consideration");
-        let app2 = create_xrpc_router(state2);
+        let app2 = create_xrpc_router(state2.clone());
         let req2 = Request::builder()
             .uri("/xrpc/app.bsky.feed.describeFeedGenerator")
             .body(Body::empty())
@@ -1892,6 +1929,24 @@ mod tests {
             "at://did:plc:publisher/app.bsky.feed.generator/for-your-consideration"
         );
         assert_eq!(doc2["did"], "did:web:feed.example.com");
+
+        // Dynamic update: modifying feed_uri in memory immediately updates describeFeedGenerator.
+        state2.set_feed_uri(
+            "at://did:plc:dynamic_updated/app.bsky.feed.generator/for-your-consideration",
+        );
+        let app3 = create_xrpc_router(state2);
+        let req3 = Request::builder()
+            .uri("/xrpc/app.bsky.feed.describeFeedGenerator")
+            .body(Body::empty())
+            .unwrap();
+        let resp3 = app3.oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::OK);
+        let body3 = resp3.into_body().collect().await.unwrap().to_bytes();
+        let doc3: serde_json::Value = serde_json::from_slice(&body3).unwrap();
+        assert_eq!(
+            doc3["feeds"][0]["uri"],
+            "at://did:plc:dynamic_updated/app.bsky.feed.generator/for-your-consideration"
+        );
     }
 
     #[tokio::test]
@@ -2657,5 +2712,63 @@ mod tests {
             .user_oauth_sessions
             .get("did:plc:builder_test_user");
         assert_eq!(retrieved, Some(session));
+    }
+
+    #[tokio::test]
+    async fn test_api_feed_publish_updates_feed_uri_dynamically() {
+        let state = create_test_state().with_admin_did(Some("did:plc:alice_publisher"));
+        let token = crate::auth::generate_session_token_signed(
+            "did:plc:alice_publisher",
+            3600,
+            &state.session_secret,
+        );
+        let app = create_xrpc_router(state.clone());
+
+        // Initially, describeFeedGenerator falls back to admin_did
+        let req1 = Request::builder()
+            .uri("/xrpc/app.bsky.feed.describeFeedGenerator")
+            .body(Body::empty())
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let body1 = resp1.into_body().collect().await.unwrap().to_bytes();
+        let doc1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+        assert_eq!(
+            doc1["feeds"][0]["uri"],
+            "at://did:plc:alice_publisher/app.bsky.feed.generator/for-your-consideration"
+        );
+
+        // Publish new feed record via /api/feed/publish
+        let req_publish = Request::builder()
+            .method(Method::POST)
+            .uri("/api/feed/publish")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"display_name":"New Feed","rkey":"custom-feed-rkey","description":"test"}"#,
+            ))
+            .unwrap();
+        let resp_publish = app.clone().oneshot(req_publish).await.unwrap();
+        assert_eq!(resp_publish.status(), StatusCode::OK);
+        let body_pub = resp_publish.into_body().collect().await.unwrap().to_bytes();
+        let pub_resp: serde_json::Value = serde_json::from_slice(&body_pub).unwrap();
+        assert_eq!(
+            pub_resp["uri"],
+            "at://did:plc:alice_publisher/app.bsky.feed.generator/custom-feed-rkey"
+        );
+
+        // Subsequent describeFeedGenerator reflects the newly published URI immediately
+        let req2 = Request::builder()
+            .uri("/xrpc/app.bsky.feed.describeFeedGenerator")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = resp2.into_body().collect().await.unwrap().to_bytes();
+        let doc2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(
+            doc2["feeds"][0]["uri"],
+            "at://did:plc:alice_publisher/app.bsky.feed.generator/custom-feed-rkey"
+        );
     }
 }

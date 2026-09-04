@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] - 2026-09-04
+
+### Fixed
+
+- **`describeFeedGenerator` Canonical AT-URI Fallback to `admin_did`**: When `FEED_URI` is not explicitly set in the environment, `/xrpc/app.bsky.feed.describeFeedGenerator` now falls back to advertising `at://<admin_did>/app.bsky.feed.generator/<feed_rkey>` rather than the service DID (`at://did:web:...`). Because `did:web` represents the service endpoint rather than an ATProto personal data repository, advertising `at://did:web:...` caused external feed crawlers and clients to fail with identity resolution errors (`could not find feed` / `could not resolve identity`).
+- **Dynamic In-Memory Update on Feed Publish**: Wrapped `AppState.feed_uri` in `Arc<RwLock<Option<CompactString>>>` and updated `/api/feed/publish` so that when a user publishes the feed generator record via the dashboard, the advertised canonical `feed_uri` updates dynamically in running memory without requiring a server reboot.
+
+### Changed
+
+- **Docker Healthcheck Start Period Bumped for Hydration Resilience**: Increased `healthcheck.start_period` in `docker-compose.yml` from `10s` to `180s` (3 minutes). Hydrating snapshots containing >200M edges takes ~87 seconds; the previous 10s start period falsely triggered healthcheck failures and risked premature container restarts.
+- **Deployment Script Awaits Service Health Readiness**: Added a post-launch polling loop to `scripts/deploy.sh` that monitors container health after `docker compose up -d`. This ensures deployments wait until snapshot hydration finishes and prevents users from hitting cold-boot connection errors (Cloudflare 502) while the snapshot is hydrating.
+
+---
+
 ## [0.4.0] - 2026-09-04
 
 ### Added
