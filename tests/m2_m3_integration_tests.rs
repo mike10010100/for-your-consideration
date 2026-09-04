@@ -144,7 +144,7 @@ async fn test_rest_auth_and_preferences_lifecycle() {
     let get_body1 = get_resp1.into_body().collect().await.unwrap().to_bytes();
     let prefs_data1: PreferencesResponseDto = serde_json::from_slice(&get_body1).unwrap();
     assert!(!prefs_data1.is_custom);
-    assert_eq!(prefs_data1.preferences.freshness_hours, 24.0);
+    assert_eq!(prefs_data1.preferences.freshness_hours, 36.0);
 
     // 4. POST /api/preferences with custom values -> 200
     let save_payload = SavePreferencesRequestBody {
