@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Docker Healthcheck Start Period Bumped for Hydration Resilience**: Increased `healthcheck.start_period` in `docker-compose.yml` from `10s` to `180s` (3 minutes). Hydrating snapshots containing >200M edges takes ~87 seconds; the previous 10s start period falsely triggered healthcheck failures and risked premature container restarts.
-- **Deployment Script Awaits Service Health Readiness**: Added a post-launch polling loop to `scripts/deploy.sh` that monitors container health after `docker compose up -d`. This ensures deployments wait until snapshot hydration finishes and prevents users from hitting cold-boot connection errors (Cloudflare 502) while the snapshot is hydrating.
+- **Deployment Script Awaits Service Health Readiness**: Added a post-launch polling loop to `scripts/deploy.sh` that monitors container health after `docker compose up -d`. This ensures deployments wait until snapshot hydration finishes and prevents users from hitting cold-boot connection errors (Cloudflare 502) while the snapshot is hydrating. The script exits with a non-zero status if the container fails to report healthy within the timeout window.
 
 ---
 

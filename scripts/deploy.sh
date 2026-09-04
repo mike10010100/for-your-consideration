@@ -77,8 +77,9 @@ done
 
 if [[ "${HEALTH_STATUS}" != "healthy" ]]; then
     echo ""
-    echo "⚠️  Warning: Container '${CONTAINER_NAME}' did not report healthy within ${MAX_WAIT_SECS}s (status: ${HEALTH_STATUS})." >&2
+    echo "❌ Error: Container '${CONTAINER_NAME}' did not report healthy within ${MAX_WAIT_SECS}s (status: ${HEALTH_STATUS})." >&2
     echo "Check logs: docker logs ${CONTAINER_NAME}" >&2
+    exit 1
 fi
 
 echo "----------------------------------------------------------------------"
