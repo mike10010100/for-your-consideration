@@ -378,6 +378,31 @@ async fn main() -> Result<()> {
         app_state = app_state.with_feed_uri(uri);
     }
 
+    // Service Auth JWT validation mode (SEC: ES256K signature verification).
+    // Default is legacy payload-only; operators opt into enforcement once their
+    // AppView traffic is confirmed to carry signed service tokens.
+    let service_auth_mode = std::env::var("SERVICE_AUTH_MODE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .map_or(ServiceAuthMode::Legacy, |v| match v.as_str() {
+            "enforce" | "strict" | "verify" => {
+                info!("Service Auth: enforcing ES256K signature verification on getFeedSkeleton");
+                ServiceAuthMode::Enforce
+            }
+            "legacy" | "off" | "payload-only" => {
+                info!("Service Auth: legacy payload-only JWT validation (no signature check)");
+                ServiceAuthMode::Legacy
+            }
+            other => {
+                warn!(
+                    value = %other,
+                    "Unknown SERVICE_AUTH_MODE; defaulting to legacy payload-only validation"
+                );
+                ServiceAuthMode::Legacy
+            }
+        });
+    app_state = app_state.with_service_auth_mode(service_auth_mode);
+
     let snapshot_oauth_store = Arc::clone(&app_state.oauth_store);
     let snapshot_user_oauth_sessions = Arc::clone(&app_state.user_oauth_sessions);
     let snapshot_active_users = Arc::clone(&app_state.active_users_tracker);

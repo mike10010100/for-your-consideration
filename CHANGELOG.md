@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-09-04
+
+### Added
+
+- **ES256K Service Auth JWT Signature Verification (Closes the Known Forgery Window)**: `validate_service_jwt` verified only JWT *claims* (exp/aud/DID shape) without checking the cryptographic signature — any client could forge a Bearer token claiming an arbitrary DID on `getFeedSkeleton`, poisoning another account's impression history and reading their saved dials. The new `service_auth` module closes this: the `iss` DID is resolved to its DID document (`did:plc` via PLC directory, `did:web` via `/.well-known/did.json`, SSRF-filtered through `skyauth::identity::IdentityResolver`), the `#atproto` verification method's Multikey is decoded (`0xe7` secp256k1 varint prefix enforced — P-256/RSA key substitution rejected, preventing algorithm confusion), and the signature over `header.payload` is verified with the `k256` crate. Resolved keys are memoized in a 64-shard TTL cache (15 min) with invalidation on signature failure so rotated DID documents re-fetch. A failed verification on a cached key drops the entry so key rotation is picked up on the next request.
+
+### Added
+
+- **`SERVICE_AUTH_MODE` Environment Dial**: `getFeedSkeleton` JWT validation is policy-driven — `enforce`/`strict`/`verify` enables full signature verification (forged tokens degrade to anonymous browsing, never acting as the claimed viewer), while the default `legacy`/`off` keeps payload-only validation as a migration ramp for existing deployments. Enforcement is the recommended production setting.
+- **`service_auth` Module**: `ServiceAuthVerifier` (with exact-match, compile-gated test-key registration for offline suites — no substring backdoors), `DidKeyCache` (64-shard TTL cache matching the repo shard convention), Multikey/multibase decoding, and `#[cfg(debug_assertions)]`-gated test utilities. 10 unit tests cover signature roundtrips, algorithm-confusion rejection, key-type pinning, cache TTL/invalidation, base58 vectors, and fail-closed DID resolution; an integration test proves enforce mode authenticates signed JWTs while forged tokens cannot mutate the claimed viewer's impression history.
+- New dependency: `k256` (pure-Rust secp256k1, `default-features = false`, ecdsa+alloc) — passes `cargo deny` (licenses, advisories, bans).
+
+---
+
 ## [0.3.8] - 2026-09-03
 
 ### Changed

@@ -249,9 +249,36 @@ pub struct AppState {
     pub admin_did: Option<CompactString>,
     /// Server HMAC secret for cryptographically signing and verifying session tokens.
     pub session_secret: [u8; 32],
+    /// ES256K Service Auth JWT signature verifier resolving issuer DID documents.
+    ///
+    /// When `service_auth_mode` is `Enforce`, `getFeedSkeleton` requires Bearer JWTs
+    /// to carry a valid ES256K signature from the issuer's DID-document key. When
+    /// `Legacy` (default), the payload-only validator applies (see [`ServiceAuthMode`]).
+    pub service_auth: crate::service_auth::ServiceAuthVerifier,
+    /// How Service Auth JWTs are validated on the feed endpoint.
+    pub service_auth_mode: ServiceAuthMode,
     /// Server initialization instant for uptime tracking.
     pub start_time: Instant,
 }
+
+/// Policy for Service Auth JWT validation on `getFeedSkeleton`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ServiceAuthMode {
+    /// Payload-only validation (expiration, audience, DID shape) with no signature
+    /// check. Matches the historical behavior of the endpoint; kept as a migration
+    /// ramp for existing deployments and for `AppView` integrations that predate
+    /// signed service auth.
+    #[default]
+    Legacy,
+    /// Full ES256K signature verification against the issuer's DID document.
+    /// Unsigned/forged JWTs degrade to anonymous browsing instead of acting as
+    /// the claimed viewer.
+    Enforce,
+}
+
+// Default is `Legacy` via `#[default(Legacy)]`: the migration ramp keeps existing
+// deployments working until operators explicitly opt into enforcement via
+// `SERVICE_AUTH_MODE=enforce`.
 
 impl AppState {
     /// Creates a new [`AppState`] instance with default snapshot, ingestion trackers, and OAuth store.
@@ -281,8 +308,17 @@ impl AppState {
             feed_uri: None,
             admin_did: None,
             session_secret: *DEFAULT_SESSION_SECRET,
+            service_auth: crate::service_auth::ServiceAuthVerifier::new(),
+            service_auth_mode: ServiceAuthMode::default(),
             start_time: Instant::now(),
         }
+    }
+
+    /// Sets the Service Auth JWT validation mode for the feed endpoint.
+    #[must_use]
+    pub const fn with_service_auth_mode(mut self, mode: ServiceAuthMode) -> Self {
+        self.service_auth_mode = mode;
+        self
     }
 
     /// Sets a custom session signing secret.
@@ -502,20 +538,41 @@ pub async fn handle_get_feed_skeleton(
         }
     };
 
-    // 1. Resolve viewer DID from Authorization Bearer JWT (verifying exp and aud)
+    // 1. Resolve viewer DID from Authorization Bearer JWT.
+    //    Enforce mode: full ES256K signature verification against the issuer's DID
+    //    document (forged JWTs degrade to anonymous browsing).
+    //    Legacy mode: payload-only validation (exp/aud/DID shape), no signature check.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let viewer_did = headers
-        .get(AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|auth_header| {
+    let auth_header_opt = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let viewer_did: Option<String> = match (state.service_auth_mode, auth_header_opt) {
+        (ServiceAuthMode::Enforce, Some(auth_header)) => {
+            // Verification failures are silently downgraded to anonymous: the feed
+            // endpoint remains publicly browsable, but a forged token never gains
+            // another account's dials or impression history. No lock is held across
+            // the await (the verifier clones its cached key Arc before resolving).
+            match state
+                .service_auth
+                .verify_service_jwt(auth_header, Some(state.service_did.as_str()), now_secs)
+                .await
+            {
+                Ok(did) => Some(did.to_string()),
+                Err(err) => {
+                    tracing::warn!(error = %err, "Service Auth JWT verification failed; degrading to anonymous viewer");
+                    None
+                }
+            }
+        }
+        (ServiceAuthMode::Legacy, Some(auth_header)) => {
             validate_service_jwt(auth_header, Some(state.service_did.as_str()), now_secs)
                 .ok()
                 .map(|did| did.to_string())
-        });
+        }
+        _ => None,
+    };
 
     let _in_flight_guard = state
         .active_users_tracker
@@ -1690,7 +1747,7 @@ mod tests {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .unwrap()
             .as_secs();
 
         let u1 = interner.intern("did:plc:user1");
@@ -2353,6 +2410,94 @@ mod tests {
                 .get_viewer_impression_count(vid)
                 > 0,
             "Valid unexpired service JWT must record impressions for the viewer DID"
+        );
+    }
+
+    /// Enforce mode: genuinely ES256K-signed JWTs authenticate the viewer; forged or
+    /// unsigned tokens degrade to anonymous without touching the claimed DID's state.
+    #[tokio::test]
+    async fn test_get_feed_skeleton_enforce_mode_signature_verification() {
+        use k256::ecdsa::{signature::Signer, Signature, SigningKey};
+
+        let state = create_test_state().with_service_auth_mode(ServiceAuthMode::Enforce);
+        let app = create_xrpc_router(state.clone());
+
+        // Register a real secp256k1 key for the test actor (debug-gated test table).
+        let signing = SigningKey::from_bytes(&[77u8; 32].into()).unwrap();
+        let viewer_did = "did:plc:enforce_mode_actor";
+        state
+            .service_auth
+            .register_test_key(viewer_did, *signing.verifying_key());
+
+        let build_url = "/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration&limit=10";
+
+        // 1. Genuinely signed JWT authenticates as the viewer and records impressions.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = now + 3600;
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256K","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"{viewer_did}","sub":"{viewer_did}","aud":"did:web:feed.example.com","exp":{exp},"iat":{now}}}"#
+        ));
+        let signing_input = format!("{header}.{payload}");
+        let sig: Signature = signing.sign(signing_input.as_bytes());
+        let valid_jwt = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(sig.to_bytes().as_slice())
+        );
+
+        let req_valid = Request::builder()
+            .uri(build_url)
+            .header(AUTHORIZATION, format!("Bearer {valid_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_valid = app.clone().oneshot(req_valid).await.unwrap();
+        assert_eq!(resp_valid.status(), StatusCode::OK);
+
+        let vid = state
+            .recommender
+            .interner
+            .lookup_id(viewer_did)
+            .expect("Enforce-mode signed JWT must intern the viewer DID");
+        assert!(
+            state
+                .recommender
+                .impression_store()
+                .get_viewer_impression_count(vid)
+                > 0,
+            "Signed JWT in enforce mode must record impressions for the viewer"
+        );
+        let count_after_signed = state
+            .recommender
+            .impression_store()
+            .get_viewer_impression_count(vid);
+
+        // 2. Forged token (same claims, garbage signature) degrades to anonymous and
+        //    must NOT act as the claimed DID.
+        let forged_jwt = format!("{header}.{payload}.Zm9yZ2VkX3NpZ25hdHVyZV9ieXRlcw");
+        let req_forged = Request::builder()
+            .uri(build_url)
+            .header(AUTHORIZATION, format!("Bearer {forged_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_forged = app.oneshot(req_forged).await.unwrap();
+        assert_eq!(
+            resp_forged.status(),
+            StatusCode::OK,
+            "forged token degrades to anonymous, endpoint stays publicly browsable"
+        );
+
+        // The claimed DID's impression count must not have changed due to the forged
+        // request (only the signed request above recorded an impression).
+        let count_after_forgery = state
+            .recommender
+            .impression_store()
+            .get_viewer_impression_count(vid);
+        assert_eq!(
+            count_after_signed, count_after_forgery,
+            "forged JWT must not mutate the claimed viewer's impression history"
         );
     }
 
