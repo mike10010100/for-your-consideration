@@ -223,10 +223,110 @@ fn check_hostname_ssrf(host: &str, allow_localhost: bool) -> Result<()> {
     Ok(())
 }
 
+/// Returns `true` if the host string is a syntactically valid IP literal in *canonical dotted
+/// decimal / standard IPv6 form* only.
+///
+/// Rust's `IpAddr::FromStr` accepts non-standard shorthand forms (`2130706433`, `0x7f000001`,
+/// `0177.0.0.1` on some platforms) that may be interpreted differently by downstream resolvers.
+/// Restricting IP-literal detection to canonical forms ensures obfuscated loopback / private
+/// literals fall through to the hostname path, where they are rejected by DNS validation
+/// against a real resolver (or rejected as unresolvable).
+const fn is_canonical_ip_literal(host: &str) -> bool {
+    let bytes = host.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+
+    // Leading/trailing dots or consecutive dots are non-canonical IPv4 shorthand
+    // (e.g. "127.0.0.1." is an absolute-form name some resolvers treat as loopback).
+    let mut i = 0usize;
+    let mut prev_dot = true;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            if prev_dot {
+                return false;
+            }
+            prev_dot = true;
+        } else {
+            prev_dot = false;
+        }
+        i += 1;
+    }
+    if prev_dot {
+        return false;
+    }
+
+    let is_ipv4 = {
+        let mut octets = 0usize;
+        let mut i = 0usize;
+        let mut canonical = true;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b.is_ascii_digit() {
+                // Leading zero octets (e.g. "017.0.0.1") and over-long groups are non-canonical.
+                if b == b'0' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    canonical = false;
+                }
+                let mut digits = 0usize;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    digits += 1;
+                    i += 1;
+                }
+                if digits > 3 {
+                    canonical = false;
+                }
+                octets += 1;
+            } else if b == b'.' {
+                i += 1;
+            } else {
+                canonical = false;
+                break;
+            }
+        }
+        canonical && octets == 4
+    };
+
+    if is_ipv4 {
+        return true;
+    }
+
+    // IPv6: require the colon notation (hex groups and/or :: compression).
+    let mut has_colon = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b':' {
+            has_colon = true;
+        } else if !b.is_ascii_hexdigit() && b != b'.' {
+            return false;
+        }
+        i += 1;
+    }
+    has_colon
+}
+
 /// Validates an outbound URL to defend against SSRF attacks (SEC-03).
+///
+/// Synchronous variant: checks the hostname/IP literal only, without DNS resolution.
+/// Prefer [`validate_outbound_url_async`] for user-supplied endpoints, since it also
+/// verifies every address the hostname resolves to.
 pub fn validate_outbound_url(url_str: &str, allow_localhost: bool) -> Result<String> {
     let (host, _port, trimmed) = parse_url_host_and_port(url_str, allow_localhost)?;
     check_hostname_ssrf(&host, allow_localhost)?;
+
+    // Only canonical dotted-decimal IPv4 / standard IPv6 literals are treated as IPs.
+    // Obfuscated literals (e.g. decimal "2130706433" or hex "0x7f000001") are left to
+    // the async DNS validator, which rejects them as unresolvable hostnames.
+    if is_canonical_ip_literal(&host) {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if is_restricted_ip(ip) && (!allow_localhost || !ip.is_loopback()) {
+                return Err(FeedError::Auth(format!(
+                    "SSRF protection: access to private/reserved IP {ip} is forbidden"
+                )));
+            }
+        }
+    }
+
     Ok(trimmed)
 }
 
@@ -235,13 +335,15 @@ pub async fn validate_outbound_url_async(url_str: &str, allow_localhost: bool) -
     let (host, port, trimmed) = parse_url_host_and_port(url_str, allow_localhost)?;
     check_hostname_ssrf(&host, allow_localhost)?;
 
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_restricted_ip(ip) && (!allow_localhost || !ip.is_loopback()) {
-            return Err(FeedError::Auth(format!(
-                "SSRF protection: access to private/reserved IP {ip} is forbidden"
-            )));
+    if is_canonical_ip_literal(&host) {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if is_restricted_ip(ip) && (!allow_localhost || !ip.is_loopback()) {
+                return Err(FeedError::Auth(format!(
+                    "SSRF protection: access to private/reserved IP {ip} is forbidden"
+                )));
+            }
+            return Ok(trimmed);
         }
-        return Ok(trimmed);
     }
 
     match tokio::net::lookup_host((host.as_str(), port)).await {
@@ -263,16 +365,13 @@ pub async fn validate_outbound_url_async(url_str: &str, allow_localhost: bool) -
             }
         }
         Err(e) => {
-            if host.contains("mock")
-                || host.contains("test")
-                || host.contains("example.com")
-                || host.contains("bsky.social")
-                || host.contains("plc.directory")
-            {
-                return Ok(trimmed);
-            }
+            // Fail closed on DNS failure: an unresolvable host must not bypass SSRF
+            // validation (a substring allowlist here would be attacker-controllable).
+            // Offline test fixtures use the `#[cfg(debug_assertions)]` mock fast-paths
+            // and never reach this resolver path.
+            let _ = e;
             return Err(FeedError::Auth(format!(
-                "DNS resolution failed for '{host}': {e}"
+                "DNS resolution failed for '{host}'"
             )));
         }
     }
@@ -281,13 +380,28 @@ pub async fn validate_outbound_url_async(url_str: &str, allow_localhost: bool) -
 }
 
 /// Builds a secure HTTP client with redirect policy disabled.
-#[must_use]
-pub fn build_secure_http_client() -> reqwest::Client {
+///
+/// # Errors
+///
+/// Returns [`FeedError::Server`] if the underlying `reqwest` client cannot be built.
+/// Failing closed (rather than silently falling back to a default client) guarantees the
+/// no-redirect policy is never dropped.
+pub fn build_secure_http_client_checked() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_default()
+        .map_err(|e| FeedError::Server(format!("Failed to build secure HTTP client: {e}")))
+}
+
+/// Builds a secure HTTP client with redirect policy disabled, falling back to the
+/// `reqwest::Client::default()` if the hardened builder fails.
+///
+/// Prefer [`build_secure_http_client_checked`] in fallible contexts; this wrapper is
+/// retained for ergonomic use where a client is required synchronously.
+#[must_use]
+pub fn build_secure_http_client() -> reqwest::Client {
+    build_secure_http_client_checked().unwrap_or_default()
 }
 
 /// Helper function to percent-encode query parameter values according to RFC 3986.
@@ -370,22 +484,11 @@ pub fn validate_service_jwt(
     let payload = parse_jwt_payload_unverified(token)?;
 
     if let Some(exp) = payload.exp {
-        let is_test_token = payload.iss.as_deref().is_some_and(|d| {
-            d.contains("mock")
-                || d.contains("test")
-                || d.contains("alice")
-                || d.contains("bob")
-                || d.contains("carol")
-                || d.contains("user")
-        }) || payload.jti.as_deref().is_some_and(|j| j.contains("mock"));
-
-        let effective_now = if is_test_token && exp >= 1_783_700_000 && now_secs > 1_783_700_000 {
-            1_783_700_000
-        } else {
-            now_secs
-        };
-
-        if effective_now > exp.saturating_add(JWT_CLOCK_SKEW_LEEWAY_SECS) {
+        // RFC 7519 §4.1.4: reject tokens expired beyond the configured clock-skew leeway.
+        // There is deliberately no test-token exemption here: production expiry checks must
+        // never be relaxed based on claim contents, as attacker-controlled `iss`/`jti`
+        // values could otherwise disable expiration enforcement entirely.
+        if now_secs > exp.saturating_add(JWT_CLOCK_SKEW_LEEWAY_SECS) {
             return Err(FeedError::Auth(format!(
                 "Token expired: exp {exp} (+{JWT_CLOCK_SKEW_LEEWAY_SECS}s leeway) < now {now_secs}"
             )));
@@ -570,7 +673,10 @@ pub async fn authenticate_pds_session_with_secret(
         ));
     }
 
-    // Fast-path mock support for testing suites & offline fixtures
+    // Fast-path mock support for testing suites & offline fixtures.
+    // SECURITY: compile-gated to debug builds so release binaries never accept
+    // synthetic credentials that mint real session tokens without PDS verification.
+    #[cfg(debug_assertions)]
     if password_trimmed == "valid-app-password"
         || password_trimmed == "valid-password"
         || password_trimmed.starts_with("mock-")
@@ -600,14 +706,14 @@ pub async fn authenticate_pds_session_with_secret(
         .unwrap_or("https://bsky.social")
         .trim_end_matches('/');
 
-    let validated_pds = validate_outbound_url(base_pds_url, false)?;
+    let validated_pds = validate_outbound_url_async(base_pds_url, false).await?;
     let endpoint = format!("{validated_pds}/xrpc/com.atproto.server.createSession");
     let payload = serde_json::json!({
         "identifier": identifier_trimmed,
         "password": password_trimmed,
     });
 
-    let client = build_secure_http_client();
+    let client = build_secure_http_client_checked()?;
     let response = client
         .post(&endpoint)
         .json(&payload)
@@ -1008,7 +1114,10 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         ));
     }
 
-    // Fast-path mock / offline support for test domains & synthetic test fixtures
+    // Fast-path mock / offline support for test domains & synthetic test fixtures.
+    // SECURITY: compile-gated to debug builds; release binaries must always perform
+    // real identity resolution instead of fabricating DIDs from request strings.
+    #[cfg(debug_assertions)]
     if trimmed.starts_with("did:mock:")
         || trimmed.starts_with("did:plc:mock")
         || trimmed.starts_with("mock_")
@@ -1238,7 +1347,10 @@ pub async fn exchange_oauth_code_with_secret(
         ));
     }
 
-    // Fast-path mock support for testing suites & offline fixtures
+    // Fast-path mock support for testing suites & offline fixtures.
+    // SECURITY: compile-gated to debug builds so release binaries never mint
+    // session tokens from synthetic authorization codes.
+    #[cfg(debug_assertions)]
     if code_trimmed.starts_with("mock_")
         || code_trimmed.starts_with("test_")
         || session_state.token_endpoint.contains("mock")
@@ -1425,7 +1537,10 @@ pub async fn publish_feed_generator_record(
 
     let client = build_secure_http_client();
 
-    // Fast path mock support ONLY for explicit offline test mocks & synthetic test actors
+    // Fast path mock support ONLY for explicit offline test mocks & synthetic test actors.
+    // SECURITY: compile-gated to debug builds; release binaries always perform the real
+    // PDS putRecord write instead of fabricating success responses from claim substrings.
+    #[cfg(debug_assertions)]
     if token.starts_with("fyc_mock_")
         || token == "mock_publish_token"
         || did.starts_with("did:mock:")
@@ -1457,7 +1572,7 @@ pub async fn publish_feed_generator_record(
         );
         let allow_local = pds_endpoint.starts_with("http://127.0.0.1")
             || pds_endpoint.starts_with("http://localhost");
-        let validated_pds = validate_outbound_url(&pds_endpoint, allow_local)?;
+        let validated_pds = validate_outbound_url_async(&pds_endpoint, allow_local).await?;
         let auth_header = format!("{} {}", oauth.token_type, oauth.access_token);
         let ath_val = compute_access_token_hash(&oauth.access_token);
         let ath_ref = Some(ath_val.as_str());
@@ -1621,7 +1736,7 @@ pub async fn publish_feed_generator_record(
             Err(_) => "https://bsky.social".to_string(),
         }
     };
-    let validated_pds = validate_outbound_url(&pds_endpoint, false)?;
+    let validated_pds = validate_outbound_url_async(&pds_endpoint, false).await?;
 
     let access_jwt = if let Some(app_pwd) = req
         .app_password
@@ -2243,6 +2358,66 @@ mod tests {
         // Localhost allowed when allow_localhost = true
         assert!(validate_outbound_url("http://127.0.0.1:3000/oauth/callback", true).is_ok());
         assert!(validate_outbound_url("http://localhost:8080/oauth/callback", true).is_ok());
+    }
+
+    #[test]
+    fn test_canonical_ip_literal_detection_rejects_obfuscated_forms() {
+        // Canonical dotted-decimal IPv4 is recognized as an IP literal.
+        assert!(is_canonical_ip_literal("127.0.0.1"));
+        assert!(is_canonical_ip_literal("169.254.169.254"));
+        assert!(is_canonical_ip_literal("8.8.8.8"));
+        assert!(is_canonical_ip_literal("0.0.0.0"));
+
+        // Obfuscated decimal / hex / octal loopback forms must NOT be treated as canonical
+        // IP literals, so they fall through to the async DNS validator and fail closed.
+        assert!(!is_canonical_ip_literal("2130706433"));
+        assert!(!is_canonical_ip_literal("0x7f000001"));
+        assert!(!is_canonical_ip_literal("0177.0.0.1"));
+        assert!(!is_canonical_ip_literal("127.1"));
+        assert!(!is_canonical_ip_literal("0177.0.0.1"));
+        assert!(!is_canonical_ip_literal("127.0.0.1."));
+
+        // Standard IPv6 colon notation is canonical.
+        assert!(is_canonical_ip_literal("::1"));
+        assert!(is_canonical_ip_literal("2001:db8::1"));
+        // Hostnames are never IP literals.
+        assert!(!is_canonical_ip_literal("bsky.social"));
+        assert!(!is_canonical_ip_literal(""));
+    }
+
+    #[tokio::test]
+    async fn test_validate_outbound_url_async_rejects_obfuscated_ip_literals() {
+        // Decimal and hex shorthand loopback encodings must fail closed: they are not
+        // canonical IP literals, so they go to DNS resolution and fail as unresolvable.
+        assert!(
+            validate_outbound_url_async("https://2130706433/xrpc", false)
+                .await
+                .is_err(),
+            "Decimal-encoded loopback literal must be rejected"
+        );
+        assert!(
+            validate_outbound_url_async("https://0x7f000001/xrpc", false)
+                .await
+                .is_err(),
+            "Hex-encoded loopback literal must be rejected"
+        );
+        assert!(
+            validate_outbound_url_async("https://127.0.0.1/xrpc", false)
+                .await
+                .is_err(),
+            "Canonical loopback literal must be rejected by IP check"
+        );
+
+        // Unresolvable hostnames must fail closed (no substring-based bypass).
+        assert!(
+            validate_outbound_url_async(
+                "https://sub.domain-that-does-not-exist.invalid/xrpc",
+                false
+            )
+            .await
+            .is_err(),
+            "Unresolvable hostname must fail closed"
+        );
     }
 
     #[tokio::test]

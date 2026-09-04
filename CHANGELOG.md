@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-09-03
+
+### Security
+
+- **Removed Service-Auth JWT Expiry Freeze Backdoor**: `validate_service_jwt` previously pinned the effective clock to 2026-07-10 for tokens whose `iss`/`jti` contained substrings like `mock`, `test`, `alice`, `bob`, `carol`, or `user` — attacker-controllable claims that could disable expiration enforcement on real-world DIDs. Expiry is now unconditionally enforced (with the RFC 7519 60-second leeway) with zero claim-based exemptions.
+- **Compile-Gated All Mock Authentication Fast-Paths**: The synthetic-credential fast paths in `authenticate_pds_session_with_secret`, `resolve_identity_pds`, `exchange_oauth_code_with_secret`, and `publish_feed_generator_record` were reachable in release binaries, allowing session-token minting and fabricated identity/publish responses from well-known mock credentials or claim substrings (`alice`, `bob`, `user_`, `example.com`, ...). All four fast paths are now gated behind `#[cfg(debug_assertions)]`; release builds always perform real PDS / identity / token-exchange / repository-write verification.
+- **SSRF Hardening**: `validate_outbound_url` now only treats *canonical* dotted-decimal IPv4 and standard IPv6 colon notation as IP literals; obfuscated forms (`2130706433`, `0x7f000001`, `0177.0.0.1`, `127.1`, `127.0.0.1.`) fall through to DNS validation and fail closed. The DNS-failure substring allowlist (`test`, `example.com`, `bsky.social`, `plc.directory`) was removed — unresolvable hostnames now fail closed. The PDS login (`authenticate_pds_session`) and feed-publish OAuth/app-password paths switched to the DNS-resolving `validate_outbound_url_async` so every resolved address is checked.
+- **`build_secure_http_client` Fails Closed**: Added `build_secure_http_client_checked` returning `Result`; the hardened no-redirect builder failure no longer silently falls back to a default client on security-critical paths (`authenticate_pds_session`).
+- **Single Session-Secret Source of Truth**: `AppState::new` no longer independently re-reads the `SESSION_SECRET` environment variable — the binary entrypoint derives and injects the secret via `with_session_secret`, eliminating divergent derivation logic. Release binaries now **refuse to start** when `SESSION_SECRET` is unset or empty (development builds keep the ephemeral-key fallback).
+- **Strict OAuth Redirect-URI Allowlist**: `GET /api/oauth/login` now accepts only the exact server-origin `/oauth/callback` URI (plus exact loopback callback variants in localhost mode). Substring/suffix matching that accepted embedded-callback tricks (`https://host/evil?x=/oauth/callback`) is removed.
+
+### Changed
+
+- Hardened-test updates: `test_get_feed_skeleton_service_jwt_validation_and_fallback` now asserts that expired / wrong-audience service JWTs degrade to anonymous feeds **without** recording impressions for the claimed DID, and that valid JWTs do; `test_t1_f5_05_login_custom_redirect_uri_strict_allowlist` covers exact-match acceptance and both rejection classes.
+
+---
+
 ## [0.3.2] - 2026-09-03
 
 ### Fixed
