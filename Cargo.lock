@@ -647,7 +647,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "for-your-consideration"
-version = "0.3.8"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -658,6 +658,7 @@ dependencies = [
  "futures-util",
  "http 1.5.0",
  "http-body-util",
+ "k256",
  "mimalloc",
  "p256",
  "parking_lot",
@@ -1060,6 +1061,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "k256"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
+dependencies = [
+ "cfg-if",
+ "ecdsa",
+ "elliptic-curve",
+ "sha2",
 ]
 
 [[package]]

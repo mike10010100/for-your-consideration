@@ -56,6 +56,8 @@ pub mod preferences;
 pub mod recommender;
 /// Axum HTTP XRPC and REST web server.
 pub mod server;
+/// Cryptographic ES256K Service Auth JWT signature verification against DID documents.
+pub mod service_auth;
 /// Atomic binary snapshot persistence with CRC32 verification.
 pub mod snapshot;
 /// Core domain types, compact edges, and DTOs.
@@ -108,7 +110,12 @@ pub mod prelude {
         handle_get_preferences, handle_get_taste_twins, handle_get_telemetry,
         handle_post_auth_login, handle_post_feed_publish, handle_post_oauth_callback,
         handle_post_preferences, serve_xrpc, ActiveUsersTracker, AppState, FeedSkeletonQuery,
-        InFlightRequestGuard, ACTIVE_USERS_SHARDS, DEFAULT_FEED_RKEY,
+        InFlightRequestGuard, ServiceAuthMode, ACTIVE_USERS_SHARDS, DEFAULT_FEED_RKEY,
+    };
+    pub use crate::service_auth::{
+        CachedSigningKey, DidKeyCache, ServiceAuthVerifier, ServiceJwtHeader,
+        DEFAULT_PLC_DIRECTORY_URL, DID_KEY_CACHE_SHARDS, DID_KEY_CACHE_TTL_SECS,
+        REQUIRED_SERVICE_AUTH_ALG,
     };
     pub use crate::snapshot::{
         load_snapshot, load_snapshot_with_preferences, save_snapshot,
