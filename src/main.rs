@@ -73,7 +73,12 @@ async fn main() -> Result<()> {
         .unwrap_or(DEFAULT_PORT);
     let service_did =
         std::env::var("SERVICE_DID").unwrap_or_else(|_| DEFAULT_SERVICE_DID.to_string());
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| DEFAULT_HOSTNAME.to_string());
+    // Prefer FEED_HOSTNAME: the generic HOSTNAME variable is exported by most shells and
+    // CI environments (e.g. "MacBook-Pro.local"), which would silently publish a wrong
+    // hostname in the DID document and OAuth client metadata.
+    let hostname = std::env::var("FEED_HOSTNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| DEFAULT_HOSTNAME.to_string());
     let jetstream_url =
         std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
     let enable_ingestion =
@@ -273,8 +278,6 @@ async fn main() -> Result<()> {
             None
         } else if trimmed.starts_with("did:") {
             Some(CompactString::new(trimmed))
-        } else if trimmed == "mike10010100.com" {
-            Some(CompactString::new("did:plc:mmtjkssv6jeneahkgfdxuy7p"))
         } else {
             match resolve_identity_pds(trimmed).await {
                 Ok(identity) => {
@@ -289,7 +292,8 @@ async fn main() -> Result<()> {
                     warn!(
                         handle = %trimmed,
                         error = %e,
-                        "Failed to resolve ADMIN_HANDLE to DID; continuing without admin restriction"
+                        "Failed to resolve ADMIN_HANDLE to DID; continuing without admin restriction. \
+                         Set ADMIN_DID explicitly to skip resolution."
                     );
                     None
                 }
@@ -304,6 +308,13 @@ async fn main() -> Result<()> {
     }
 
     let feed_rkey = std::env::var("FEED_RKEY").unwrap_or_else(|_| DEFAULT_FEED_RKEY.to_string());
+    // Canonical record URI (at://<publisher-did>/app.bsky.feed.generator/<rkey>). The record
+    // lives in the publisher's repo, which the service DID cannot express, so deployments
+    // that publish under a specific account should set FEED_URI explicitly.
+    let feed_uri = std::env::var("FEED_URI")
+        .ok()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
 
     let (session_secret, is_custom_secret) = std::env::var("SESSION_SECRET").map_or_else(
         |_| {
@@ -350,7 +361,7 @@ async fn main() -> Result<()> {
     }
 
     // 5. Initialize Axum XRPC server with trackers
-    let app_state = AppState::new(
+    let mut app_state = AppState::new(
         Arc::clone(&recommender),
         CompactString::new(&service_did),
         CompactString::new(&hostname),
@@ -361,6 +372,11 @@ async fn main() -> Result<()> {
     .with_admin_did(admin_did)
     .with_snapshot_tracker(Arc::clone(&snapshot_tracker))
     .with_ingestion_tracker(Arc::clone(&ingestion_tracker));
+
+    if let Some(uri) = feed_uri {
+        info!(feed_uri = %uri, "describeFeedGenerator will advertise configured FEED_URI");
+        app_state = app_state.with_feed_uri(uri);
+    }
 
     let snapshot_oauth_store = Arc::clone(&app_state.oauth_store);
     let snapshot_user_oauth_sessions = Arc::clone(&app_state.user_oauth_sessions);

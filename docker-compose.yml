@@ -18,9 +18,10 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=3000
-      - HOSTNAME=${HOSTNAME:-fyc.mike10010100.com}
+      - FEED_HOSTNAME=${HOSTNAME:-fyc.mike10010100.com}
       - SERVICE_DID=${SERVICE_DID:-did:web:fyc.mike10010100.com}
       - FEED_RKEY=${FEED_RKEY:-for-your-consideration}
+      - FEED_URI=${FEED_URI:-}
       - ADMIN_HANDLE=${ADMIN_HANDLE:-mike10010100.com}
       - SESSION_SECRET=${SESSION_SECRET:-}
       - REPLAY_HOURS=${REPLAY_HOURS:-12}

@@ -1104,7 +1104,7 @@ impl Default for SnapshotStatusInfo {
             interval_secs: 300,
             file_path: "snapshot.bin".to_string(),
             file_size_bytes: 0,
-            format_version: 1,
+            format_version: crate::snapshot::SNAPSHOT_FORMAT_VERSION,
         }
     }
 }

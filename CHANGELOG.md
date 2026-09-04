@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.5] - 2026-09-03
+
+### Fixed
+
+- **`describeFeedGenerator` Record URI Correctness**: The feed URI advertised by `GET /xrpc/app.bsky.feed.describeFeedGenerator` was synthesized as `at://<service-did>/app.bsky.feed.generator/<rkey>`, but the generator record is actually published into the **publisher's repository** (`at://<publisher-did>/...`) — a mismatch the Bluesky AppView would surface as an unresolvable feed. Added `FEED_URI` env var (and `AppState::with_feed_uri`) for deployments to declare the canonical record URI explicitly; `describeFeedGenerator` advertises it verbatim when set and falls back to the previous service-DID form otherwise.
+- **`FEED_HOSTNAME` Preference Over `HOSTNAME`**: The binary now prefers the `FEED_HOSTNAME` env var, falling back to `HOSTNAME`. The generic `HOSTNAME` variable is exported by most shells and CI environments (e.g. `MacBook-Pro.local`), which previously caused a bare `cargo run` to silently publish a wrong hostname in the DID document and OAuth client metadata. docker-compose now passes the value as `FEED_HOSTNAME`.
+- **Removed Hard-Coded Personal Admin DID Mapping**: The `ADMIN_HANDLE == "mike10010100.com" → did:plc:...` special case baked into `main.rs` is removed; admin handles are resolved via `resolve_identity_pds` like any other handle, with a hint to set `ADMIN_DID` explicitly when resolution fails.
+- **`SnapshotStatusInfo` Default Version**: `SnapshotStatusInfo::default()` now reports the current snapshot format version constant instead of the stale `1`.
+
+### Added
+
+- `test_describe_feed_generator_default_and_configured_feed_uri` covering both the fallback and the verbatim `FEED_URI` advertisement.
+
+---
+
 ## [0.3.4] - 2026-09-03
 
 ### Fixed
