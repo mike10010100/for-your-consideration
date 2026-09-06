@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.2] - 2026-09-07
+
+### Changed
+
+- **`skyauth` Upgraded 0.2 → 0.3**: Picks up the formally verified OAuth 2.1/DPoP engine's 0.3.0 hardening — DID syntax tightened to spec grammar (`did:plc` exactly 24 lowercase alphanumeric chars, `did:web` userinfo/traversal rejection), SSRF pinned transport ignores environment proxies, bounded DoH responses, state-store admission caps, DPoP `jti` length bounds, and the 48-obligation kernel-bound Verus verification layer. Upstream `default = []` is now empty, so the `axum` feature is requested explicitly. No source changes required; all consumed APIs are unchanged.
+
+---
+
 ## [0.4.1] - 2026-09-04
 
 ### Fixed
