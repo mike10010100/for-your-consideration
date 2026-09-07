@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.3] - 2026-09-07
+
+### Changed
+
+- **Docker Compose Grace Period & Healthcheck Timeout Hardening**: Added `stop_grace_period: 60s` to `docker-compose.yml` to allow the engine sufficient time to cleanly flush and persist memory snapshots to disk on container shutdown or redeployment before Docker issues `SIGKILL`. Extended `healthcheck.timeout` from `5s` to `30s` across `docker-compose.yml` and `Dockerfile` to prevent transient healthcheck failures during high-throughput graph hydration or disk I/O bursts.
+- **Production Snapshot Interval & Graph Retention Tuning**: Tuned default `SNAPSHOT_INTERVAL_SECS` from 300s (5 minutes) to 14,400s (4 hours) across `docker-compose.yml`, `.env.example`, and `Dockerfile` to eliminate heavy recurring disk I/O churn from serializing >200M edges every 5 minutes. Added environment variable parameterization (`${SNAPSHOT_INTERVAL_SECS:-14400}`) in `docker-compose.yml` for operator configurability. Lowered default `RETENTION_DAYS` from 30 days to 14 days in `docker-compose.yml` and `.env.example` to bound long-term graph memory footprint.
+
+---
+
 ## [0.4.2] - 2026-09-07
 
 ### Changed
