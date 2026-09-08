@@ -46,6 +46,12 @@ const DEFAULT_SERVICE_DID: &str = "did:web:feed.example.com";
 const DEFAULT_HOSTNAME: &str = "feed.example.com";
 /// Graceful shutdown timeout in seconds before aborting background tasks.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
+/// Default graph retention in days if not overridden by `RETENTION_DAYS` env var.
+const DEFAULT_RETENTION_DAYS: u64 = 12;
+/// Default snapshot interval in seconds if not overridden by `SNAPSHOT_INTERVAL_SECS` env var.
+const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 14400;
+/// Default periodic store pruning interval in seconds if not overridden by `PRUNE_INTERVAL_SECS` env var.
+const DEFAULT_PRUNE_INTERVAL_SECS: u64 = 900;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -96,7 +102,7 @@ async fn main() -> Result<()> {
     let snapshot_interval_secs = std::env::var("SNAPSHOT_INTERVAL_SECS")
         .ok()
         .and_then(|p| p.parse::<u64>().ok())
-        .unwrap_or(300);
+        .unwrap_or(DEFAULT_SNAPSHOT_INTERVAL_SECS);
     let snapshot_config = SnapshotConfig {
         path: snapshot_path,
         interval_secs: snapshot_interval_secs,
@@ -159,17 +165,39 @@ async fn main() -> Result<()> {
         None
     };
 
+    let retention_days: u64 = std::env::var("RETENTION_DAYS")
+        .ok()
+        .and_then(|d| d.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RETENTION_DAYS);
+
+    let now_epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Prune stale interaction edges from hydrated snapshot before ingesting firehose
+    if restored_cursor.is_some() {
+        let prune_cutoff = now_epoch_secs.saturating_sub(retention_days.saturating_mul(86400));
+        let prune_start = std::time::Instant::now();
+        graph.prune_older_than(prune_cutoff);
+        let prune_stats = graph.stats();
+        let prune_duration_ms = prune_start.elapsed().as_secs_f64() * 1000.0;
+        info!(
+            retention_days = retention_days,
+            prune_cutoff = prune_cutoff,
+            edges_retained = prune_stats.total_interactions,
+            users_retained = prune_stats.total_users,
+            duration_ms = prune_duration_ms,
+            "Startup graph retention prune completed successfully before Jetstream ingestion"
+        );
+    }
+
     // 4. Initialize Jetstream Ingester & Ingestion Tracker with Historical Replay
     let backfill_hours: u64 = std::env::var("REPLAY_HOURS")
         .or_else(|_| std::env::var("BACKFILL_HOURS"))
         .ok()
         .and_then(|h| h.parse::<u64>().ok())
         .unwrap_or(12);
-
-    let now_epoch_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     // Default backfill start: now - backfill_hours
     let backfill_start_us = now_epoch_secs
@@ -403,6 +431,9 @@ async fn main() -> Result<()> {
         });
     app_state = app_state.with_service_auth_mode(service_auth_mode);
 
+    let prune_oauth_store = Arc::clone(&app_state.oauth_store);
+    let prune_user_oauth_sessions = Arc::clone(&app_state.user_oauth_sessions);
+    let prune_active_users = Arc::clone(&app_state.active_users_tracker);
     let snapshot_oauth_store = Arc::clone(&app_state.oauth_store);
     let snapshot_user_oauth_sessions = Arc::clone(&app_state.user_oauth_sessions);
     let snapshot_active_users = Arc::clone(&app_state.active_users_tracker);
@@ -436,6 +467,53 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Spawn Periodic Store Pruning task (SEC-06 memory bounding)
+    let prune_graph = Arc::clone(&graph);
+    let prune_impression_store = Arc::clone(&recommender.impression_store);
+    let prune_cancel = cancel_token.clone();
+    let prune_interval_secs = std::env::var("PRUNE_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PRUNE_INTERVAL_SECS);
+    let prune_interval = Duration::from_secs(prune_interval_secs);
+
+    tasks.spawn(async move {
+        let mut interval = tokio::time::interval(prune_interval);
+        interval.tick().await; // Consume initial immediate tick (startup prune already ran)
+        loop {
+            tokio::select! {
+                () = prune_cancel.cancelled() => {
+                    info!("Periodic store pruning task received shutdown cancellation");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let retention_days: u64 = std::env::var("RETENTION_DAYS")
+                        .ok()
+                        .and_then(|d| d.parse::<u64>().ok())
+                        .unwrap_or(DEFAULT_RETENTION_DAYS);
+                    let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
+                    prune_graph.prune_older_than(prune_cutoff);
+                    prune_impression_store.prune_expired(now_secs);
+                    prune_oauth_store.prune_expired(
+                        for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
+                        now_secs,
+                    );
+                    prune_user_oauth_sessions.prune_expired(now_secs);
+                    prune_active_users.prune_older_than(now_secs.saturating_sub(900));
+                    tracing::debug!(
+                        retention_days = retention_days,
+                        prune_cutoff = prune_cutoff,
+                        "Periodic memory pruning pass completed"
+                    );
+                }
+            }
+        }
+    });
+
     // Spawn Periodic Snapshot Checkpoint and Store Pruning task
     let snapshot_interner = Arc::clone(&interner);
     let snapshot_graph = Arc::clone(&graph);
@@ -465,7 +543,7 @@ async fn main() -> Result<()> {
                     let retention_days: u64 = std::env::var("RETENTION_DAYS")
                         .ok()
                         .and_then(|d| d.parse::<u64>().ok())
-                        .unwrap_or(30);
+                        .unwrap_or(DEFAULT_RETENTION_DAYS);
                     let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
                     snapshot_graph.prune_older_than(prune_cutoff);
                     snapshot_impression_store.prune_expired(now_secs);

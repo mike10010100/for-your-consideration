@@ -25,7 +25,7 @@ services:
       - ADMIN_HANDLE=${ADMIN_HANDLE:-mike10010100.com}
       - SESSION_SECRET=${SESSION_SECRET:-}
       - REPLAY_HOURS=${REPLAY_HOURS:-12}
-      - RETENTION_DAYS=${RETENTION_DAYS:-14}
+      - RETENTION_DAYS=${RETENTION_DAYS:-12}
       - SNAPSHOT_PATH=/data/snapshot.bin
       - SNAPSHOT_INTERVAL_SECS=${SNAPSHOT_INTERVAL_SECS:-14400}
       - RUST_LOG=info,for_your_consideration=info

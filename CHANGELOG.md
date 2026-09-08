@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.4] - 2026-09-08
+
+### Changed
+
+- **Upgrade `skyauth` 0.3.0 → 0.3.2**: Upgraded `skyauth` to version `0.3.2` with `axum` feature enabled, incorporating latest upstream fixes and formal verification guarantees.
+- **Graph Retention Tuning to 12 Days**: Lowered graph retention period default from 14 days to 12 days across `main.rs`, `docker-compose.yml`, `.env`, and `.env.example` to reduce graph memory footprint and interaction edge counts.
+- **Docker Memory Limit Expansion**: Increased container memory limit in `.env` to `49152M` (48 GiB) to provide ample headroom above the hydrated graph baseline for firehose backlog replay and burst ingestion.
+
+### Fixed
+
+- **Startup Graph Retention Pruning**: Fixed OOM death spiral by executing graph retention pruning (`graph.prune_older_than(...)`) immediately upon startup following snapshot hydration. Hydrated graph edges older than the retention cutoff are now discarded before opening Jetstream firehose connections, avoiding memory pressure during downtime catch-up.
+- **Decoupled Periodic In-Memory Store Pruning**: Added a dedicated background memory bounding task (`PRUNE_INTERVAL_SECS`, defaulting to 15 minutes / 900s) that periodically prunes stale interaction edges, impressions, expired OAuth states, and user sessions. This prevents unpruned memory accumulation between the 4-hour disk snapshot checkpoints.
+
+---
+
 ## [0.4.3] - 2026-09-07
 
 ### Changed
