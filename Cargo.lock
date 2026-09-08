@@ -437,7 +437,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "for-your-consideration"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1643,9 +1643,9 @@ dependencies = [
 
 [[package]]
 name = "skyauth"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b65d049e7638f559227d9c76be5f40cc59f0e8707b2f1efd5c74851a02b0dbbe"
+checksum = "82e88c4cf9805c925e34de71562c44ed0905ab79e3d6cac8fdbd8088830cce6d"
 dependencies = [
  "ahash",
  "axum",
