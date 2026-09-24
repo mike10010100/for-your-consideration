@@ -59,9 +59,9 @@ ${COMPOSE_CMD} up -d
 # Wait for feed-engine to hydrate snapshot and become healthy
 echo "⏳ Waiting for feed engine to hydrate snapshot and pass healthcheck..."
 CONTAINER_NAME="for-your-consideration"
-# Grace period in docker-compose.yml is start_period: 3m (180s) with 30s interval and 3 retries.
-# Allow up to 300s (5 minutes) so snapshot hydration + healthcheck interval transitions succeed.
-MAX_WAIT_SECS=300
+# Grace period in docker-compose.yml is start_period: 6m (360s) with 30s interval and 5 retries.
+# Allow up to 480s (8 minutes) so initial legacy snapshot hydration + compaction succeed.
+MAX_WAIT_SECS=480
 ELAPSED=0
 HEALTH_STATUS="unknown"
 

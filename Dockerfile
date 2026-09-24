@@ -66,7 +66,7 @@ ENV HOST=0.0.0.0 \
 EXPOSE 3000
 
 # Container healthcheck
-HEALTHCHECK --interval=30s --timeout=30s --start-period=180s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=30s --start-period=360s --retries=5 \
     CMD curl -f http://localhost:3000/healthz || exit 1
 
 # Start feed engine
