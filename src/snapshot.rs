@@ -35,7 +35,6 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ahash::AHashMap;
 use crc32fast::Hasher;
 use roaring::RoaringBitmap;
 use tracing::info;
@@ -929,26 +928,16 @@ pub fn compact_memory_stores(
     let mut referenced = graph.collect_referenced_ids();
     preferences.collect_referenced_ids(&mut referenced);
 
-    // 2. Build new StringInterner containing only referenced strings
-    let new_interner = StringInterner::new();
-    let mut id_map: AHashMap<u32, u32> = AHashMap::with_capacity(referenced.len() as usize);
+    // 2. Compact StringInterner in-place shard-by-shard, dropping dead strings and maps immediately
+    let id_map = interner.compact_referenced(&referenced);
 
-    for old_id in &referenced {
-        if let Some(s) = interner.resolve(old_id) {
-            let new_id = new_interner.intern(&s);
-            id_map.insert(old_id, new_id);
-        }
-    }
-
-    // 3. Compact graph data structures with remapped IDs
+    // 3. Compact graph data structures with remapped IDs shard-by-shard
     graph.compact(&id_map);
 
     // 4. Compact user preferences with remapped IDs
     preferences.remap(&id_map);
 
-    // 5. Atomically replace interner state
-    let strings_after = new_interner.len();
-    interner.replace_with(new_interner);
+    let strings_after = interner.len();
 
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
     CompactionStats {

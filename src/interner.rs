@@ -1,6 +1,7 @@
 use ahash::AHashMap;
 use compact_str::CompactString;
 use parking_lot::RwLock;
+use roaring::RoaringBitmap;
 
 use crate::error::{FeedError, Result};
 
@@ -182,6 +183,50 @@ impl StringInterner {
             let other_guard = other.shards[i].get_mut();
             *guard = std::mem::take(other_guard);
         }
+    }
+
+    /// Compacts the interner in-place shard-by-shard, retaining only the string IDs present in `referenced`.
+    ///
+    /// Drops dead strings and old reverse lookup maps shard-by-shard, preventing 2x memory spikes during GC.
+    /// Returns the mapping from `old_id -> new_id`.
+    pub fn compact_referenced(&self, referenced: &RoaringBitmap) -> AHashMap<u32, u32> {
+        let mut id_map = AHashMap::with_capacity(referenced.len() as usize);
+
+        let mut shard_ids: [Vec<u32>; NUM_INTERNER_SHARDS] = std::array::from_fn(|_| Vec::new());
+        for id in referenced {
+            let (shard, _) = id_to_shard_and_local(id);
+            if shard < NUM_INTERNER_SHARDS {
+                shard_ids[shard].push(id);
+            }
+        }
+
+        for (shard_idx, ids) in shard_ids.into_iter().enumerate() {
+            let mut guard = self.shards[shard_idx].write();
+            let old_to_str = std::mem::take(&mut guard.to_str);
+            let _ = std::mem::take(&mut guard.to_id);
+
+            let mut new_to_str = Vec::with_capacity(ids.len());
+            let mut new_to_id = AHashMap::with_capacity(ids.len());
+
+            for old_id in ids {
+                let (_, old_local) = id_to_shard_and_local(old_id);
+                if let Some(s) = old_to_str.get(old_local) {
+                    let new_local = new_to_str.len();
+                    let new_id = local_to_id(shard_idx, new_local);
+                    id_map.insert(old_id, new_id);
+                    new_to_id.insert(s.clone(), new_id);
+                    new_to_str.push(s.clone());
+                }
+            }
+
+            new_to_str.shrink_to_fit();
+            new_to_id.shrink_to_fit();
+
+            guard.to_str = new_to_str;
+            guard.to_id = new_to_id;
+        }
+
+        id_map
     }
 
     /// Exports a snapshot clone of all interned strings in deterministic shard and index order.
