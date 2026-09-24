@@ -118,10 +118,11 @@ pub mod prelude {
         REQUIRED_SERVICE_AUTH_ALG,
     };
     pub use crate::snapshot::{
-        load_snapshot, load_snapshot_with_preferences, save_snapshot,
-        save_snapshot_with_preferences, LoadedSnapshot, SnapshotConfig, SnapshotHeader,
-        SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1,
-        SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3, SNAPSHOT_MAGIC,
+        compact_memory_stores, load_snapshot, load_snapshot_with_preferences, save_snapshot,
+        save_snapshot_with_preferences, CompactionStats, LoadedSnapshot, SnapshotConfig,
+        SnapshotHeader, SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION,
+        SNAPSHOT_FORMAT_VERSION_V1, SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3,
+        SNAPSHOT_MAGIC,
     };
     pub use crate::types::{
         ActiveUsersTelemetryInfo, ApiErrorResponse, CompactEdge, DeletePreferencesResponse,

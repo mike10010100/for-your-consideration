@@ -881,13 +881,22 @@ impl GraphStore {
 
     /// Prunes stale interaction edges and metadata older than `cutoff_timestamp_secs`.
     pub fn prune_older_than(&self, cutoff_timestamp_secs: u64) {
+        let mut valid_users = RoaringBitmap::new();
+
         // Prune forward interactions and remove empty entries
         for shard in &self.user_interactions {
             let mut guard = shard.write();
-            for edges in guard.values_mut() {
+            for (&uid, edges) in guard.iter_mut() {
                 edges.retain(|e| e.timestamp_secs() >= cutoff_timestamp_secs);
+                if edges.capacity() > edges.len().saturating_mul(2) + 16 {
+                    edges.shrink_to_fit();
+                }
+                if !edges.is_empty() {
+                    valid_users.insert(uid);
+                }
             }
             guard.retain(|_, edges| !edges.is_empty());
+            guard.shrink_to_fit();
         }
 
         // Prune reverse interactions and remove empty entries
@@ -895,24 +904,298 @@ impl GraphStore {
             let mut guard = shard.write();
             for edges in guard.values_mut() {
                 edges.retain(|e| e.timestamp_secs() >= cutoff_timestamp_secs);
+                if edges.capacity() > edges.len().saturating_mul(2) + 16 {
+                    edges.shrink_to_fit();
+                }
             }
             guard.retain(|_, edges| !edges.is_empty());
+            guard.shrink_to_fit();
         }
 
         // Prune active recent posts
         for shard in &self.active_recent_posts {
             let mut guard = shard.write();
             guard.retain(|_, &mut ts| ts >= cutoff_timestamp_secs);
+            guard.shrink_to_fit();
         }
+
+        let mut valid_posts = RoaringBitmap::new();
 
         // Prune stale post metadata entries
         for shard in &self.post_metadata {
             let mut guard = shard.write();
-            guard.retain(|_, meta| meta.created_at >= cutoff_timestamp_secs);
+            guard.retain(|&pid, meta| {
+                let keep = meta.created_at >= cutoff_timestamp_secs;
+                if keep {
+                    valid_posts.insert(pid);
+                }
+                keep
+            });
+            guard.shrink_to_fit();
+        }
+
+        // Prune author_posts: remove posts that are no longer in post_metadata
+        for shard in &self.author_posts {
+            let mut guard = shard.write();
+            for posts in guard.values_mut() {
+                posts.retain(|pid| valid_posts.contains(*pid));
+                if posts.capacity() > posts.len().saturating_mul(2) + 16 {
+                    posts.shrink_to_fit();
+                }
+            }
+            guard.retain(|_, posts| !posts.is_empty());
+            guard.shrink_to_fit();
+        }
+
+        // Prune user_likes_bitmaps: retain only users with remaining forward interactions
+        for shard in &self.user_likes_bitmaps {
+            let mut guard = shard.write();
+            guard.retain(|uid, _| valid_users.contains(*uid));
+            guard.shrink_to_fit();
         }
 
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
         *self.velocity_cache.write() = None;
+    }
+
+    /// Collects all string IDs currently referenced anywhere across all graph shards into a [`RoaringBitmap`].
+    #[must_use]
+    pub fn collect_referenced_ids(&self) -> RoaringBitmap {
+        let mut ids = RoaringBitmap::new();
+
+        for shard in &self.user_interactions {
+            let guard = shard.read();
+            for (&uid, edges) in guard.iter() {
+                ids.insert(uid);
+                for edge in edges {
+                    ids.insert(edge.target);
+                }
+            }
+        }
+
+        for shard in &self.post_interactions {
+            let guard = shard.read();
+            for (&pid, edges) in guard.iter() {
+                ids.insert(pid);
+                for edge in edges {
+                    ids.insert(edge.target);
+                }
+            }
+        }
+
+        for shard in &self.follows {
+            let guard = shard.read();
+            for (&fid, list) in guard.iter() {
+                ids.insert(fid);
+                for &tid in list {
+                    ids.insert(tid);
+                }
+            }
+        }
+
+        for shard in &self.post_metadata {
+            let guard = shard.read();
+            for (&pid, meta) in guard.iter() {
+                ids.insert(pid);
+                ids.insert(meta.author_id);
+                if let Some(r) = meta.root_id {
+                    ids.insert(r);
+                }
+                if let Some(p) = meta.parent_id {
+                    ids.insert(p);
+                }
+            }
+        }
+
+        for shard in &self.active_recent_posts {
+            let guard = shard.read();
+            for &pid in guard.keys() {
+                ids.insert(pid);
+            }
+        }
+
+        ids
+    }
+
+    /// Compacts and remaps all graph structures with the given old-to-new ID mapping.
+    ///
+    /// Replaces forward/reverse interaction edges, follows, post metadata, and active posts,
+    /// rebuilds user like bitmaps and author indices with clean capacities, and invalidates caches.
+    pub fn compact(&self, id_map: &AHashMap<u32, u32>) {
+        // 1. Remap user_interactions
+        let mut new_user_interactions: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.user_interactions {
+            let guard = shard.read();
+            for (&old_uid, old_edges) in guard.iter() {
+                if let Some(&new_uid) = id_map.get(&old_uid) {
+                    let target_shard = shard_idx(new_uid);
+                    let mut new_edges = Vec::with_capacity(old_edges.len());
+                    for edge in old_edges {
+                        if let Some(&new_target) = id_map.get(&edge.target) {
+                            new_edges.push(CompactEdge {
+                                target: new_target,
+                                packed: edge.packed,
+                            });
+                        }
+                    }
+                    if !new_edges.is_empty() {
+                        new_edges.shrink_to_fit();
+                        new_user_interactions[target_shard].insert(new_uid, new_edges);
+                    }
+                }
+            }
+        }
+        for (s, map) in new_user_interactions.into_iter().enumerate() {
+            *self.user_interactions[s].write() = map;
+        }
+
+        // 2. Remap post_interactions
+        let mut new_post_interactions: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.post_interactions {
+            let guard = shard.read();
+            for (&old_pid, old_edges) in guard.iter() {
+                if let Some(&new_pid) = id_map.get(&old_pid) {
+                    let target_shard = shard_idx(new_pid);
+                    let mut new_edges = Vec::with_capacity(old_edges.len());
+                    for edge in old_edges {
+                        if let Some(&new_target) = id_map.get(&edge.target) {
+                            new_edges.push(CompactEdge {
+                                target: new_target,
+                                packed: edge.packed,
+                            });
+                        }
+                    }
+                    if !new_edges.is_empty() {
+                        new_edges.shrink_to_fit();
+                        new_post_interactions[target_shard].insert(new_pid, new_edges);
+                    }
+                }
+            }
+        }
+        for (s, map) in new_post_interactions.into_iter().enumerate() {
+            *self.post_interactions[s].write() = map;
+        }
+
+        // 3. Rebuild user_likes_bitmaps from user_interactions
+        let mut new_bitmaps: [AHashMap<u32, RoaringBitmap>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.user_interactions {
+            let guard = shard.read();
+            for (&uid, edges) in guard.iter() {
+                let mut bm = RoaringBitmap::new();
+                for edge in edges {
+                    if edge.signal() == SignalType::Like {
+                        bm.insert(edge.target);
+                    }
+                }
+                if !bm.is_empty() {
+                    let target_shard = shard_idx(uid);
+                    new_bitmaps[target_shard].insert(uid, bm);
+                }
+            }
+        }
+        for (s, map) in new_bitmaps.into_iter().enumerate() {
+            *self.user_likes_bitmaps[s].write() = map;
+        }
+
+        // 4. Remap follows
+        let mut new_follows: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.follows {
+            let guard = shard.read();
+            for (&old_fid, old_list) in guard.iter() {
+                if let Some(&new_fid) = id_map.get(&old_fid) {
+                    let target_shard = shard_idx(new_fid);
+                    let mut new_list = Vec::with_capacity(old_list.len());
+                    for &old_tid in old_list {
+                        if let Some(&new_tid) = id_map.get(&old_tid) {
+                            new_list.push(new_tid);
+                        }
+                    }
+                    if !new_list.is_empty() {
+                        new_list.shrink_to_fit();
+                        new_follows[target_shard].insert(new_fid, new_list);
+                    }
+                }
+            }
+        }
+        for (s, map) in new_follows.into_iter().enumerate() {
+            *self.follows[s].write() = map;
+        }
+
+        // 5. Remap post_metadata
+        let mut new_meta: [AHashMap<u32, PostMeta>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.post_metadata {
+            let guard = shard.read();
+            for (&old_pid, meta) in guard.iter() {
+                if let Some(&new_pid) = id_map.get(&old_pid) {
+                    let new_author = id_map
+                        .get(&meta.author_id)
+                        .copied()
+                        .unwrap_or(meta.author_id);
+                    let new_root = meta.root_id.and_then(|r| id_map.get(&r).copied());
+                    let new_parent = meta.parent_id.and_then(|p| id_map.get(&p).copied());
+                    let target_shard = shard_idx(new_pid);
+                    new_meta[target_shard].insert(
+                        new_pid,
+                        PostMeta::new(new_author, new_root, new_parent, meta.created_at),
+                    );
+                }
+            }
+        }
+        for (s, map) in new_meta.into_iter().enumerate() {
+            *self.post_metadata[s].write() = map;
+        }
+
+        // 6. Rebuild author_posts from post_metadata
+        let mut new_author_posts: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.post_metadata {
+            let guard = shard.read();
+            for (&pid, meta) in guard.iter() {
+                let target_shard = shard_idx(meta.author_id);
+                let entry = new_author_posts[target_shard]
+                    .entry(meta.author_id)
+                    .or_default();
+                if !entry.contains(&pid) {
+                    entry.push(pid);
+                }
+            }
+        }
+        for (s, map) in new_author_posts.into_iter().enumerate() {
+            *self.author_posts[s].write() = map;
+        }
+
+        // 7. Remap active_recent_posts
+        let mut new_active: [AHashMap<u32, u64>; NUM_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.active_recent_posts {
+            let guard = shard.read();
+            for (&old_pid, &ts) in guard.iter() {
+                if let Some(&new_pid) = id_map.get(&old_pid) {
+                    let target_shard = shard_idx(new_pid);
+                    new_active[target_shard].insert(new_pid, ts);
+                }
+            }
+        }
+        for (s, map) in new_active.into_iter().enumerate() {
+            *self.active_recent_posts[s].write() = map;
+        }
+
+        // 8. Invalidate velocity cache and mutation counter
+        self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+        *self.velocity_cache.write() = None;
+        self.recent_active_log.write().clear();
     }
 
     /// Returns aggregated statistics for the graph store.
@@ -1512,6 +1795,14 @@ pub struct GraphStats {
     pub total_metadata_entries: usize,
     /// Number of posts tracked in the high-velocity window.
     pub active_velocity_posts: usize,
+}
+
+impl GraphStats {
+    /// Returns the total active node count (distinct users + distinct posts).
+    #[must_use]
+    pub const fn total_nodes(&self) -> usize {
+        self.total_users + self.total_posts
+    }
 }
 
 #[cfg(test)]

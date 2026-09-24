@@ -47,7 +47,7 @@ const DEFAULT_HOSTNAME: &str = "feed.example.com";
 /// Graceful shutdown timeout in seconds before aborting background tasks.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 /// Default graph retention in days if not overridden by `RETENTION_DAYS` env var.
-const DEFAULT_RETENTION_DAYS: u64 = 12;
+const DEFAULT_RETENTION_DAYS: u64 = 4;
 /// Default snapshot interval in seconds if not overridden by `SNAPSHOT_INTERVAL_SECS` env var.
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 14400;
 /// Default periodic store pruning interval in seconds if not overridden by `PRUNE_INTERVAL_SECS` env var.
@@ -189,6 +189,19 @@ async fn main() -> Result<()> {
             users_retained = prune_stats.total_users,
             duration_ms = prune_duration_ms,
             "Startup graph retention prune completed successfully before Jetstream ingestion"
+        );
+
+        // Compact memory stores: garbage-collect dead strings and tightly re-pack graph shards
+        let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
+            &interner,
+            &graph,
+            &preferences_store,
+        );
+        info!(
+            strings_before = compact_stats.strings_before,
+            strings_after = compact_stats.strings_after,
+            duration_ms = compact_stats.duration_ms,
+            "Startup memory store compaction completed successfully before Jetstream ingestion"
         );
     }
 
@@ -468,7 +481,9 @@ async fn main() -> Result<()> {
     }
 
     // Spawn Periodic Store Pruning task (SEC-06 memory bounding)
+    let prune_interner = Arc::clone(&interner);
     let prune_graph = Arc::clone(&graph);
+    let prune_preferences = Arc::clone(&preferences_store);
     let prune_impression_store = Arc::clone(&recommender.impression_store);
     let prune_cancel = cancel_token.clone();
     let prune_interval_secs = std::env::var("PRUNE_INTERVAL_SECS")
@@ -509,6 +524,21 @@ async fn main() -> Result<()> {
                         prune_cutoff = prune_cutoff,
                         "Periodic memory pruning pass completed"
                     );
+
+                    let active_nodes = prune_graph.stats().total_nodes();
+                    if prune_interner.len() > active_nodes.saturating_mul(2).max(100_000) {
+                        let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
+                            &prune_interner,
+                            &prune_graph,
+                            &prune_preferences,
+                        );
+                        info!(
+                            strings_before = compact_stats.strings_before,
+                            strings_after = compact_stats.strings_after,
+                            duration_ms = compact_stats.duration_ms,
+                            "Periodic memory compaction completed"
+                        );
+                    }
                 }
             }
         }
@@ -553,6 +583,18 @@ async fn main() -> Result<()> {
                     );
                     snapshot_user_oauth_sessions.prune_expired(now_secs);
                     snapshot_active_users.prune_older_than(now_secs.saturating_sub(900));
+
+                    let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
+                        &snapshot_interner,
+                        &snapshot_graph,
+                        &snapshot_preferences,
+                    );
+                    info!(
+                        strings_before = compact_stats.strings_before,
+                        strings_after = compact_stats.strings_after,
+                        duration_ms = compact_stats.duration_ms,
+                        "Periodic snapshot memory compaction completed"
+                    );
 
                     tracing::debug!("Triggering periodic snapshot checkpoint");
                     let current_cursor = snapshot_ingester_stats
@@ -633,6 +675,18 @@ async fn main() -> Result<()> {
     let snap_interner = Arc::clone(&interner);
     let snap_graph = Arc::clone(&graph);
     let snap_preferences = Arc::clone(&preferences_store);
+
+    let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
+        &snap_interner,
+        &snap_graph,
+        &snap_preferences,
+    );
+    info!(
+        strings_before = compact_stats.strings_before,
+        strings_after = compact_stats.strings_after,
+        duration_ms = compact_stats.duration_ms,
+        "Shutdown memory compaction completed prior to snapshot"
+    );
 
     let save_res = tokio::task::spawn_blocking(move || {
         save_snapshot_with_preferences(

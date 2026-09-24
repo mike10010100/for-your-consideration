@@ -463,3 +463,112 @@ fn test_snapshot_performance_sub_50ms() {
     // Clean up
     let _ = std::fs::remove_file(&snapshot_path);
 }
+
+#[test]
+fn test_compact_memory_stores_garbage_collection() {
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    let preferences = UserPreferencesStore::new();
+
+    // 1. Populate active entities
+    let uid_alice = interner.intern("did:plc:alice");
+    let uid_bob = interner.intern("did:plc:bob");
+    let pid_active = interner.intern("at://did:plc:bob/app.bsky.feed.post/active");
+
+    // 2. Populate dead entities (will be pruned)
+    let uid_dead = interner.intern("did:plc:dead_author");
+    let pid_stale1 = interner.intern("at://did:plc:dead_author/app.bsky.feed.post/stale1");
+    let _pid_stale2 = interner.intern("at://did:plc:dead_author/app.bsky.feed.post/stale2");
+
+    assert_eq!(interner.len(), 6);
+
+    // 3. Record graph interactions
+    let now = BLUESKY_EPOCH_SECS + 100_000;
+    let old_ts = BLUESKY_EPOCH_SECS + 1_000; // very old
+
+    graph.record_interaction(uid_alice, pid_active, SignalType::Like, now);
+    graph.record_interaction(uid_alice, pid_stale1, SignalType::Like, old_ts);
+    graph.record_post_meta(pid_active, uid_bob, None, None, now);
+    graph.record_post_meta(pid_stale1, uid_dead, None, None, old_ts);
+    graph.record_follow(uid_alice, uid_bob);
+
+    // 4. Save preference for Alice
+    let dials = UserDials::default();
+    preferences.set(uid_alice, dials);
+
+    // 5. Prune older than cutoff (drops stale1 and dead_author)
+    let cutoff = BLUESKY_EPOCH_SECS + 50_000;
+    graph.prune_older_than(cutoff);
+
+    assert_eq!(graph.get_user_interactions(uid_alice).len(), 1);
+    assert_eq!(graph.get_user_interactions(uid_alice)[0].target, pid_active);
+    assert!(graph.get_post_meta(pid_stale1).is_none());
+
+    // 6. Compact memory stores
+    let stats = compact_memory_stores(&interner, &graph, &preferences);
+    assert_eq!(stats.strings_before, 6);
+    assert_eq!(stats.strings_after, 3); // alice, bob, active
+
+    // Dead strings must be purged from interner
+    assert_eq!(interner.lookup_id("did:plc:dead_author"), None);
+    assert_eq!(
+        interner.lookup_id("at://did:plc:dead_author/app.bsky.feed.post/stale1"),
+        None
+    );
+    assert_eq!(
+        interner.lookup_id("at://did:plc:dead_author/app.bsky.feed.post/stale2"),
+        None
+    );
+
+    // Active strings must still exist
+    let new_uid_alice = interner
+        .lookup_id("did:plc:alice")
+        .expect("Alice must exist");
+    let new_uid_bob = interner.lookup_id("did:plc:bob").expect("Bob must exist");
+    let new_pid_active = interner
+        .lookup_id("at://did:plc:bob/app.bsky.feed.post/active")
+        .expect("Active post must exist");
+
+    // Graph must have remapped IDs correctly
+    let alice_edges = graph.get_user_interactions(new_uid_alice);
+    assert_eq!(alice_edges.len(), 1);
+    assert_eq!(alice_edges[0].target, new_pid_active);
+
+    let active_meta = graph
+        .get_post_meta(new_pid_active)
+        .expect("Active meta must exist");
+    assert_eq!(active_meta.author_id, new_uid_bob);
+
+    let follows = graph.get_user_follows(new_uid_alice);
+    assert_eq!(follows, vec![new_uid_bob]);
+
+    let alice_prefs = preferences
+        .get(new_uid_alice)
+        .expect("Alice prefs must exist");
+    assert_eq!(alice_prefs, dials);
+
+    // 7. Verify snapshot roundtrip with compacted state
+    let snapshot_path = temp_snapshot_path("compacted");
+    let save_header =
+        save_snapshot_with_preferences(&snapshot_path, &interner, &graph, &preferences, 12345)
+            .expect("Snapshot save must succeed");
+    assert_eq!(save_header.num_strings, 3);
+
+    let fresh_interner = StringInterner::new();
+    let fresh_graph = GraphStore::new();
+    let fresh_prefs = UserPreferencesStore::new();
+    let loaded =
+        load_snapshot_with_preferences(&snapshot_path, &fresh_interner, &fresh_graph, &fresh_prefs)
+            .expect("Load must succeed")
+            .expect("Snapshot must exist");
+
+    assert_eq!(loaded.header.num_strings, 3);
+    assert_eq!(fresh_interner.len(), 3);
+    assert_eq!(
+        fresh_interner.lookup_id("did:plc:alice"),
+        Some(new_uid_alice)
+    );
+    assert_eq!(fresh_interner.lookup_id("did:plc:dead_author"), None);
+
+    let _ = std::fs::remove_file(&snapshot_path);
+}

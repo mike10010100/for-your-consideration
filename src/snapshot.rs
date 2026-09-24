@@ -35,7 +35,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use compact_str::CompactString;
+use ahash::AHashMap;
 use crc32fast::Hasher;
 use roaring::RoaringBitmap;
 use tracing::info;
@@ -344,8 +344,11 @@ impl<R: Read> StreamReader<R> {
         Ok(list)
     }
 
-    fn read_string(&mut self, len: usize) -> Result<Vec<u8>> {
-        self.read_exact_vec(len, "string")
+    fn read_string_buf(&mut self, len: usize, buf: &mut Vec<u8>) -> Result<()> {
+        self.check_len(len as u64, "string")?;
+        buf.resize(len, 0);
+        self.read_exact(buf)?;
+        Ok(())
     }
 
     fn read_bitmap(&mut self, len: usize) -> Result<Vec<u8>> {
@@ -704,15 +707,16 @@ pub fn load_snapshot_with_preferences(
 
     // Section 1: Strings
     let string_count = stream.read_u32()? as usize;
-    let mut interned_strings = Vec::with_capacity(stream.bound_count(string_count, 8));
+    interner.clear();
+    let mut str_buf = Vec::with_capacity(128);
 
     for _ in 0..string_count {
         let len = stream.read_u32()? as usize;
-        let str_bytes = stream.read_string(len)?;
-        let s = String::from_utf8(str_bytes).map_err(|e| {
+        stream.read_string_buf(len, &mut str_buf)?;
+        let s = std::str::from_utf8(&str_buf).map_err(|e| {
             FeedError::Snapshot(format!("Invalid UTF-8 in string interner snapshot: {e}"))
         })?;
-        interned_strings.push(CompactString::new(s));
+        interner.get_or_intern(s);
     }
 
     // Section 2: User Interactions
@@ -862,8 +866,7 @@ pub fn load_snapshot_with_preferences(
         header_num_preferences
     };
 
-    // 4. Hydrate in-memory stores
-    interner.hydrate_from(interned_strings);
+    // 4. Hydrate in-memory graph store (interner was hydrated directly in Section 1)
     graph.restore_from_snapshot(GraphSnapshotData {
         user_interactions,
         post_interactions,
@@ -897,4 +900,60 @@ pub fn load_snapshot_with_preferences(
         },
         load_duration_ms,
     }))
+}
+
+/// Statistics recorded during memory store compaction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactionStats {
+    /// Number of interned strings before compaction.
+    pub strings_before: usize,
+    /// Number of interned strings retained after compaction.
+    pub strings_after: usize,
+    /// Compaction duration in milliseconds.
+    pub duration_ms: f64,
+}
+
+/// Compacts and garbage-collects all in-memory stores ([`StringInterner`], [`GraphStore`], [`UserPreferencesStore`]).
+///
+/// Discards all unreferenced strings and rebuilds graph structures with tightly packed allocations,
+/// returning freed heap space to the memory allocator.
+pub fn compact_memory_stores(
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
+) -> CompactionStats {
+    let start = Instant::now();
+    let strings_before = interner.len();
+
+    // 1. Collect all referenced string IDs
+    let mut referenced = graph.collect_referenced_ids();
+    preferences.collect_referenced_ids(&mut referenced);
+
+    // 2. Build new StringInterner containing only referenced strings
+    let new_interner = StringInterner::new();
+    let mut id_map: AHashMap<u32, u32> = AHashMap::with_capacity(referenced.len() as usize);
+
+    for old_id in &referenced {
+        if let Some(s) = interner.resolve(old_id) {
+            let new_id = new_interner.intern(&s);
+            id_map.insert(old_id, new_id);
+        }
+    }
+
+    // 3. Compact graph data structures with remapped IDs
+    graph.compact(&id_map);
+
+    // 4. Compact user preferences with remapped IDs
+    preferences.remap(&id_map);
+
+    // 5. Atomically replace interner state
+    let strings_after = new_interner.len();
+    interner.replace_with(new_interner);
+
+    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+    CompactionStats {
+        strings_before,
+        strings_after,
+        duration_ms,
+    }
 }

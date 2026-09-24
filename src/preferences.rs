@@ -14,6 +14,7 @@
 
 use ahash::AHashMap;
 use parking_lot::RwLock;
+use roaring::RoaringBitmap;
 
 use crate::error::{FeedError, Result};
 use crate::interner::StringInterner;
@@ -146,6 +147,36 @@ impl UserPreferencesStore {
     pub fn clear(&self) {
         for shard in &self.shards {
             shard.write().clear();
+        }
+    }
+
+    /// Collects all user IDs that have saved preference profiles into a [`RoaringBitmap`].
+    pub fn collect_referenced_ids(&self, ids: &mut RoaringBitmap) {
+        for shard in &self.shards {
+            let guard = shard.read();
+            for &uid in guard.keys() {
+                ids.insert(uid);
+            }
+        }
+    }
+
+    /// Remaps user preference keys according to the provided ID mapping table.
+    pub fn remap(&self, id_map: &AHashMap<u32, u32>) {
+        let mut new_shards: [AHashMap<u32, UserDials>; PREFERENCE_SHARDS] =
+            std::array::from_fn(|_| AHashMap::new());
+
+        for shard in &self.shards {
+            let guard = shard.read();
+            for (&old_uid, &dials) in guard.iter() {
+                if let Some(&new_uid) = id_map.get(&old_uid) {
+                    let target_shard = shard_idx(new_uid);
+                    new_shards[target_shard].insert(new_uid, dials);
+                }
+            }
+        }
+
+        for (s, map) in new_shards.into_iter().enumerate() {
+            *self.shards[s].write() = map;
         }
     }
 

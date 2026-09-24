@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.5] - 2026-09-24
+
+### Changed
+
+- **Graph Retention Tuning to 4 Days**: Lowered graph retention period default from 12/7 days to 4 days across `main.rs`, `docker-compose.yml`, `.env`, and `.env.example` to bound long-term interaction edge volume (~85M edges) and keep baseline memory comfortably under limits.
+
+### Fixed
+
+- **Permanent In-Memory Store & String Interner Compaction**: Implemented active garbage collection and compaction for the string interner and graph store (`compact_memory_stores`). Unreferenced DIDs and AT-URIs from pruned graph edges are purged rather than accumulating unboundedly. Graph shards, author post indices, and user like bitmaps are reconstructed with tight capacities, freeing gigabytes of heap memory. Compaction runs on startup after retention prune, periodically in the background maintenance task when dead strings accumulate, and before writing periodic/shutdown snapshot checkpoints.
+- **Direct Streaming Snapshot Hydration**: Refactored Section 1 string hydration in `load_snapshot_with_preferences` to stream directly into the `StringInterner` using a reusable byte buffer, eliminating the intermediate ~117M element `Vec<CompactString>` allocation and preventing transient double-allocation memory spikes on boot.
+- **Graph Pruning Capacity Recovery**: Updated `prune_older_than` to also prune stale post IDs from `author_posts` and inactive users from `user_likes_bitmaps`, and added vector/map `shrink_to_fit` to return unused heap capacity to the system allocator.
+
+---
+
 ## [0.4.4] - 2026-09-08
 
 ### Changed

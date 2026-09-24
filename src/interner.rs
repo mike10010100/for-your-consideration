@@ -175,6 +175,15 @@ impl StringInterner {
         }
     }
 
+    /// Atomically replaces the internal state of each shard with another [`StringInterner`].
+    pub fn replace_with(&self, mut other: Self) {
+        for (i, shard) in self.shards.iter().enumerate() {
+            let mut guard = shard.write();
+            let other_guard = other.shards[i].get_mut();
+            *guard = std::mem::take(other_guard);
+        }
+    }
+
     /// Exports a snapshot clone of all interned strings in deterministic shard and index order.
     #[must_use]
     pub fn export_strings(&self) -> Vec<CompactString> {
@@ -333,5 +342,22 @@ mod tests {
             empty_interner.lookup_id("at://did:plc:alice/app.bsky.feed.post/123"),
             Some(id2)
         );
+    }
+
+    #[test]
+    fn test_interner_replace_with() {
+        let interner1 = StringInterner::new();
+        interner1.intern("did:plc:alice");
+        assert_eq!(interner1.len(), 1);
+
+        let interner2 = StringInterner::new();
+        let id_bob = interner2.intern("did:plc:bob");
+        let id_carol = interner2.intern("did:plc:carol");
+
+        interner1.replace_with(interner2);
+        assert_eq!(interner1.len(), 2);
+        assert_eq!(interner1.lookup_id("did:plc:alice"), None);
+        assert_eq!(interner1.lookup_id("did:plc:bob"), Some(id_bob));
+        assert_eq!(interner1.lookup_id("did:plc:carol"), Some(id_carol));
     }
 }
