@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.6] - 2026-09-24
+
+### Changed
+
+- **Graph Retention Tuning to 7 Days**: Raised graph retention period default from 4 days to 7 days across `main.rs`, `docker-compose.yml`, `.env`, and `.env.example`. Enabled by the permanent in-place memory compaction architecture introduced in v0.4.5, allowing a full 7-day interaction history (~150M edges) to fit comfortably within ~18-22 GiB of RAM on 64 GiB hosts with ample headroom.
+
+---
+
 ## [0.4.5] - 2026-09-24
 
 ### Changed

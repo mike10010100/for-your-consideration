@@ -47,7 +47,7 @@ const DEFAULT_HOSTNAME: &str = "feed.example.com";
 /// Graceful shutdown timeout in seconds before aborting background tasks.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 /// Default graph retention in days if not overridden by `RETENTION_DAYS` env var.
-const DEFAULT_RETENTION_DAYS: u64 = 4;
+const DEFAULT_RETENTION_DAYS: u64 = 7;
 /// Default snapshot interval in seconds if not overridden by `SNAPSHOT_INTERVAL_SECS` env var.
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 14400;
 /// Default periodic store pruning interval in seconds if not overridden by `PRUNE_INTERVAL_SECS` env var.
