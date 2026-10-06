@@ -12,10 +12,9 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use for_your_consideration::graph::GraphStore;
 use for_your_consideration::interner::StringInterner;
@@ -334,18 +333,20 @@ fn test_explainability_trace_accuracy_and_format() {
 fn test_concurrency_stress_readers_and_writers() {
     let (interner, graph) = SyntheticGraphBuilder::standard_cold_start_fixture(now());
     let rec = Arc::new(Recommender::new(interner, graph));
-    let stop_flag = Arc::new(AtomicBool::new(false));
     let read_ops = Arc::new(AtomicUsize::new(0));
     let write_ops = Arc::new(AtomicUsize::new(0));
 
     let num_readers = 16;
     let num_writers = 4;
+    // Fixed per-thread iteration budgets make the operation counts deterministic (and thus
+    // non-flaky on saturated CI runners) while all threads still contend concurrently.
+    let reader_iters = 100usize;
+    let writer_iters = 100usize;
     let mut handles = Vec::new();
 
     // Reader threads
     for _thread_id in 0..num_readers {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let read_ops = Arc::clone(&read_ops);
 
         handles.push(thread::spawn(move || {
@@ -356,8 +357,7 @@ fn test_concurrency_stress_readers_and_writers() {
                 None,
                 Some("did:plc:nonexistent"),
             ];
-            let mut i = 0;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..reader_iters {
                 let did = dids[i % dids.len()];
                 let dials = RecommendationDials {
                     limit: 10 + (i % 20),
@@ -368,7 +368,6 @@ fn test_concurrency_stress_readers_and_writers() {
                 let res = rec.recommend(did, &dials, now() + (i as u64 % 500));
                 assert!(res.is_ok());
                 read_ops.fetch_add(1, Ordering::Relaxed);
-                i += 1;
             }
         }));
     }
@@ -376,12 +375,10 @@ fn test_concurrency_stress_readers_and_writers() {
     // Writer threads
     for thread_id in 0..num_writers {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let write_ops = Arc::clone(&write_ops);
 
         handles.push(thread::spawn(move || {
-            let mut i = 0;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..writer_iters {
                 let user_uri = format!("did:plc:concurrent_user_{thread_id}_{i}");
                 let post_uri = format!("at://did:plc:author/app.bsky.feed.post/concurrent_{i}");
                 let uid = rec.interner().intern(&user_uri);
@@ -400,14 +397,9 @@ fn test_concurrency_stress_readers_and_writers() {
                 }
 
                 write_ops.fetch_add(1, Ordering::Relaxed);
-                i += 1;
             }
         }));
     }
-
-    // Run for 300ms under heavy contention
-    thread::sleep(Duration::from_millis(300));
-    stop_flag.store(true, Ordering::Relaxed);
 
     for h in handles {
         h.join().expect("Thread joined successfully");
@@ -415,14 +407,8 @@ fn test_concurrency_stress_readers_and_writers() {
 
     let completed_reads = read_ops.load(Ordering::Relaxed);
     let completed_writes = write_ops.load(Ordering::Relaxed);
-    assert!(
-        completed_reads > 500,
-        "Expected >500 reads, got {completed_reads}"
-    );
-    assert!(
-        completed_writes > 200,
-        "Expected >200 writes, got {completed_writes}"
-    );
+    assert_eq!(completed_reads, num_readers * reader_iters);
+    assert_eq!(completed_writes, num_writers * writer_iters);
 }
 
 // ===========================================================================

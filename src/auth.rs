@@ -2017,7 +2017,7 @@ mod tests {
         assert_eq!(resp.status, "ok");
         assert_eq!(resp.handle, "alice.bsky.social");
         assert!(resp.did.starts_with("did:plc:"));
-        assert!(!resp.token.is_empty());
+        assert_ne!(resp.token, "");
 
         // Invalid password test
         let err = authenticate_pds_session("alice.bsky.social", "invalid-password", None)
@@ -2178,7 +2178,7 @@ mod tests {
         assert_eq!(resp.status.as_str(), "ok");
         assert_eq!(resp.did.as_str(), "did:plc:bob");
         assert_eq!(resp.handle.as_str(), "bob.bsky.social");
-        assert!(!resp.token.is_empty());
+        assert_ne!(resp.token, "");
 
         // Empty code error
         let err = exchange_oauth_code("", &session, "client_id")

@@ -120,7 +120,7 @@ async fn test_rest_auth_and_preferences_lifecycle() {
     let login_body = login_resp.into_body().collect().await.unwrap().to_bytes();
     let login_data: LoginSuccessResponse = serde_json::from_slice(&login_body).unwrap();
     let token = login_data.token;
-    assert!(!token.is_empty());
+    assert_ne!(token, "");
 
     // 2. GET /api/preferences without token -> 401
     let unauth_req = Request::builder()

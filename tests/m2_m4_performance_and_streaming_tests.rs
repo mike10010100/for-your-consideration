@@ -27,7 +27,7 @@ fn test_velocity_pool_ttl_cache_hit_under_continuous_mutations() {
 
     // Query 1 at base_time: should compute candidates and cache them
     let candidates_t0 = graph.get_velocity_pool_candidates_at(base_time + 100, 10);
-    assert!(!candidates_t0.is_empty());
+    assert_ne!(candidates_t0, [] as [u32; 0]);
     assert_eq!(candidates_t0[0], 10); // Highest interaction count
 
     // Simulate 500 firehose mutations at base_time + 2 seconds
@@ -95,7 +95,7 @@ fn test_velocity_pool_ttl_cache_clock_warp_safety() {
 
     // Limit 0 boundary case
     let res_zero = graph.get_velocity_pool_candidates_at(base_time + 2000, 0);
-    assert!(res_zero.is_empty());
+    assert_eq!(res_zero, [] as [u32; 0]);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     };
     let num_strs = interner.stream_strings_to(&mut write_str).unwrap();
     assert_eq!(num_strs, 4);
-    assert!(!string_buf.is_empty());
+    assert_ne!(string_buf, [] as [u8; 0]);
 
     let mut user_edge_buf = Vec::new();
     let mut write_user = |data: &[u8]| -> std::io::Result<()> {
@@ -207,7 +207,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     let (num_users, total_forward) = graph.stream_user_interactions_to(&mut write_user).unwrap();
     assert_eq!(num_users, 2);
     assert_eq!(total_forward, 3);
-    assert!(!user_edge_buf.is_empty());
+    assert_ne!(user_edge_buf, [] as [u8; 0]);
 
     let mut post_edge_buf = Vec::new();
     let mut write_post = |data: &[u8]| -> std::io::Result<()> {
@@ -216,7 +216,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     };
     let num_posts = graph.stream_post_interactions_to(&mut write_post).unwrap();
     assert_eq!(num_posts, 2);
-    assert!(!post_edge_buf.is_empty());
+    assert_ne!(post_edge_buf, [] as [u8; 0]);
 
     let mut bm_out_buf = Vec::new();
     let mut write_bm = |data: &[u8]| -> std::io::Result<()> {
@@ -228,7 +228,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
         .stream_user_likes_bitmaps_to(&mut write_bm, &mut reusable_bm)
         .unwrap();
     assert_eq!(num_bms, 2);
-    assert!(!bm_out_buf.is_empty());
+    assert_ne!(bm_out_buf, [] as [u8; 0]);
 
     let mut follow_buf = Vec::new();
     let mut write_follow = |data: &[u8]| -> std::io::Result<()> {
@@ -237,7 +237,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     };
     let num_follows = graph.stream_follows_to(&mut write_follow).unwrap();
     assert_eq!(num_follows, 1);
-    assert!(!follow_buf.is_empty());
+    assert_ne!(follow_buf, [] as [u8; 0]);
 
     let mut meta_buf = Vec::new();
     let mut write_meta = |data: &[u8]| -> std::io::Result<()> {
@@ -246,7 +246,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     };
     let num_meta = graph.stream_post_metadata_to(&mut write_meta).unwrap();
     assert_eq!(num_meta, 2);
-    assert!(!meta_buf.is_empty());
+    assert_ne!(meta_buf, [] as [u8; 0]);
 
     let mut active_buf = Vec::new();
     let mut write_active = |data: &[u8]| -> std::io::Result<()> {
@@ -257,7 +257,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
         .stream_active_recent_posts_to(&mut write_active)
         .unwrap();
     assert_eq!(num_active, 2);
-    assert!(!active_buf.is_empty());
+    assert_ne!(active_buf, [] as [u8; 0]);
 
     let mut pref_buf = Vec::new();
     let mut write_pref = |data: &[u8]| -> std::io::Result<()> {
@@ -266,7 +266,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
     };
     let num_prefs = preferences.stream_preferences_to(&mut write_pref).unwrap();
     assert_eq!(num_prefs, 1);
-    assert!(!pref_buf.is_empty());
+    assert_ne!(pref_buf, [] as [u8; 0]);
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn test_streaming_snapshot_roundtrip_integrity() {
             .unwrap();
 
         let u_edges = restored_graph.get_user_interactions(user);
-        assert!(!u_edges.is_empty());
+        assert_ne!(u_edges, [] as [for_your_consideration::CompactEdge; 0]);
         assert_eq!(u_edges[0].target(), post);
 
         if i % 3 == 0 {

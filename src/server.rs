@@ -159,7 +159,7 @@ impl ActiveUsersTracker {
     pub fn decrement_in_flight(&self) {
         let _ = self
             .in_flight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
                 Some(val.saturating_sub(1))
             });
     }
@@ -2214,7 +2214,7 @@ mod tests {
         let login_res: LoginSuccessResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(login_res.status, "ok");
         assert_eq!(login_res.handle, "alice.bsky.social");
-        assert!(!login_res.token.is_empty());
+        assert_ne!(login_res.token, "");
     }
 
     #[tokio::test]
@@ -2492,6 +2492,10 @@ mod tests {
 
     /// Enforce mode: genuinely ES256K-signed JWTs authenticate the viewer; forged or
     /// unsigned tokens degrade to anonymous without touching the claimed DID's state.
+    ///
+    /// Relies on the `#[cfg(debug_assertions)]`-only `register_test_key` fast path, so this
+    /// test is intentionally compiled out of optimized/release test builds.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn test_get_feed_skeleton_enforce_mode_signature_verification() {
         use k256::ecdsa::{signature::Signer, Signature, SigningKey};

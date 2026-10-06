@@ -2314,7 +2314,7 @@ mod tests {
         let dials = RecommendationDials::default();
         let candidates = rec.traverse_tier1(viewer, &dials, now);
 
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, Vec::new());
         // Candidate post should be discovered
         assert!(candidates.iter().any(|c| c.post_id == cand_post));
     }

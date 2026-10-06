@@ -383,7 +383,10 @@ fn test_empty_and_sparse_topic_pools_graceful_backfill() {
 
     // 1. Completely empty graph
     let empty_rec = rec.recommend(None, &dials, BASE_NOW).unwrap();
-    assert!(empty_rec.posts.is_empty());
+    assert_eq!(
+        empty_rec.posts,
+        [] as [for_your_consideration::ScoredPost; 0]
+    );
     assert_eq!(empty_rec.cursor, None);
 
     // 2. Only 1 category has posts (e.g. Science only)
@@ -492,7 +495,7 @@ async fn test_high_concurrency_tier3_diversity_queries() {
                 ..Default::default()
             };
             let feed = rec_clone.recommend(None, &dials, BASE_NOW).unwrap();
-            assert!(!feed.posts.is_empty());
+            assert_ne!(feed.posts, [] as [for_your_consideration::ScoredPost; 0]);
             feed.posts.len()
         });
         handles.push(handle);
