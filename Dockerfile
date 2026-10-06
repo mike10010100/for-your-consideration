@@ -60,6 +60,7 @@ ENV HOST=0.0.0.0 \
     PORT=3000 \
     SNAPSHOT_PATH=/data/snapshot.bin \
     SNAPSHOT_INTERVAL_SECS=14400 \
+    SHUTDOWN_SAVE_TIMEOUT_SECS=240 \
     RUST_LOG=info,for_your_consideration=info
 
 # Expose HTTP port

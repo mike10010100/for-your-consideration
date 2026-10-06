@@ -65,6 +65,26 @@ pub const MAX_SEED_POSTS: usize = 50;
 /// Maximum number of reverse interaction edges sliced per post during collaborative filtering walks.
 pub const MAX_POST_EDGES: usize = 500;
 
+/// Maximum number of recent interaction edges expanded per co-interactor during Tier 1 walks.
+///
+/// Bounds fan-out from very high-activity accounts whose full history can otherwise dominate a
+/// single query.
+pub const MAX_CO_INTERACTOR_EDGES: usize = 2_000;
+
+/// Maximum number of distinct candidate posts materialized (scored) per recommendation/preview query.
+///
+/// Caps the post-candidate materialization stage, which otherwise grows with the combined histories
+/// of up to [`MAX_CO_INTERACTORS`] neighbors.
+pub const MAX_CANDIDATE_EVALS: usize = 10_000;
+
+/// Maximum number of distinct co-interactor candidates examined in the Tier 1 taste-similarity step.
+///
+/// The co-interactor scan intersects the viewer's like-bitmap against each neighbor's bitmap; cost
+/// grows with the number of neighbors *and* with viewer like-count (bitmap container count). Capping
+/// the number of neighbors examined bounds this quadratic term. Seeds and post edges are already
+/// most-recent-bounded, so this is a consistent deterministic sampling bound.
+pub const MAX_CO_INTERACTOR_SCAN: usize = 5_000;
+
 /// Maximum number of top co-interactor neighbors retained by Bayesian taste similarity.
 pub const MAX_CO_INTERACTORS: usize = 100;
 
@@ -1151,14 +1171,28 @@ impl Recommender {
                     let v_len = v_bm.len() as f32;
                     if v_len > 0.0 {
                         let sqrt_v_len = v_len.sqrt();
+                        // Bound the number of distinct neighbors intersected. Seeds and post edges
+                        // are already most-recent-bounded, so this deterministically caps the
+                        // quadratic viewer-bitmap x neighbor-bitmap work on large graphs.
+                        let mut scan_capped = false;
                         for post_id in seed_post_ids {
+                            if scan_capped {
+                                break;
+                            }
                             self.graph
                                 .with_post_interactions(post_id, |post_interactions| {
                                     let p_edges_slice =
                                         tail_bounded(post_interactions, MAX_POST_EDGES);
                                     for p_edge in p_edges_slice {
+                                        if scan_capped {
+                                            break;
+                                        }
                                         let co_user = p_edge.target();
                                         if co_user != uid && seen_co_users.insert(co_user) {
+                                            if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
+                                                scan_capped = true;
+                                                break;
+                                            }
                                             self.graph.with_user_likes_bitmap(
                                                 co_user,
                                                 |c_bm_opt| {
@@ -1209,7 +1243,7 @@ impl Recommender {
                     seen_posts_for_curator.clear();
                     self.graph
                         .with_user_interactions(co_user, |co_interactions| {
-                            for c_edge in co_interactions {
+                            for c_edge in tail_bounded(co_interactions, MAX_CO_INTERACTOR_EDGES) {
                                 let cand_pid = c_edge.target();
                                 let decay = calculate_time_decay(
                                     c_edge.signal(),
@@ -1232,8 +1266,22 @@ impl Recommender {
                         });
                 }
 
-                for (pid, (curator_count, total_sim, total_affinity, latest_decay)) in cand_details
-                {
+                // Bound candidate materialization: at most MAX_CANDIDATE_EVALS distinct posts are
+                // scored, keeping the highest-affinity candidates. This caps the stage whose cost
+                // otherwise grows with the combined histories of up to MAX_CO_INTERACTORS neighbors.
+                let mut cand_vec: Vec<(u32, (usize, f32, f32, f32))> =
+                    cand_details.into_iter().collect();
+                if cand_vec.len() > MAX_CANDIDATE_EVALS {
+                    cand_vec.select_nth_unstable_by(MAX_CANDIDATE_EVALS, |a, b| {
+                        b.1 .2
+                            .partial_cmp(&a.1 .2)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                    cand_vec.truncate(MAX_CANDIDATE_EVALS);
+                }
+
+                for (pid, (curator_count, total_sim, total_affinity, latest_decay)) in cand_vec {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
@@ -1517,7 +1565,11 @@ impl Recommender {
         });
 
         // Step 1 & 2: Viewer -> Seed Posts -> Co-interactors
+        let mut scan_capped = false;
         for post_id in seed_post_ids {
+            if scan_capped {
+                break;
+            }
             self.graph.with_post_interactions(post_id, |p_edges| {
                 let p_edges_slice = if p_edges.len() > MAX_POST_EDGES {
                     &p_edges[p_edges.len() - MAX_POST_EDGES..]
@@ -1525,8 +1577,15 @@ impl Recommender {
                     p_edges
                 };
                 for p_edge in p_edges_slice {
+                    if scan_capped {
+                        break;
+                    }
                     let co_user = p_edge.target();
                     if co_user != viewer_id && seen_co_users.insert(co_user) {
+                        if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
+                            scan_capped = true;
+                            break;
+                        }
                         self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
                             if let Some(c_bm) = c_bm_opt {
                                 let inter_len = v_bm.intersection_len(c_bm);

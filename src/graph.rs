@@ -263,6 +263,9 @@ pub struct GraphStore {
     active_recent_posts: [RwLock<AHashMap<u32, u64>>; NUM_SHARDS],
     /// Monotonic mutation counter for cache invalidation
     mutation_counter: AtomicU64,
+    /// Highest interaction timestamp ever recorded (monotonic max), tracked in O(1) so read paths
+    /// never rescan `active_recent_posts`.
+    latest_timestamp: AtomicU64,
     /// Cached velocity pool candidates
     velocity_cache: RwLock<Option<VelocityCandidateCache>>,
     /// Chronological circular ring buffer of recent post interactions: `(timestamp_secs, post_id)`
@@ -288,6 +291,7 @@ impl GraphStore {
             author_posts: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             active_recent_posts: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             mutation_counter: AtomicU64::new(0),
+            latest_timestamp: AtomicU64::new(crate::types::BLUESKY_EPOCH_SECS),
             velocity_cache: RwLock::new(None),
             recent_active_log: RwLock::new(RecentActiveRingBuffer::default()),
         }
@@ -350,6 +354,9 @@ impl GraphStore {
                 *entry = timestamp;
             }
         }
+        // Track the global max timestamp in O(1) for read-path ordering decisions.
+        self.latest_timestamp
+            .fetch_max(timestamp, Ordering::Relaxed);
 
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
         self.recent_active_log.write().push(timestamp, post_id);
@@ -867,16 +874,7 @@ impl GraphStore {
     /// Returns the latest interaction timestamp recorded in the graph.
     #[must_use]
     pub fn get_latest_interaction_timestamp(&self) -> u64 {
-        let mut max_ts = crate::types::BLUESKY_EPOCH_SECS;
-        for shard in &self.active_recent_posts {
-            let guard = shard.read();
-            for &ts in guard.values() {
-                if ts > max_ts {
-                    max_ts = ts;
-                }
-            }
-        }
-        max_ts
+        self.latest_timestamp.load(Ordering::Relaxed)
     }
 
     /// Prunes stale interaction edges and metadata older than `cutoff_timestamp_secs`.
@@ -1309,6 +1307,8 @@ impl GraphStore {
             shard.write().clear();
         }
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+        self.latest_timestamp
+            .store(crate::types::BLUESKY_EPOCH_SECS, Ordering::Relaxed);
         self.recent_active_log.write().clear();
         *self.velocity_cache.write() = None;
     }
@@ -1470,6 +1470,14 @@ impl GraphStore {
                 log.push(ts, pid);
             }
         }
+        // Recompute the O(1) max-timestamp tracker from the restored active posts.
+        let mut max_ts = crate::types::BLUESKY_EPOCH_SECS;
+        for &(_, ts) in &data.active_recent_posts {
+            if ts > max_ts {
+                max_ts = ts;
+            }
+        }
+        self.latest_timestamp.store(max_ts, Ordering::Relaxed);
         *self.velocity_cache.write() = None;
     }
 
@@ -1819,6 +1827,34 @@ mod tests {
         let bitmap = graph.get_user_likes_bitmap(u1).unwrap();
         assert!(bitmap.contains(p1));
         assert_eq!(bitmap.len(), 1);
+    }
+
+    #[test]
+    fn test_latest_interaction_timestamp_is_monotonic_max() {
+        let graph = GraphStore::new();
+        assert_eq!(graph.get_latest_interaction_timestamp(), BLUESKY_EPOCH_SECS);
+
+        // Out-of-order inserts must still track the running maximum in O(1).
+        graph.record_interaction(1, 100, SignalType::Like, BLUESKY_EPOCH_SECS + 500);
+        assert_eq!(
+            graph.get_latest_interaction_timestamp(),
+            BLUESKY_EPOCH_SECS + 500
+        );
+        graph.record_interaction(2, 101, SignalType::Like, BLUESKY_EPOCH_SECS + 100);
+        assert_eq!(
+            graph.get_latest_interaction_timestamp(),
+            BLUESKY_EPOCH_SECS + 500,
+            "older timestamp must not lower the tracked maximum"
+        );
+        graph.record_interaction(3, 102, SignalType::Repost, BLUESKY_EPOCH_SECS + 900);
+        assert_eq!(
+            graph.get_latest_interaction_timestamp(),
+            BLUESKY_EPOCH_SECS + 900
+        );
+
+        // clear() resets the tracker.
+        graph.clear();
+        assert_eq!(graph.get_latest_interaction_timestamp(), BLUESKY_EPOCH_SECS);
     }
 
     #[test]

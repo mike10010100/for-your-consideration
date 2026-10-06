@@ -32,6 +32,7 @@ use for_your_consideration::prelude::*;
 use rand::RngCore;
 use sha2::Digest;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -52,6 +53,10 @@ const DEFAULT_RETENTION_DAYS: u64 = 7;
 const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 14400;
 /// Default periodic store pruning interval in seconds if not overridden by `PRUNE_INTERVAL_SECS` env var.
 const DEFAULT_PRUNE_INTERVAL_SECS: u64 = 900;
+
+/// Default timeout in seconds for the final shutdown snapshot save. Must fit inside Docker's
+/// `stop_grace_period` after the bounded drain; override with `SHUTDOWN_SAVE_TIMEOUT_SECS`.
+const DEFAULT_SHUTDOWN_SAVE_TIMEOUT_SECS: u64 = 240;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -107,6 +112,15 @@ async fn main() -> Result<()> {
         path: snapshot_path,
         interval_secs: snapshot_interval_secs,
     };
+
+    // Final shutdown save timeout (seconds). Must fit inside Docker's `stop_grace_period` with
+    // margin for the drain phase; env-configurable so operators can raise it alongside the grace
+    // period for very large stores.
+    let shutdown_save_timeout_secs = std::env::var("SHUTDOWN_SAVE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_SHUTDOWN_SAVE_TIMEOUT_SECS);
 
     // 3. Initialize core domain services
     let interner = Arc::new(StringInterner::new());
@@ -554,6 +568,9 @@ async fn main() -> Result<()> {
     let snapshot_interval = Duration::from_secs(snapshot_config.interval_secs);
     let snapshot_ingester_stats = Arc::clone(ingester.stats());
     let periodic_snapshot_tracker = Arc::clone(&snapshot_tracker);
+    // Serializes periodic and shutdown snapshot writes so they never race the same `.tmp` path.
+    let snapshot_save_slot: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
+    let periodic_save_slot = Arc::clone(&snapshot_save_slot);
 
     tasks.spawn(async move {
         let mut interval = tokio::time::interval(snapshot_interval);
@@ -584,17 +601,11 @@ async fn main() -> Result<()> {
                     snapshot_user_oauth_sessions.prune_expired(now_secs);
                     snapshot_active_users.prune_older_than(now_secs.saturating_sub(900));
 
-                    let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
-                        &snapshot_interner,
-                        &snapshot_graph,
-                        &snapshot_preferences,
-                    );
-                    info!(
-                        strings_before = compact_stats.strings_before,
-                        strings_after = compact_stats.strings_after,
-                        duration_ms = compact_stats.duration_ms,
-                        "Periodic snapshot memory compaction completed"
-                    );
+                    // NOTE: Compaction is intentionally NOT run here. It is an O(data) rebuild that
+                    // can take minutes on large stores and would both delay this checkpoint and
+                    // block a concurrent shutdown. Dead-string memory reclamation is handled by the
+                    // dedicated periodic prune task (`PRUNE_INTERVAL_SECS`), which compacts only when
+                    // the interner grows beyond the active-node threshold.
 
                     tracing::debug!("Triggering periodic snapshot checkpoint");
                     let current_cursor = snapshot_ingester_stats
@@ -605,8 +616,11 @@ async fn main() -> Result<()> {
                     let snap_interner = Arc::clone(&snapshot_interner);
                     let snap_graph = Arc::clone(&snapshot_graph);
                     let snap_preferences = Arc::clone(&snapshot_preferences);
+                    let save_slot = Arc::clone(&periodic_save_slot);
 
                     let save_res = tokio::task::spawn_blocking(move || {
+                        // Serialize against any concurrent (shutdown) save on the same `.tmp` path.
+                        let _guard = save_slot.blocking_lock();
                         save_snapshot_with_preferences(
                             &snap_path,
                             &snap_interner,
@@ -667,7 +681,14 @@ async fn main() -> Result<()> {
         info!("All background tasks shut down cleanly.");
     }
 
-    // 10. Persist final snapshot on graceful shutdown
+    // 10. Persist final snapshot on graceful shutdown.
+    //
+    // NOTE: The final save intentionally does NOT run `compact_memory_stores` first. Compaction is
+    // an O(data) rebuild that took ~210s on a 36M-string production store, which blows far past
+    // Docker's `stop_grace_period` and caused SIGKILL *before* the save could even begin (losing
+    // the checkpoint). Compaction is not required for a correct save — the serializer streams
+    // whatever is currently interned — and dead-string reclamation is handled by the periodic
+    // prune task on the next run. A dedicated save timeout keeps the critical path bounded.
     let final_cursor = ingester.latest_cursor();
     info!("Persisting final snapshot on graceful shutdown...");
     let start_final = std::time::Instant::now();
@@ -675,32 +696,26 @@ async fn main() -> Result<()> {
     let snap_interner = Arc::clone(&interner);
     let snap_graph = Arc::clone(&graph);
     let snap_preferences = Arc::clone(&preferences_store);
+    let save_slot = Arc::clone(&snapshot_save_slot);
 
-    let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
-        &snap_interner,
-        &snap_graph,
-        &snap_preferences,
-    );
-    info!(
-        strings_before = compact_stats.strings_before,
-        strings_after = compact_stats.strings_after,
-        duration_ms = compact_stats.duration_ms,
-        "Shutdown memory compaction completed prior to snapshot"
-    );
-
-    let save_res = tokio::task::spawn_blocking(move || {
-        save_snapshot_with_preferences(
-            &snap_path,
-            &snap_interner,
-            &snap_graph,
-            &snap_preferences,
-            final_cursor,
-        )
-    })
+    let save_res = tokio::time::timeout(
+        Duration::from_secs(shutdown_save_timeout_secs),
+        tokio::task::spawn_blocking(move || {
+            // Serialize against any in-flight periodic save so the two never race the `.tmp` path.
+            let _guard = save_slot.blocking_lock();
+            save_snapshot_with_preferences(
+                &snap_path,
+                &snap_interner,
+                &snap_graph,
+                &snap_preferences,
+                final_cursor,
+            )
+        }),
+    )
     .await;
 
     match save_res {
-        Ok(Ok(_)) => {
+        Ok(Ok(Ok(_))) => {
             let duration_ms = start_final.elapsed().as_secs_f64() * 1000.0;
             let file_size = snapshot_config.path.metadata().map_or(0, |m| m.len());
             snapshot_tracker.record_save(duration_ms, file_size);
@@ -709,13 +724,20 @@ async fn main() -> Result<()> {
                 snapshot_config.path.display()
             );
         }
-        Ok(Err(e)) => {
+        Ok(Ok(Err(e))) => {
             snapshot_tracker.record_save_failure(&e.to_string());
             error!(error = %e, "Final shutdown snapshot save failed");
         }
-        Err(join_err) => {
+        Ok(Err(join_err)) => {
             snapshot_tracker.record_save_failure(&join_err.to_string());
             error!(error = %join_err, "Final shutdown snapshot spawn_blocking join error");
+        }
+        Err(_) => {
+            let msg = format!(
+                "Final shutdown snapshot save exceeded {shutdown_save_timeout_secs}s timeout"
+            );
+            snapshot_tracker.record_save_failure(&msg);
+            error!("{msg}");
         }
     }
 
