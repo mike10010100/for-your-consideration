@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.8] - 2026-10-06
+
+### Fixed
+
+- **Release-Latency Job Flake (Concurrent Benchmarks)**: The release-mode latency job added in v0.4.7 exposed that concurrent benchmarks assert wall-clock percentiles that are dominated by OS thread preemption on a shared ~2-4 vCPU CI runner (8 query/writer threads), not by engine latency — `test_empirical_concurrent_multi_curator_latency_benchmark` flaked at both p99 and p90. These benchmarks now assert only the median (still sensitive to real regressions, immune to scheduling jitter) and keep p90/p99/max printed for observability, while the strict per-query tail SLA remains enforced by the single-threaded release-latency targets (`adversarial_challenge`, `recommender_api_tests`, `preview_challenger_tests`). Affected: `m2_challenger2_social_proof_and_consensus_tests`, `adversarial_ingest_tests`, `m2_m4_adversarial_challenger_tests`.
+
+---
+
 ## [0.4.7] - 2026-10-06
 
 ### Fixed
