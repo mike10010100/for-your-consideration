@@ -64,8 +64,10 @@ fn test_adversarial_high_throughput_mutation_burst_cache_hits() {
     let query_time = t0 + 4; // 4 seconds after t0 (< 10s TTL)
     let mut hit_latencies = Vec::new();
 
-    // Loop until writers have produced at least 5,000 mutations to guarantee high-burst conditions
-    while mutation_count.load(Ordering::Relaxed) < 5000 {
+    // Loop until writers have produced at least 5,000 mutations to guarantee high-burst conditions.
+    // The body runs at least once so `hit_latencies` is never empty, even when the writer threads
+    // race ahead of the reader under instrumentation (e.g. `cargo llvm-cov`).
+    loop {
         let start = Instant::now();
         let candidates = graph.get_velocity_pool_candidates_at(query_time, 20);
         let elapsed = start.elapsed();
@@ -73,6 +75,10 @@ fn test_adversarial_high_throughput_mutation_burst_cache_hits() {
 
         // Verify result matches cached output exactly (no re-scan)
         assert_eq!(candidates, initial_candidates);
+
+        if mutation_count.load(Ordering::Relaxed) >= 5000 {
+            break;
+        }
     }
 
     // Stop writers
