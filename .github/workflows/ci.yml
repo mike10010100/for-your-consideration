@@ -114,7 +114,7 @@ jobs:
       # `test` job. Runs single-threaded so wall-clock budgets are not contended.
       - name: Run release-mode latency SLA tests
         run: |
-          cargo test --release --test adversarial_challenge \
+          cargo test --release --no-fail-fast --test adversarial_challenge \
             --test adversarial_impression_stress \
             --test adversarial_ingest_tests \
             --test adversarial_m1_storage_challenge \
