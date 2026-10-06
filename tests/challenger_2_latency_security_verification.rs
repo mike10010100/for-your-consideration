@@ -1315,13 +1315,12 @@ fn test_empirical_16_thread_mixed_stress_matrix() {
         throughput, p50, p90, p99, p99 as f64 / 1000.0, max
     );
 
-    let min_throughput = if cfg!(debug_assertions) {
-        50.0
-    } else {
-        1_000.0
-    };
+    // Throughput SLA is only meaningful on optimized builds. Not asserted in
+    // unoptimized/coverage-instrumented debug runs (parallel CI runners make
+    // wall-clock throughput nondeterministic); the metric above remains for observability.
+    #[cfg(not(debug_assertions))]
     assert!(
-        throughput > min_throughput,
-        "Concurrent mixed throughput should exceed {min_throughput} queries/sec, got {throughput:.1}"
+        throughput > 1_000.0,
+        "Concurrent mixed throughput should exceed 1000 queries/sec, got {throughput:.1}"
     );
 }

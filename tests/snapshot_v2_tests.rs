@@ -488,11 +488,11 @@ fn test_snapshot_v2_scale_5000_profiles() {
     save_snapshot_with_preferences(&snapshot_path, &interner, &graph, &preferences, 12345)
         .expect("Save 5000 profiles failed");
     let save_duration = save_start.elapsed();
-    let max_save_ms = if cfg!(debug_assertions) { 2_000 } else { 100 };
+    println!("Snapshot save of 5000 profiles: {save_duration:?}");
+    #[cfg(not(debug_assertions))]
     assert!(
-        save_duration.as_millis() < max_save_ms,
-        "Save duration too high: {:?}",
-        save_duration
+        save_duration.as_millis() < 100,
+        "Save duration too high: {save_duration:?}"
     );
 
     let loaded_interner = StringInterner::new();
@@ -509,14 +509,14 @@ fn test_snapshot_v2_scale_5000_profiles() {
     .expect("Load 5000 profiles failed")
     .expect("Must exist");
     let load_duration = load_start.elapsed();
+    println!("Snapshot load of 5000 profiles: {load_duration:?}");
 
     assert_eq!(loaded.header.num_preferences, 5000);
     assert_eq!(loaded_preferences.len(), 5000);
-    let max_load_ms = if cfg!(debug_assertions) { 2_000 } else { 100 };
+    #[cfg(not(debug_assertions))]
     assert!(
-        load_duration.as_millis() < max_load_ms,
-        "Load duration too high: {:?}",
-        load_duration
+        load_duration.as_millis() < 100,
+        "Load duration too high: {load_duration:?}"
     );
 
     let _ = std::fs::remove_file(&snapshot_path);

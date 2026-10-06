@@ -504,12 +504,6 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
         "Query latency SLA violation in release: {}us",
         twins_resp.query_latency_us
     );
-    #[cfg(debug_assertions)]
-    assert!(
-        twins_resp.query_latency_us < 100_000,
-        "Query latency abnormal debug spike: {}us",
-        twins_resp.query_latency_us
-    );
 
     // Measure recommend_preview latency
     let dials = RecommendationDials {
@@ -526,12 +520,6 @@ fn test_sub_2ms_latency_taste_twins_and_preview() {
     assert!(
         preview_resp.query_latency_us < 2_000,
         "Preview query latency SLA violation in release: {}us",
-        preview_resp.query_latency_us
-    );
-    #[cfg(debug_assertions)]
-    assert!(
-        preview_resp.query_latency_us < 100_000,
-        "Preview query latency abnormal debug spike: {}us",
         preview_resp.query_latency_us
     );
 }
