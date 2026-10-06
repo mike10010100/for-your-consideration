@@ -560,6 +560,7 @@ fn bs58_decode(input: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    #[cfg(debug_assertions)]
     use k256::ecdsa::signature::Signer;
     use k256::ecdsa::SigningKey;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -576,6 +577,7 @@ mod tests {
     }
 
     /// Builds a genuinely ES256K-signed service JWT for `did` using `signing_key`.
+    #[cfg(debug_assertions)]
     fn sign_service_jwt(
         signing_key: &SigningKey,
         did: &str,
@@ -666,6 +668,9 @@ mod tests {
         );
     }
 
+    // Relies on the `#[cfg(debug_assertions)]`-only `register_test_key` fast path, so this
+    // test is intentionally compiled out of optimized/release test builds.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn test_verify_service_jwt_end_to_end_with_test_key() {
         let verifier = ServiceAuthVerifier::new();
@@ -752,6 +757,9 @@ mod tests {
         );
     }
 
+    // Relies on the `#[cfg(debug_assertions)]`-only `register_test_key` fast path, so this
+    // test is intentionally compiled out of optimized/release test builds.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn test_expired_signed_jwt_rejected() {
         let verifier = ServiceAuthVerifier::new();

@@ -2492,6 +2492,10 @@ mod tests {
 
     /// Enforce mode: genuinely ES256K-signed JWTs authenticate the viewer; forged or
     /// unsigned tokens degrade to anonymous without touching the claimed DID's state.
+    ///
+    /// Relies on the `#[cfg(debug_assertions)]`-only `register_test_key` fast path, so this
+    /// test is intentionally compiled out of optimized/release test builds.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn test_get_feed_skeleton_enforce_mode_signature_verification() {
         use k256::ecdsa::{signature::Signer, Signature, SigningKey};
