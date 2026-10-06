@@ -641,7 +641,10 @@ fn test_empirical_tier2_and_tier3_score_breakdowns() {
     let preview_t3 = rec
         .recommend_preview_at(Some(viewer3_did), &dials, now)
         .unwrap();
-    assert!(!preview_t3.items.is_empty());
+    assert_ne!(
+        preview_t3.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
     let item_t3 = &preview_t3.items[0];
     let b3 = &item_t3.score_breakdown;
 

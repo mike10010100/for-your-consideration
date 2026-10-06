@@ -273,7 +273,10 @@ async fn test_adversarial_read_only_impression_isolation_contract() {
 
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let preview: FeedPreviewResponse = serde_json::from_slice(&body).unwrap();
-        assert!(!preview.items.is_empty());
+        assert_ne!(
+            preview.items,
+            [] as [for_your_consideration::FeedPreviewItem; 0]
+        );
     }
 
     // Assert that impression store remains STRICTLY empty for target_user
@@ -328,7 +331,10 @@ async fn test_adversarial_read_only_impression_isolation_contract() {
     let xrpc_body2 = xrpc_resp2.into_body().collect().await.unwrap().to_bytes();
     let skeleton2: FeedSkeletonResponse = serde_json::from_slice(&xrpc_body2).unwrap();
     // Subsequent XRPC request serves candidates with smooth soft fatigue damping
-    assert!(!skeleton2.feed.is_empty());
+    assert_ne!(
+        skeleton2.feed,
+        [] as [for_your_consideration::SkeletonFeedPost; 0]
+    );
 }
 
 #[tokio::test]

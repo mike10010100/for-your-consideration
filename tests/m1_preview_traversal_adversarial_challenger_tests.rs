@@ -122,7 +122,7 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
             .explain_recommendation(viewer_did.as_str(), viral_uri.as_str())
             .expect("explain_recommendation must succeed");
         explain_lats.push(t0.elapsed().as_micros() as u64);
-        assert!(!explanation.summary.is_empty());
+        assert_ne!(explanation.summary, "");
     }
     explain_lats.sort_unstable();
     let explain_p50 = explain_lats[iters * 50 / 100];
@@ -160,7 +160,10 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
             .find_taste_twins(viewer_did.as_str(), 10)
             .expect("find_taste_twins must succeed");
         twins_lats.push(t0.elapsed().as_micros() as u64);
-        assert!(!twins.twins.is_empty());
+        assert_ne!(
+            twins.twins,
+            [] as [for_your_consideration::TasteTwinItem; 0]
+        );
     }
     twins_lats.sort_unstable();
     let twins_p50 = twins_lats[iters * 50 / 100];
@@ -190,7 +193,10 @@ fn test_m1_adversarial_100k_interactions_per_post_latency_and_correctness() {
             .recommend_preview_at(Some(viewer_did.as_str()), &dials, now)
             .expect("recommend_preview_at must succeed");
         preview_lats.push(t0.elapsed().as_micros() as u64);
-        assert!(!preview.items.is_empty());
+        assert_ne!(
+            preview.items,
+            [] as [for_your_consideration::FeedPreviewItem; 0]
+        );
         assert!(preview.total_candidates <= MAX_CO_INTERACTORS * 10);
     }
     preview_lats.sort_unstable();
@@ -266,7 +272,10 @@ fn test_m1_adversarial_hyperactive_user_5000_likes_defensive_bounds() {
         let twins = rec.find_taste_twins(viewer_did, 10).unwrap();
         twins_lats.push(t0.elapsed().as_micros() as u64);
         assert_eq!(twins.total_liked_posts, 5_000);
-        assert!(!twins.twins.is_empty());
+        assert_ne!(
+            twins.twins,
+            [] as [for_your_consideration::TasteTwinItem; 0]
+        );
     }
     twins_lats.sort_unstable();
     let p50 = twins_lats[iters * 50 / 100];
@@ -301,7 +310,10 @@ fn test_m1_adversarial_hyperactive_user_5000_likes_defensive_bounds() {
             .recommend_preview_at(Some(viewer_did), &dials, now)
             .unwrap();
         prev_lats.push(t0.elapsed().as_micros() as u64);
-        assert!(!prev.items.is_empty());
+        assert_ne!(
+            prev.items,
+            [] as [for_your_consideration::FeedPreviewItem; 0]
+        );
     }
     prev_lats.sort_unstable();
     let prev_p50 = prev_lats[iters * 50 / 100];
@@ -467,10 +479,16 @@ fn test_m1_adversarial_boundary_edge_cases() {
     let empty_preview = rec
         .recommend_preview_at(Some("did:plc:unknown"), &dials, now)
         .unwrap();
-    assert!(empty_preview.items.is_empty());
+    assert_eq!(
+        empty_preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 
     let empty_twins = rec.find_taste_twins("did:plc:unknown", 10).unwrap();
-    assert!(empty_twins.twins.is_empty());
+    assert_eq!(
+        empty_twins.twins,
+        [] as [for_your_consideration::TasteTwinItem; 0]
+    );
 
     let unindexed_post = rec
         .explain_recommendation(
@@ -490,10 +508,16 @@ fn test_m1_adversarial_boundary_edge_cases() {
     let zero_preview = rec
         .recommend_preview_at(Some(zero_did), &dials, now)
         .unwrap();
-    assert!(zero_preview.items.is_empty());
+    assert_eq!(
+        zero_preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 
     let zero_twins = rec.find_taste_twins(zero_did, 10).unwrap();
-    assert!(zero_twins.twins.is_empty());
+    assert_eq!(
+        zero_twins.twins,
+        [] as [for_your_consideration::TasteTwinItem; 0]
+    );
     assert_eq!(zero_twins.total_liked_posts, 0);
 
     // 3. Viewer with 9 likes (below Tier 1 threshold of 10)
@@ -507,7 +531,10 @@ fn test_m1_adversarial_boundary_edge_cases() {
         .recommend_preview_at(Some(zero_did), &dials, now)
         .unwrap();
     // Below 10 likes, Tier 1 is skipped, falls back to cold-start / velocity pool
-    assert!(sub_preview.items.is_empty());
+    assert_eq!(
+        sub_preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 
     // 4. Viewer with 10th like reaches Tier 1 threshold
     let p10_uri = "at://did:plc:author/app.bsky.feed.post/sub_9";

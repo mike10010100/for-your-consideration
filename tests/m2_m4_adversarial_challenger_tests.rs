@@ -192,7 +192,7 @@ fn test_adversarial_clock_warp_backward_and_forward_jumps() {
     // 3. Extreme backward clock jump to 0 (epoch start)
     let jump_to_zero = graph.get_velocity_pool_candidates_at(0, 10);
     // At t = 0, no posts exist within 6-hour window of t=0, so result is empty
-    assert!(jump_to_zero.is_empty());
+    assert_eq!(jump_to_zero, [] as [u32; 0]);
 
     // 4. Backward jump followed by forward re-population
     let post_warp = graph.get_velocity_pool_candidates_at(base_time + 50, 10);
@@ -201,12 +201,13 @@ fn test_adversarial_clock_warp_backward_and_forward_jumps() {
     // 5. Extreme forward jump (100,000,000 seconds into the future)
     let extreme_future = graph.get_velocity_pool_candidates_at(base_time + 100_000_000, 10);
     // Posts from base_time are far outside the 6-hour window of base_time + 100_000_000
-    assert!(extreme_future.is_empty());
+    assert_eq!(extreme_future, [] as [u32; 0]);
 
     // 6. Limit edge cases: limit = 0, limit = usize::MAX, limit = 1
-    assert!(graph
-        .get_velocity_pool_candidates_at(base_time + 50, 0)
-        .is_empty());
+    assert_eq!(
+        graph.get_velocity_pool_candidates_at(base_time + 50, 0),
+        [] as [u32; 0]
+    );
     let top_1 = graph.get_velocity_pool_candidates_at(base_time + 50, 1);
     assert_eq!(top_1.len(), 1);
     let all_candidates = graph.get_velocity_pool_candidates_at(base_time + 50, usize::MAX);
@@ -323,7 +324,7 @@ fn test_adversarial_concurrent_readers_writers_and_invalidation() {
             while r.load(Ordering::Relaxed) {
                 let candidates = g.get_velocity_pool_candidates_at(base_time + 5, 10);
                 // Must always be non-empty and bounded by limit
-                assert!(!candidates.is_empty());
+                assert_ne!(candidates, [] as [u32; 0]);
                 assert!(candidates.len() <= 10);
                 rc.fetch_add(1, Ordering::Relaxed);
             }

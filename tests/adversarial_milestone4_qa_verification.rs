@@ -322,7 +322,10 @@ fn test_adversarial_latency_scaling_across_candidate_pool_sizes() {
                 let resp = rec.recommend_preview(Some(viewer_did), &dials).unwrap();
                 let elapsed = t0.elapsed().as_micros() as u64;
                 lats_us.push(elapsed);
-                assert!(!resp.items.is_empty());
+                assert_ne!(
+                    resp.items,
+                    [] as [for_your_consideration::FeedPreviewItem; 0]
+                );
             }
 
             lats_us.sort_unstable();

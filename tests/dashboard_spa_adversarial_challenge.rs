@@ -691,11 +691,11 @@ async fn test_empirical_spa_dom_xss_and_injection_resilience() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
     let summary = json["summary"].as_str().unwrap();
-    assert!(!summary.is_empty());
+    assert_ne!(summary, "");
 
     // Verify valid JSON deserialization succeeded without corrupting node IDs
     let steps = json["steps"].as_array().unwrap();
-    assert!(!steps.is_empty());
+    assert_ne!(steps.as_slice(), [] as [serde_json::Value; 0]);
 }
 
 #[tokio::test]

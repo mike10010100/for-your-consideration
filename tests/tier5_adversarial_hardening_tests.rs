@@ -429,7 +429,10 @@ async fn test_adversarial_all_zero_topic_weights_and_edge_multipliers() {
     let body = resp_xrpc.into_body().collect().await.unwrap().to_bytes();
     let skeleton: FeedSkeletonResponse = serde_json::from_slice(&body).unwrap();
     // Must return valid skeleton posts without panics or NaN score crashes
-    assert!(!skeleton.feed.is_empty());
+    assert_ne!(
+        skeleton.feed,
+        [] as [for_your_consideration::SkeletonFeedPost; 0]
+    );
 
     // 3. Query XRPC with explicit all 0.0x query overrides
     let req_xrpc_explicit = Request::builder()

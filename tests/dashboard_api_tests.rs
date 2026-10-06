@@ -365,7 +365,10 @@ async fn test_taste_twins_unknown_did_returns_empty_gracefully() {
     let twins: TasteTwinsResponse = serde_json::from_slice(&body).unwrap();
     assert_eq!(twins.viewer_did, "did:plc:ghost_user");
     assert_eq!(twins.total_liked_posts, 0);
-    assert!(twins.twins.is_empty());
+    assert_eq!(
+        twins.twins,
+        [] as [for_your_consideration::TasteTwinItem; 0]
+    );
 }
 
 #[tokio::test]
@@ -385,7 +388,10 @@ async fn test_feed_preview_tier1_authenticated_viewer() {
     let preview: FeedPreviewResponse = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(preview.viewer_did, "did:plc:alice");
-    assert!(!preview.items.is_empty());
+    assert_ne!(
+        preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 
     // Check that tech_p2 (liked by taste twin Bob) is recommended
     let cand = preview
@@ -418,7 +424,10 @@ async fn test_feed_preview_tier2_followed_walk() {
     let preview: FeedPreviewResponse = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(preview.viewer_did, "did:plc:carol");
-    assert!(!preview.items.is_empty());
+    assert_ne!(
+        preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 
     let item = preview
         .items
@@ -448,7 +457,10 @@ async fn test_feed_preview_anonymous_cold_start_tier3() {
     let preview: FeedPreviewResponse = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(preview.viewer_did, "");
-    assert!(!preview.items.is_empty());
+    assert_ne!(
+        preview.items,
+        [] as [for_your_consideration::FeedPreviewItem; 0]
+    );
 }
 
 #[tokio::test]

@@ -159,7 +159,7 @@ impl ActiveUsersTracker {
     pub fn decrement_in_flight(&self) {
         let _ = self
             .in_flight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
                 Some(val.saturating_sub(1))
             });
     }
@@ -2214,7 +2214,7 @@ mod tests {
         let login_res: LoginSuccessResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(login_res.status, "ok");
         assert_eq!(login_res.handle, "alice.bsky.social");
-        assert!(!login_res.token.is_empty());
+        assert_ne!(login_res.token, "");
     }
 
     #[tokio::test]

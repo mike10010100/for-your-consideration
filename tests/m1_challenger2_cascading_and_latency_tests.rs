@@ -170,7 +170,7 @@ fn test_cascading_fallback_tier1_to_tier3_velocity_pool() {
     }
 
     // Viewer follows NO ONE (Tier 2 is guaranteed empty)
-    assert!(graph.get_user_follows(v_id).is_empty());
+    assert_eq!(graph.get_user_follows(v_id), [] as [u32; 0]);
 
     // Populate Tier 3 Velocity Pool with 10 high-velocity posts with distinct authors
     let mut velocity_uris = Vec::new();
@@ -435,7 +435,7 @@ fn test_adversarial_dense_single_overlap_fanout_latency() {
 
     assert!(rec_res.is_ok());
     let feed = rec_res.unwrap();
-    assert!(!feed.posts.is_empty());
+    assert_ne!(feed.posts, [] as [for_your_consideration::ScoredPost; 0]);
     let max_rec_ms = if cfg!(debug_assertions) { 200 } else { 10 };
     assert!(
         elapsed_rec.as_millis() < max_rec_ms,
