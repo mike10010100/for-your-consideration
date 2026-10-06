@@ -1163,7 +1163,10 @@ state.previewDebounceTimer = setTimeout(fetchFeedPreview, 120);
 }
 async function fetchFeedPreview() {
 const rawViewer = elements.dialViewerInput.value.trim();
-const freshnessHours = elements.sliderFreshness.value;
+// The server contract parses a numeric `freshness` as a half-life in seconds
+// (clamped to [1h, 168h]). Convert the slider's hour value to seconds so the
+// dial actually propagates instead of collapsing to the 1h floor.
+const freshnessSecs = Math.round(Number(elements.sliderFreshness.value) * 3600);
 const discoveryPct = (Number(elements.sliderDiscovery.value) / 100.0).toFixed(2);
 const art = elements.sliderTopicArt.value;
 const tech = elements.sliderTopicTech.value;
@@ -1176,7 +1179,7 @@ resolvedViewer = await resolveHandleToDid(rawViewer);
 }
 const params = new URLSearchParams();
 if (resolvedViewer) params.set('viewer', resolvedViewer);
-params.set('freshness', freshnessHours);
+params.set('freshness', freshnessSecs);
 params.set('discovery', discoveryPct);
 params.set('art', art);
 params.set('tech', tech);

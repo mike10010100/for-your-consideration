@@ -689,9 +689,12 @@ fn test_adversarial_empirical_concurrent_read_latency_under_ingestion_load() {
         p50_us < p50_threshold,
         "p50 latency ({p50_us} µs) exceeded SLA threshold ({p50_threshold} µs)!"
     );
-    // In unoptimized debug test runs with parallel threads, allow up to 20ms; in release mode strictly assert < 2.0ms
+    // In unoptimized debug test runs with parallel threads, allow up to 150ms (mirroring
+    // `adversarial_challenge.rs`); in release mode strictly assert < 2.0ms. The debug bound
+    // is deliberately loose because wall-clock latency under a saturated test runner is not
+    // a meaningful signal — the sub-2ms SLA is only enforced on optimized builds.
     let p99_threshold = if cfg!(debug_assertions) {
-        20_000
+        150_000
     } else {
         2_000
     };

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.7] - 2026-10-06
+
+### Fixed
+
+- **Signed-In Feed Settings Freshness Propagation**: The dashboard's Algorithmic Dials slider stores the freshness half-life in **hours**, but `GET /api/feed-preview` and `GET /xrpc/app.bsky.feed.getFeedSkeleton` both parse a numeric `freshness` query parameter as a half-life in **seconds**, clamped to `[1h, 168h]`. The unauthenticated preview path (`fetchFeedPreview`) sent the raw hour value (e.g. `freshness=6`), which clamped to the 1-hour floor — so every freshness slider position on a signed-in dashboard load produced a ~1h time-decay instead of the user's saved setting (e.g. 6h or 72h). The client now converts the slider value to seconds (`hours * 3600`) before issuing the request, restoring correct propagation of the saved dial to the generated feed. Added `test_freshness_dial_hour_to_second_conversion_contract` guarding both the client conversion and the server's seconds-based numeric contract.
+- **Flaky Concurrent Read Latency Assertion**: Raised the debug-profile p99 escape hatch in `test_adversarial_empirical_concurrent_read_latency_under_ingestion_load` from 20 ms to 150 ms, matching the sibling `adversarial_challenge.rs` bound. Wall-clock latency under a saturated parallel test runner is not a meaningful signal; the sub-2 ms recommendation SLA remains strictly enforced in release builds.
+
+---
+
 ## [0.4.6] - 2026-09-24
 
 ### Changed
