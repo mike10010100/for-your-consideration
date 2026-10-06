@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.9] - 2026-10-06
+
+### Fixed
+
+- **Reliable Snapshot Persistence on Shutdown**: Graceful shutdown ran `compact_memory_stores` (an O(data) rebuild measured at ~210s on a 36M-string production store) *before* the final save. That blew far past Docker's `stop_grace_period`, so SIGKILL arrived before the save began and the checkpoint was lost — the snapshot file's mtime did not advance across a container recreate, forcing a multi-hour Jetstream replay on the next boot. The shutdown path now saves directly (compaction is not required for a correct save; dead-string reclamation is left to the periodic prune task), bounds the save with a new `SHUTDOWN_SAVE_TIMEOUT_SECS` (default 240s), and serializes periodic vs. shutdown saves on a shared lock so they never race the same `.tmp` path. `docker-compose.yml` now sets `stop_grace_period` to 300s (overridable via `STOP_GRACE_PERIOD`) to fit the save inside the grace window. Periodic snapshots no longer run the expensive pre-save compaction either.
+- **O(1) Latest-Interaction Timestamp**: `GraphStore::get_latest_interaction_timestamp` previously scanned every entry of `active_recent_posts` across all 64 shards on *every* feed/preview request. It is now backed by a monotonic `AtomicU64` updated on `record_interaction`/`restore_from_snapshot`/`clear`, removing that per-request scan.
+- **Bounded Tier-1 Fan-Out (Preview & Feed Latency Scaling)**: Viewer-specific preview latency grew with the viewer's like-count and graph size because the Tier 1 walk intersected the viewer's like-bitmap against an unbounded set of co-interactors (up to `MAX_SEED_POSTS × MAX_POST_EDGES`), and materialized an unbounded candidate set. Added three bounds: `MAX_CO_INTERACTOR_SCAN` (5,000 neighbors intersected), `MAX_CO_INTERACTOR_EDGES` (2,000 recent edges expanded per co-interactor), and `MAX_CANDIDATE_EVALS` (10,000 distinct candidate posts scored). This caps the previously quadratic viewer-bitmap × neighbor-bitmap work on large graphs; on production this cuts a heavy-viewer `/api/feed-preview` from ~450ms toward the sub-10ms budget (exact figures vary with host load).
+
+### Changed
+
+- **Deterministic Concurrency Stress Test**: `test_challenge_concurrency_stress_preview_twins_and_mutations` previously raced a fixed 500ms window and asserted minimum operation counts, which flaked under coverage instrumentation. It now uses fixed per-thread iteration budgets (exact counts asserted), like the sibling concurrency tests.
+- **New Config**: `SHUTDOWN_SAVE_TIMEOUT_SECS` (final-save timeout) and `STOP_GRACE_PERIOD` (Docker stop grace), documented in `.env.example` and defaulted in `Dockerfile`/`docker-compose.yml`.
+
+---
+
 ## [0.4.8] - 2026-10-06
 
 ### Fixed

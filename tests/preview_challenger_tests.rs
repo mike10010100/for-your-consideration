@@ -12,10 +12,10 @@
 //! 3. Concurrency stress: concurrent calls to `recommend_preview`, `find_taste_twins`, and graph mutations (zero deadlocks, thread safety).
 //! 4. Adversarial edge cases, mathematical breakdown validation, and proof chain invariants.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ahash::AHashSet;
 use compact_str::CompactString;
@@ -472,7 +472,6 @@ fn test_challenge_find_taste_twins_large_bitsets_and_accuracy() {
 fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
     let (_interner, _graph, rec, viewer_did) = build_high_load_graph(200, 10);
     let rec = Arc::new(rec);
-    let stop_flag = Arc::new(AtomicBool::new(false));
 
     let preview_ops = Arc::new(AtomicUsize::new(0));
     let twins_ops = Arc::new(AtomicUsize::new(0));
@@ -485,18 +484,18 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
 
     let mut handles = Vec::new();
 
-    // 1. 6 Reader threads executing recommend_preview
+    // 1. 6 Reader threads executing recommend_preview. Fixed per-thread iteration budgets make
+    // throughput deterministic (immune to wall-clock contention) while still exercising real
+    // concurrency; the exact counts are asserted below.
     for thread_id in 0..6 {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let ops = Arc::clone(&preview_ops);
         let errs = Arc::clone(&error_count);
         let max_lat = Arc::clone(&max_preview_latency);
         let v_did = viewer_did.clone();
 
         handles.push(thread::spawn(move || {
-            let mut i = 0usize;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..150usize {
                 let did_opt = match (thread_id + i) % 4 {
                     0 => Some(v_did.as_str()),
                     1 => Some("did:plc:co_user_00010"),
@@ -533,7 +532,6 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                         errs.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                i += 1;
             }
         }));
     }
@@ -541,15 +539,13 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
     // 2. 4 Reader threads executing find_taste_twins
     for thread_id in 0..4 {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let ops = Arc::clone(&twins_ops);
         let errs = Arc::clone(&error_count);
         let max_lat = Arc::clone(&max_twins_latency);
         let v_did = viewer_did.clone();
 
         handles.push(thread::spawn(move || {
-            let mut i = 0usize;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..150usize {
                 let did = if (thread_id + i).is_multiple_of(3) {
                     v_did.as_str()
                 } else if (thread_id + i) % 3 == 1 {
@@ -571,7 +567,6 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                         errs.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                i += 1;
             }
         }));
     }
@@ -579,14 +574,12 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
     // 3. 2 Reader threads executing explain_recommendation
     for thread_id in 0..2 {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let ops = Arc::clone(&explain_ops);
         let errs = Arc::clone(&error_count);
         let v_did = viewer_did.clone();
 
         handles.push(thread::spawn(move || {
-            let mut i = 0usize;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..150usize {
                 let uri = format!(
                     "at://did:plc:tech_creator_0/app.bsky.feed.post/tech_cand_{}_{}",
                     (thread_id + i) % 50,
@@ -604,7 +597,6 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                         errs.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                i += 1;
             }
         }));
     }
@@ -612,13 +604,11 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
     // 4. 4 Writer threads mutating graph concurrently
     for thread_id in 0..4 {
         let rec = Arc::clone(&rec);
-        let stop = Arc::clone(&stop_flag);
         let ops = Arc::clone(&mutation_ops);
 
         handles.push(thread::spawn(move || {
-            let mut i = 0usize;
             let now = BLUESKY_EPOCH_SECS + 50_000_000;
-            while !stop.load(Ordering::Relaxed) {
+            for i in 0..150usize {
                 let user_uri = format!("did:plc:stress_writer_{thread_id}_{i}");
                 let post_uri =
                     format!("at://did:plc:author/app.bsky.feed.post/stress_{thread_id}_{i}");
@@ -644,15 +634,9 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
                 }
 
                 ops.fetch_add(1, Ordering::Relaxed);
-                i += 1;
             }
         }));
     }
-
-    // Let the stress test run under heavy contention
-    let duration = Duration::from_millis(500);
-    thread::sleep(duration);
-    stop_flag.store(true, Ordering::Relaxed);
 
     for h in handles {
         h.join()
@@ -682,17 +666,22 @@ fn test_challenge_concurrency_stress_preview_twins_and_mutations() {
     println!("=====================================================================");
 
     assert_eq!(c_errs, 0, "No errors should occur during concurrent stress");
-    assert!(
-        c_preview >= 20,
-        "Expected significant preview throughput: {c_preview}"
+    // Exact deterministic totals: 6*150 preview, 4*150 twins, 2*150 explain, 4*150 mutations.
+    assert_eq!(
+        c_preview,
+        6 * 150,
+        "preview throughput mismatch: {c_preview}"
     );
-    assert!(
-        c_twins >= 20,
-        "Expected significant twins throughput: {c_twins}"
+    assert_eq!(c_twins, 4 * 150, "twins throughput mismatch: {c_twins}");
+    assert_eq!(
+        c_explain,
+        2 * 150,
+        "explain throughput mismatch: {c_explain}"
     );
-    assert!(
-        c_mutations >= 50,
-        "Expected significant write throughput: {c_mutations}"
+    assert_eq!(
+        c_mutations,
+        4 * 150,
+        "mutation throughput mismatch: {c_mutations}"
     );
 }
 

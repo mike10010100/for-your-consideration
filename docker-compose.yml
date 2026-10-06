@@ -28,8 +28,11 @@ services:
       - RETENTION_DAYS=${RETENTION_DAYS:-7}
       - SNAPSHOT_PATH=/data/snapshot.bin
       - SNAPSHOT_INTERVAL_SECS=${SNAPSHOT_INTERVAL_SECS:-14400}
+      - SHUTDOWN_SAVE_TIMEOUT_SECS=${SHUTDOWN_SAVE_TIMEOUT_SECS:-240}
       - RUST_LOG=info,for_your_consideration=info
-    stop_grace_period: 60s
+    # Must exceed SHUTDOWN_SAVE_TIMEOUT_SECS (default 240s) plus the bounded task drain (10s),
+    # so the final snapshot save completes before Docker sends SIGKILL.
+    stop_grace_period: ${STOP_GRACE_PERIOD:-300s}
     volumes:
       - fyc_data:/data:rw
     healthcheck:

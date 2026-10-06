@@ -544,3 +544,54 @@ fn test_m1_adversarial_boundary_edge_cases() {
     // Now evaluated through Tier 1
     assert_eq!(tier1_preview.viewer_did, zero_did);
 }
+
+#[test]
+fn test_m1_co_interactor_scan_is_bounded_on_massive_fanout() {
+    // A viewer with many recent likes, each seed post reverse-linked to many distinct co-users,
+    // must not scan more than MAX_CO_INTERACTOR_SCAN distinct neighbors in the taste-similarity
+    // step. This bounds the quadratic viewer-bitmap x neighbor-bitmap intersection work.
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+    let now = BLUESKY_EPOCH_SECS + 200_000_000;
+
+    let viewer_did = "did:plc:scanbound_viewer";
+    let viewer_id = interner.intern(viewer_did);
+    let seed_author = interner.intern("did:plc:scanbound_author");
+
+    // Viewer likes 50 seed posts; each gets a large number of distinct co-interactors.
+    let seed_pids: Vec<u32> = (0..50)
+        .map(|i| {
+            let uri = format!("at://did:plc:scanbound_author/app.bsky.feed.post/seed_{i:03}");
+            let pid = interner.intern(&uri);
+            graph.record_post_meta(pid, seed_author, None, None, now - 60_000);
+            graph.record_interaction(viewer_id, pid, SignalType::Like, now - 50_000);
+            pid
+        })
+        .collect();
+
+    // 50 seeds x 6,000 co-users = 300,000 distinct co-interactors (>> MAX_CO_INTERACTOR_SCAN).
+    for (i, &spid) in seed_pids.iter().enumerate() {
+        for u in 0..6_000 {
+            let co_id = interner.intern(&format!("did:plc:scanbound_co_{i}_{u}"));
+            graph.record_interaction(co_id, spid, SignalType::Like, now - 40_000);
+        }
+    }
+
+    let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+    let dials = RecommendationDials {
+        limit: 30,
+        min_likes: 0,
+        ..Default::default()
+    };
+
+    // Must complete quickly (bounded scan) rather than walking 300k neighbors. In debug we only
+    // assert completion + finite score to avoid wall-clock flakiness; the release-latency job
+    // enforces the strict budget.
+    let preview = rec
+        .recommend_preview_at(Some(viewer_did), &dials, now)
+        .expect("bounded preview must succeed");
+    assert_eq!(preview.viewer_did, viewer_did);
+    for item in &preview.items {
+        assert!(item.score_breakdown.final_score.is_finite());
+    }
+}
