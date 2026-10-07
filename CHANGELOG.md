@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.10] - 2026-10-06
+
+### Fixed
+
+- **Fast Proof Chains in Feed Preview (`explain=true`)**: `recommend_preview_at` called `explain_recommendation` once per returned item, and each call re-scanned up to `MAX_POST_EDGES` (500) reverse edges and re-intersected every co-interactor bitmap against the viewer's — work the Tier-1 walk had already done. For a 15-item preview this added ~7,500 redundant bitmap intersections. Attribution (strongest contributing twin, connecting seed post, viewer/twin signals, and followed account for Tier 2) is now captured during the walk, and the embedded proof chain is built from it without any reverse-edge rescan. The standalone `GET /api/explain` endpoint is unchanged. The attribution-based chain is semantically equivalent to the standalone explainer (verified by `test_preview_embedded_proof_chain_matches_standalone_explainer_tier1`).
+
+---
+
 ## [0.4.9] - 2026-10-06
 
 ### Fixed

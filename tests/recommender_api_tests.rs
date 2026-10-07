@@ -402,6 +402,74 @@ fn test_explain_recommendation_tier1_3step_proof_chain() {
 }
 
 #[test]
+fn test_preview_embedded_proof_chain_matches_standalone_explainer_tier1() {
+    // The preview path builds proof chains from attribution captured during the walk (no reverse-edge
+    // rescan). Verify the embedded chain is semantically equivalent to the standalone explainer.
+    let (interner, graph, rec) = setup_graph_and_interner();
+    let now = BLUESKY_EPOCH_SECS + 100_000;
+
+    let viewer = interner.intern("did:plc:viewer");
+    let twin = interner.intern("did:plc:twin");
+    let author = interner.intern("did:plc:tech_seed");
+
+    let seed_post = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/seed_post");
+    let seed_post_2 = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/seed_post_2");
+    let rec_post = interner.intern("at://did:plc:tech_seed/app.bsky.feed.post/recommended_post");
+
+    graph.record_post_meta(seed_post, author, None, None, now - 500);
+    graph.record_post_meta(seed_post_2, author, None, None, now - 500);
+    graph.record_post_meta(rec_post, author, None, None, now - 300);
+
+    // Viewer needs >= 10 likes to enter Tier 1.
+    for i in 0..10 {
+        let p = interner.intern(&format!(
+            "at://did:plc:tech_seed/app.bsky.feed.post/filler_{i}"
+        ));
+        graph.record_post_meta(p, author, None, None, now - 600);
+        graph.record_interaction(viewer, p, SignalType::Like, now - 500);
+    }
+    graph.record_interaction(viewer, seed_post, SignalType::Like, now - 200);
+    graph.record_interaction(viewer, seed_post_2, SignalType::Like, now - 200);
+    graph.record_interaction(twin, seed_post, SignalType::Like, now - 150);
+    graph.record_interaction(twin, seed_post_2, SignalType::Like, now - 150);
+    graph.record_interaction(twin, rec_post, SignalType::Repost, now - 100);
+
+    let dials = RecommendationDials {
+        explain: true,
+        min_likes: 1,
+        ..Default::default()
+    };
+    let preview = rec
+        .recommend_preview_at(Some("did:plc:viewer"), &dials, now)
+        .unwrap();
+    let item = preview
+        .items
+        .iter()
+        .find(|i| i.uri == "at://did:plc:tech_seed/app.bsky.feed.post/recommended_post")
+        .expect("recommended_post must appear in preview");
+    let embedded = item
+        .proof_chain
+        .as_ref()
+        .expect("chain embedded when explain=true");
+
+    let standalone = rec
+        .explain_recommendation(
+            "did:plc:viewer",
+            "at://did:plc:tech_seed/app.bsky.feed.post/recommended_post",
+        )
+        .unwrap();
+
+    assert_eq!(embedded.steps.len(), 3);
+    assert_eq!(embedded.steps[0].step_type, "viewer_interaction");
+    assert_eq!(embedded.steps[1].step_type, "taste_similarity");
+    assert_eq!(embedded.steps[2].step_type, "recommendation_signal");
+    assert_eq!(embedded.steps[1].node_id, "did:plc:twin");
+    assert_eq!(embedded.steps[2].node_id, standalone.steps[2].node_id);
+    assert_eq!(embedded.steps.len(), standalone.steps.len());
+    assert_eq!(embedded.steps[2].step_type, standalone.steps[2].step_type);
+}
+
+#[test]
 fn test_explain_recommendation_tier2_follow_proof_chain() {
     let (interner, graph, rec) = setup_graph_and_interner();
     let now = BLUESKY_EPOCH_SECS + 100_000;

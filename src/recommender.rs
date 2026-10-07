@@ -361,6 +361,43 @@ impl ImpressionStore {
     }
 }
 
+/// Lightweight attribution captured during a recommendation walk.
+///
+/// Lets the preview path construct a proof chain without re-scanning the post's reverse edges and
+/// re-intersecting bitmaps that the walk already visited (which previously dominated `explain=true`
+/// latency).
+#[derive(Debug, Clone, Copy)]
+struct CandidateAttribution {
+    /// Tier 1: strongest co-interactor (taste twin) that contributed to the candidate.
+    twin_id: Option<u32>,
+    /// Tier 1: Bayesian confidence (taste similarity) of the selected twin.
+    twin_sim: f32,
+    /// Tier 1: signal the twin applied to the candidate.
+    twin_signal: SignalType,
+    /// Tier 1: shared seed post that connected viewer and twin (viewer interacted with it).
+    seed_post_id: Option<u32>,
+    /// Tier 1: viewer's signal on the shared seed post.
+    seed_signal: SignalType,
+    /// Tier 2: followed account that interacted with the candidate.
+    followed_id: Option<u32>,
+    /// Tier 2: signal the followed account applied to the candidate.
+    followed_signal: SignalType,
+}
+
+impl CandidateAttribution {
+    const fn tier3() -> Self {
+        Self {
+            twin_id: None,
+            twin_sim: 0.0,
+            twin_signal: SignalType::Like,
+            seed_post_id: None,
+            seed_signal: SignalType::Like,
+            followed_id: None,
+            followed_signal: SignalType::Like,
+        }
+    }
+}
+
 /// Internal candidate evaluation structure used during recommendation preview scoring.
 #[derive(Debug, Clone)]
 struct CandidateEvaluation {
@@ -371,6 +408,7 @@ struct CandidateEvaluation {
     topic: TopicCategory,
     tier: String,
     score_breakdown: ScoreBreakdown,
+    attribution: CandidateAttribution,
 }
 
 /// High-performance graph traversal and multi-signal recommendation engine.
@@ -1086,6 +1124,126 @@ impl Recommender {
         Ok(GraphProofChain { steps, summary })
     }
 
+    /// Constructs a proof chain from attribution already captured during the walk.
+    ///
+    /// Avoids the reverse-edge rescan and bitmap re-intersection that [`Self::explain_recommendation`]
+    /// performs, which previously dominated `explain=true` preview latency. Output shape matches the
+    /// standalone explainer's tier-appropriate 3-step chain.
+    fn build_proof_chain_from_attribution(&self, cand: &CandidateEvaluation) -> GraphProofChain {
+        let a = &cand.attribution;
+
+        // Tier 1: viewer -> shared seed -> taste twin -> recommended post.
+        if let Some(twin_id) = a.twin_id {
+            let twin_did = self
+                .interner
+                .lookup_str(twin_id)
+                .unwrap_or_else(|| CompactString::new("did:plc:twin"));
+            let (seed_uri, seed_sig) = a.seed_post_id.map_or_else(
+                || (CompactString::new("shared_interest"), a.seed_signal),
+                |spid| {
+                    let s_uri = self
+                        .interner
+                        .lookup_str(spid)
+                        .unwrap_or_else(|| CompactString::new("seed_post"));
+                    (s_uri, a.seed_signal)
+                },
+            );
+            let steps = vec![
+                ProofChainStep {
+                    step_type: "viewer_interaction".into(),
+                    node_id: seed_uri.clone(),
+                    description: format!("You {} seed post '{seed_uri}'", seed_sig.past_tense_verb()),
+                },
+                ProofChainStep {
+                    step_type: "taste_similarity".into(),
+                    node_id: twin_did.clone(),
+                    description: format!(
+                        "Taste twin @{twin_did} has a {:.1}% taste match with you based on shared likes",
+                        a.twin_sim * 100.0
+                    ),
+                },
+                ProofChainStep {
+                    step_type: "recommendation_signal".into(),
+                    node_id: cand.uri.clone(),
+                    description: format!(
+                        "Taste twin @{twin_did} {} this {} post",
+                        a.twin_signal.past_tense_verb(),
+                        cand.topic.as_str()
+                    ),
+                },
+            ];
+            let summary = format!(
+                "Recommended because you {} an earlier post, and taste twin @{twin_did} ({:.0}% taste match) {} this {} post.",
+                seed_sig.past_tense_verb(),
+                a.twin_sim * 100.0,
+                a.twin_signal.past_tense_verb(),
+                cand.topic.as_str()
+            );
+            return GraphProofChain { steps, summary };
+        }
+
+        // Tier 2: viewer -> followed account -> recommended post.
+        if let Some(followed_id) = a.followed_id {
+            let f_did = self
+                .interner
+                .lookup_str(followed_id)
+                .unwrap_or_else(|| CompactString::new("did:plc:followed"));
+            let steps = vec![
+                ProofChainStep {
+                    step_type: "follow_graph".into(),
+                    node_id: f_did.clone(),
+                    description: format!("You follow @{f_did}"),
+                },
+                ProofChainStep {
+                    step_type: "followed_interaction".into(),
+                    node_id: cand.uri.clone(),
+                    description: format!(
+                        "Followed user @{f_did} {} this {} post",
+                        a.followed_signal.past_tense_verb(),
+                        cand.topic.as_str()
+                    ),
+                },
+                ProofChainStep {
+                    step_type: "follow_affinity_boost".into(),
+                    node_id: cand.uri.clone(),
+                    description: "Boosted by 1.5x follow graph affinity multiplier".to_string(),
+                },
+            ];
+            let summary = format!(
+                "Recommended because you follow @{f_did}, who {} this {} post.",
+                a.followed_signal.past_tense_verb(),
+                cand.topic.as_str()
+            );
+            return GraphProofChain { steps, summary };
+        }
+
+        // Tier 3: cold-start / topic velocity.
+        let steps = vec![
+            ProofChainStep {
+                step_type: "cold_start_onboarding".into(),
+                node_id: CompactString::new(cand.topic.as_str()),
+                description: format!("Classified under {} topic domain", cand.topic.as_str()),
+            },
+            ProofChainStep {
+                step_type: "velocity_trending".into(),
+                node_id: cand.uri.clone(),
+                description: "High interaction velocity in the last 6-hour sliding window"
+                    .to_string(),
+            },
+            ProofChainStep {
+                step_type: "topic_diversity_interleaving".into(),
+                node_id: cand.uri.clone(),
+                description: "Selected via balanced topic diversity round-robin interleaving"
+                    .to_string(),
+            },
+        ];
+        let summary = format!(
+            "Recommended as a trending high-velocity post in the {} topic domain.",
+            cand.topic.as_str()
+        );
+        GraphProofChain { steps, summary }
+    }
+
     /// Evaluates recommendations in preview mode with transparent mathematical score breakdowns
     /// and graph proof chains, evaluating fatigue penalties in a read-only manner (without mutating impressions).
     pub fn recommend_preview(
@@ -1162,10 +1320,19 @@ impl Recommender {
                 let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
 
                 // Limit seed posts to most recent MAX_SEED_POSTS interactions to bound combinatorial fan-out
-                let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(uid, |edges| {
-                    let seed_edges = tail_bounded(edges, MAX_SEED_POSTS);
-                    seed_edges.iter().map(CompactEdge::target).collect()
-                });
+                let seed_edges_info: Vec<(u32, SignalType)> =
+                    self.graph.with_user_interactions(uid, |edges| {
+                        tail_bounded(edges, MAX_SEED_POSTS)
+                            .iter()
+                            .map(|e| (e.target(), e.signal()))
+                            .collect()
+                    });
+                let seed_post_ids: Vec<u32> = seed_edges_info.iter().map(|(pid, _)| *pid).collect();
+                let seed_signal_by_id: AHashMap<u32, SignalType> =
+                    seed_edges_info.into_iter().collect();
+                // Remembers, per co-interactor, the seed post through which they were discovered so
+                // the proof chain can be built without rescanning reverse edges later.
+                let mut co_interactor_seed: AHashMap<u32, u32> = AHashMap::new();
 
                 if let Some(ref v_bm) = viewer_bm {
                     let v_len = v_bm.len() as f32;
@@ -1193,6 +1360,7 @@ impl Recommender {
                                                 scan_capped = true;
                                                 break;
                                             }
+                                            co_interactor_seed.insert(co_user, post_id);
                                             self.graph.with_user_likes_bitmap(
                                                 co_user,
                                                 |c_bm_opt| {
@@ -1238,6 +1406,9 @@ impl Recommender {
                 }
 
                 let mut cand_details: AHashMap<u32, (usize, f32, f32, f32)> = AHashMap::new();
+                // Strongest (highest taste-confidence) twin that touched each candidate, captured
+                // during the walk so the proof chain needs no reverse-edge rescan.
+                let mut cand_twin: AHashMap<u32, (u32, f32, SignalType)> = AHashMap::new();
                 let mut seen_posts_for_curator = AHashSet::new();
                 for (co_user, co_sim) in top_co_interactors {
                     seen_posts_for_curator.clear();
@@ -1262,6 +1433,20 @@ impl Recommender {
                                 if decay > entry.3 {
                                     entry.3 = decay;
                                 }
+                                // Select the contributing twin exactly as the standalone explainer
+                                // does: highest conf * signal-weight, tie-broken by lowest id.
+                                let twin_score = co_sim * c_edge.weight();
+                                cand_twin
+                                    .entry(cand_pid)
+                                    .and_modify(|best| {
+                                        let best_score = best.1 * best.2.weight();
+                                        if twin_score > best_score
+                                            || (twin_score == best_score && co_user < best.0)
+                                        {
+                                            *best = (co_user, co_sim, c_edge.signal());
+                                        }
+                                    })
+                                    .or_insert_with(|| (co_user, co_sim, c_edge.signal()));
                             }
                         });
                 }
@@ -1320,6 +1505,26 @@ impl Recommender {
                         final_score,
                     };
 
+                    // Build attribution from data already gathered during the walk (no rescan).
+                    let attribution = cand_twin.get(&pid).map_or_else(
+                        CandidateAttribution::tier3,
+                        |&(twin_id, twin_sim, twin_sig)| {
+                            let seed_post_id = co_interactor_seed.get(&twin_id).copied();
+                            let seed_signal = seed_post_id
+                                .and_then(|sp| seed_signal_by_id.get(&sp).copied())
+                                .unwrap_or(SignalType::Like);
+                            CandidateAttribution {
+                                twin_id: Some(twin_id),
+                                twin_sim,
+                                twin_signal: twin_sig,
+                                seed_post_id,
+                                seed_signal,
+                                followed_id: None,
+                                followed_signal: SignalType::Like,
+                            }
+                        },
+                    );
+
                     candidate_evals.push(CandidateEvaluation {
                         post_id: pid,
                         uri,
@@ -1328,6 +1533,7 @@ impl Recommender {
                         topic,
                         tier: "Tier 1: 3-Step Interaction Walk".to_string(),
                         score_breakdown: breakdown,
+                        attribution,
                     });
                 }
                 filter_preview_pool(&mut candidate_evals);
@@ -1338,6 +1544,8 @@ impl Recommender {
             {
                 // Tier 2 Preview Walk
                 let mut cand_details: AHashMap<u32, (f32, f32)> = AHashMap::new();
+                // First followed account observed interacting with each candidate (for attribution).
+                let mut cand_followed: AHashMap<u32, (u32, SignalType)> = AHashMap::new();
                 self.graph.with_user_follows(uid, |follows| {
                     for &followed_id in follows {
                         self.graph
@@ -1354,6 +1562,9 @@ impl Recommender {
                                         self.graph.get_post_interaction_count(cand_pid),
                                     );
                                     cand_details.insert(cand_pid, (decay, social_proof));
+                                    cand_followed
+                                        .entry(cand_pid)
+                                        .or_insert_with(|| (followed_id, edge.signal()));
                                 }
                             });
                     }
@@ -1390,6 +1601,19 @@ impl Recommender {
                         final_score,
                     };
 
+                    let attribution = cand_followed.get(&pid).map_or_else(
+                        CandidateAttribution::tier3,
+                        |&(followed_id, followed_signal)| CandidateAttribution {
+                            twin_id: None,
+                            twin_sim: 0.0,
+                            twin_signal: SignalType::Like,
+                            seed_post_id: None,
+                            seed_signal: SignalType::Like,
+                            followed_id: Some(followed_id),
+                            followed_signal,
+                        },
+                    );
+
                     candidate_evals.push(CandidateEvaluation {
                         post_id: pid,
                         uri,
@@ -1398,6 +1622,7 @@ impl Recommender {
                         topic,
                         tier: "Tier 2: 2-Step Follow Walk".to_string(),
                         score_breakdown: breakdown,
+                        attribution,
                     });
                 }
                 filter_preview_pool(&mut candidate_evals);
@@ -1448,6 +1673,7 @@ impl Recommender {
                     topic,
                     tier: "Tier 3: Topic Velocity Pool".to_string(),
                     score_breakdown: breakdown,
+                    attribution: CandidateAttribution::tier3(),
                 });
             }
             filter_preview_pool(&mut candidate_evals);
@@ -1507,8 +1733,7 @@ impl Recommender {
         let mut items = Vec::with_capacity(diverse_evals.len());
         for cand in diverse_evals {
             let proof_chain = if dials.explain {
-                let did_str = clean_viewer.unwrap_or("");
-                self.explain_recommendation(did_str, cand.uri.as_str()).ok()
+                Some(self.build_proof_chain_from_attribution(&cand))
             } else {
                 None
             };
