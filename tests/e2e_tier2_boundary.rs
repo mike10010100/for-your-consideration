@@ -1441,14 +1441,14 @@ fn test_f19_dial_empty_query_params() {
 
 #[test]
 fn test_f19_dial_case_insensitivity() {
-    // Case-insensitive preset matching: "6H" resolves to the 6h realtime preset.
-    let dials = RecommendationDials::from_query(Some("6H"), Some("FAMILIAR"), None, None, None);
-    assert_eq!(dials.half_life_secs, 6.0 * 3600.0);
+    // Case-insensitive preset matching: "2H" resolves to the 2h realtime preset.
+    let dials = RecommendationDials::from_query(Some("2H"), Some("FAMILIAR"), None, None, None);
+    assert_eq!(dials.half_life_secs, 2.0 * 3600.0);
     assert_eq!(dials.explore_ratio, 0.05);
 
-    // Mixed-case named presets also resolve ("WEEKLY" -> 168h).
+    // Mixed-case named presets also resolve ("WEEKLY" -> 72h).
     let weekly = RecommendationDials::from_query(Some("Weekly"), None, None, None, None);
-    assert_eq!(weekly.half_life_secs, 168.0 * 3600.0);
+    assert_eq!(weekly.half_life_secs, 72.0 * 3600.0);
 }
 
 #[test]

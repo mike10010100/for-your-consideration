@@ -608,7 +608,7 @@ pub async fn handle_get_feed_skeleton(
         UserDials::default()
     };
 
-    // Freshness preset mapping (PRD §3.6): realtime = 6h, balanced = 36h, weekly = 168h.
+    // Freshness preset mapping (PRD §3.6): realtime = 2h, balanced = 12h, weekly = 72h.
     // Must stay in sync with `RecommendationDials::from_query` (the shared reference table).
     let half_life_secs = match query
         .freshness
@@ -617,15 +617,16 @@ pub async fn handle_get_feed_skeleton(
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
+        Some("realtime" | "fast" | "2h") => 2.0 * 3600.0,
+        Some("1h") => 1.0 * 3600.0,
         Some("4h") => 4.0 * 3600.0,
+        Some("6h") => 6.0 * 3600.0,
         Some("8h") => 8.0 * 3600.0,
-        Some("12h") => 12.0 * 3600.0,
+        Some("balanced" | "12h") => 12.0 * 3600.0,
         Some("24h") => 24.0 * 3600.0,
-        Some("balanced" | "36h") => 36.0 * 3600.0,
-        Some("48h") => 48.0 * 3600.0,
-        Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
-        Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
+        Some("deep_dive" | "deepdive" | "48h") => 48.0 * 3600.0,
+        Some("weekly" | "slow" | "72h") => 72.0 * 3600.0,
+        Some("168h") => 168.0 * 3600.0,
         Some(custom) => custom
             .parse::<f32>()
             .unwrap_or(base_dials.freshness_half_life_secs)
@@ -2253,7 +2254,7 @@ mod tests {
             .to_bytes();
         let prefs_resp: PreferencesResponseDto = serde_json::from_slice(&body).unwrap();
         assert!(!prefs_resp.is_custom);
-        assert_eq!(prefs_resp.preferences.freshness_hours, 36.0);
+        assert_eq!(prefs_resp.preferences.freshness_hours, 12.0);
 
         // 3. Authenticated POST -> 200 saves custom dials
         let save_req = SavePreferencesRequestBody {

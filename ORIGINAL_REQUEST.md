@@ -20,7 +20,7 @@ Implement an in-memory sliding LRU impression cache per viewer DID tracking serv
 
 ### R3. Dynamic Query Parameter Weights (`src/server.rs`, `src/types.rs`)
 Support dynamic per-request dial overrides in `app.bsky.feed.getFeedSkeleton`:
-- `freshness`: Half-life duration (`realtime` = 6h, `balanced` = 36h, `weekly` = 168h)
+- `freshness`: Half-life duration (`realtime` = 2h, `balanced` = 12h, `weekly` = 72h)
 - `discovery`: Serendipity exploration ratio (`familiar` = 0.05, `balanced` = 0.15, `deep_dive` = 0.35)
 - `topic_art`, `topic_tech`, `topic_science`, `topic_news`, `topic_culture`: Custom integer weights (0–100) for topic domain preferences
 - `explain=true`: Returns full mathematical proof chains explaining why each candidate post was selected.

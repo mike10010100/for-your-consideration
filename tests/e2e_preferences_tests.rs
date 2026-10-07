@@ -64,7 +64,7 @@ pub struct UserDials {
 impl Default for UserDials {
     fn default() -> Self {
         Self {
-            freshness_half_life_secs: DEFAULT_HALF_LIFE_SECS, // 36h (129,600s)
+            freshness_half_life_secs: DEFAULT_HALF_LIFE_SECS, // 12h (43,200s)
             serendipity_ratio: DEFAULT_EXPLORE_RATIO,         // 0.15 (15%)
             topic_weights: TopicWeights::default(),           // 1.0 for all 5 topics
             include_replies: false,
@@ -529,7 +529,7 @@ async fn handle_test_get_feed_skeleton(
         .unwrap_or_default();
 
     // Must stay in sync with `RecommendationDials::from_query` / handle_get_feed_skeleton:
-    // realtime = 6h, balanced = 36h, weekly = 168h (PRD §3.6).
+    // realtime = 2h, balanced = 12h, weekly = 72h (PRD §3.6).
     let half_life_secs = match query
         .freshness
         .as_deref()
@@ -537,15 +537,16 @@ async fn handle_test_get_feed_skeleton(
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("realtime" | "fast" | "6h") => 6.0 * 3600.0,
+        Some("realtime" | "fast" | "2h") => 2.0 * 3600.0,
+        Some("1h") => 1.0 * 3600.0,
         Some("4h") => 4.0 * 3600.0,
+        Some("6h") => 6.0 * 3600.0,
         Some("8h") => 8.0 * 3600.0,
-        Some("12h") => 12.0 * 3600.0,
+        Some("balanced" | "12h") => 12.0 * 3600.0,
         Some("24h") => 24.0 * 3600.0,
-        Some("balanced" | "36h") => 36.0 * 3600.0,
-        Some("48h") => 48.0 * 3600.0,
-        Some("deep_dive" | "deepdive" | "72h") => 72.0 * 3600.0,
-        Some("weekly" | "slow" | "168h") => 168.0 * 3600.0,
+        Some("deep_dive" | "deepdive" | "48h") => 48.0 * 3600.0,
+        Some("weekly" | "slow" | "72h") => 72.0 * 3600.0,
+        Some("168h") => 168.0 * 3600.0,
         Some(custom) => custom
             .parse::<f32>()
             .unwrap_or(saved_dials.freshness_half_life_secs)
@@ -809,7 +810,7 @@ mod tier1_feature_coverage {
     #[test]
     fn test_tier1_f01_user_dials_default_values() {
         let dials = UserDials::default();
-        assert_eq!(dials.freshness_half_life_secs, 36.0 * 3600.0);
+        assert_eq!(dials.freshness_half_life_secs, 12.0 * 3600.0);
         assert_eq!(dials.serendipity_ratio, 0.15);
         assert_eq!(dials.topic_weights.art, 1.0);
         assert_eq!(dials.topic_weights.tech, 1.0);
@@ -1416,7 +1417,7 @@ mod tier1_feature_coverage {
             let dials = None
                 .and_then(|did: &str| store.get_by_did(interner, did))
                 .unwrap_or_default();
-            assert_eq!(dials.freshness_half_life_secs, 36.0 * 3600.0);
+            assert_eq!(dials.freshness_half_life_secs, 12.0 * 3600.0);
         }
         let elapsed = start.elapsed();
         // 1000 fast-path lookups must complete in under 5ms total
@@ -1508,7 +1509,7 @@ mod tier1_feature_coverage {
         let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: PreferencesResponseDto = serde_json::from_slice(&body_bytes).unwrap();
         assert!(!body.is_custom);
-        assert_eq!(body.preferences.freshness_hours, 36.0);
+        assert_eq!(body.preferences.freshness_hours, 12.0);
         assert_eq!(body.preferences.discovery_ratio, 0.15);
     }
 
@@ -3331,7 +3332,7 @@ mod tier4_real_world_application_scenarios {
         // Scenario:
         // 1. Standard Bluesky user opens FYC feed without logging in.
         // 2. Query returns 200 OK with default balanced recommendations.
-        // 3. User selects temporary "Realtime" filter in client (?freshness=6h).
+        // 3. User selects temporary "Realtime" filter in client (?freshness=2h).
         // 4. Client returns to default browsing.
         let state = TestServerState::new();
         let app = create_test_preferences_router(state);
@@ -3574,7 +3575,7 @@ mod tier4_real_world_application_scenarios {
             serde_json::from_slice(&get_resp.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert!(!get_data.is_custom);
-        assert_eq!(get_data.preferences.freshness_hours, 36.0);
+        assert_eq!(get_data.preferences.freshness_hours, 12.0);
 
         // Verify Feed
         let feed_req = Request::builder()
