@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-10-07
+
+### Changed
+
+- **Fresher Time-Decay Freshness Scale**: Rescaled the entire `freshness` dial and its system default one notch faster to better match the pace of the real Bluesky "For You" feed, where sub-hour content is routinely surfaced. The exponential half-life $\tau$ is now `realtime` = **2h** (was 6h), `balanced` = **12h** (was 36h), `weekly`/`slow` = **72h** (was 168h), and `deep_dive` = **48h** (was 72h). The system default `DEFAULT_HALF_LIFE_SECS` dropped from **36h → 12h**, so an untouched feed (no dials, no saved preferences) decays noticeably faster and favors recent posts. At the new `realtime` (2h) setting a 1-hour-old post now retains only `exp(-0.5) ≈ 0.61×` weight instead of `0.85×`, making the fast preset meaningfully distinct. The shared preset table (`RecommendationDials::from_query`), the `handle_get_feed_skeleton` override table, and the dashboard (`ALGO_PRESETS`, slider default, freshness badge thresholds) are all aligned; the `[1h, 168h]` clamp bounds, `MIN`/`MAX_FRESHNESS_SECS`, and numeric-hour aliases are unchanged. The `6h`/`12h`/`24h`/`36h`/`48h`/`72h`/`168h` explicit aliases still map literally (so `freshness=6h` remains 6h); only the named presets moved.
+- **Dashboard Default & Presets**: Freshness slider default lowered from 24h to 12h (`Balanced`); `Realtime` preset = 2h, `Deep Dives` = 48h, `Explorer` = 24h. The badge labels "Realtime" (≤2h) and "Fast" (≤6h) track the new scale.
+
+### Tests
+
+- Updated preset/default expectations across `types.rs`, `server.rs`, `e2e_tier1_feature`, `e2e_tier2_boundary`, `e2e_tier3_pairwise`, `e2e_preferences_tests`, `m2_m3_integration_tests`, `m3_challenger2_engagement_floor_tests`, `m3_challenger2_precedence_and_integration_tests`, `challenger_2_latency_security_verification`, and `adversarial_m1_scoring_ranking_verification`.
+
+---
+
 ## [0.4.11] - 2026-10-07
 
 ### Changed

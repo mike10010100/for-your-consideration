@@ -75,7 +75,7 @@ The engine is built as a **zero-GC, lock-free, in-memory graph engine** written 
   - `Repost` event: $3.0\times$ weight
 - **Exponential Half-Life Time Decay**:
   $$W(\text{interaction}) = \text{SignalWeight} \times e^{-\frac{t_{\text{current}} - t_{\text{event}}}{\tau}}$$
-  where $\tau$ defaults to 36 hours (configurable via request parameter `freshness`).
+  where $\tau$ defaults to 12 hours (configurable via request parameter `freshness`).
 - **Inverse Degree Dampening (Anti-Viral Penalty)**:
   Candidate score is normalized by global interaction frequency:
   $$\text{Score}(p) = \sum_{u \in \text{CoInteractors}} \frac{W(u \to p) \times \text{Sim}(U_{\text{viewer}}, u)}{\sqrt{|\text{GlobalInteractions}(p)| + 1}}$$
@@ -111,7 +111,7 @@ The engine is built as a **zero-GC, lock-free, in-memory graph engine** written 
 
 ### 3.6. User Agency & "Algorithm Dials"
 Supports URL query parameters passed in the feed request:
-- `freshness`: Adjusts half-life $\tau$ (`realtime` = 6h, `balanced` = 36h, `weekly` = 168h).
+- `freshness`: Adjusts half-life $\tau$ (`realtime` = 2h, `balanced` = 12h, `weekly` = 72h).
 - `discovery`: Controls the exploration ratio $\epsilon$ (`familiar` = 5%, `balanced` = 15%, `deep_dive` = 35%).
 - `explain`: If `true`, returns structured interaction trace metadata for UI explainers.
 

@@ -158,7 +158,7 @@ Tap **"Pin to Home"** to enjoy your custom, real-time personalized feed!
 
 Users and clients can customize recommendation parameters dynamically using URL query parameters:
 
-* `freshness`: Adjusts the time-decay half-life $\tau$ (`realtime` = 6h, `balanced` = 36h, `weekly` = 168h).
+* `freshness`: Adjusts the time-decay half-life $\tau$ (`realtime` = 2h, `balanced` = 12h, `weekly` = 72h).
 * `discovery`: Adjusts the serendipity exploration ratio $\epsilon$ (`familiar` = 5%, `balanced` = 15%, `deep_dive` = 35%).
 * `replies`: Controls post composition (`root` = Root posts only [default], `all` = Include root posts and replies).
 * `topic_art`, `topic_tech`, `topic_science`, `topic_news`, `topic_culture`: Custom topic domain multipliers (0.0x–5.0x).

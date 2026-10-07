@@ -112,7 +112,7 @@ fn test_empirical_bayesian_shrinkage_and_confidence_properties() {
 #[test]
 fn test_empirical_time_decay_strict_monotonicity_and_clock_skew() {
     let now = BLUESKY_EPOCH_SECS + 50_000_000;
-    let tau = DEFAULT_HALF_LIFE_SECS; // 129,600.0s (36h)
+    let tau = DEFAULT_HALF_LIFE_SECS; // 43,200.0s (12h)
 
     // 1. Signal weights verification
     let w_like = calculate_time_decay(SignalType::Like, now, now, tau);

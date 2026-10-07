@@ -1487,15 +1487,15 @@ fn test_f18_cursor_terminal_none() {
 // ===========================================================================
 
 #[test]
-fn test_f19_dial_freshness_realtime_6h() {
+fn test_f19_dial_freshness_realtime_2h() {
     let dials = RecommendationDials::from_query(Some("realtime"), None, None, None, None);
-    assert_eq!(dials.half_life_secs, 6.0 * 3600.0);
+    assert_eq!(dials.half_life_secs, 2.0 * 3600.0);
 }
 
 #[test]
-fn test_f19_dial_freshness_balanced_36h() {
+fn test_f19_dial_freshness_balanced_12h() {
     let dials = RecommendationDials::from_query(Some("balanced"), None, None, None, None);
-    assert_eq!(dials.half_life_secs, 36.0 * 3600.0);
+    assert_eq!(dials.half_life_secs, 12.0 * 3600.0);
 }
 
 #[test]
@@ -1505,9 +1505,9 @@ fn test_f19_dial_freshness_explicit_24h() {
 }
 
 #[test]
-fn test_f19_dial_freshness_weekly_168h() {
+fn test_f19_dial_freshness_weekly_72h() {
     let dials = RecommendationDials::from_query(Some("weekly"), None, None, None, None);
-    assert_eq!(dials.half_life_secs, 168.0 * 3600.0);
+    assert_eq!(dials.half_life_secs, 72.0 * 3600.0);
 }
 
 #[test]

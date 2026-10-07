@@ -84,8 +84,8 @@ pub const NUM_SHARDS: usize = 64;
 /// 6 hours in seconds (used for Tier 3 cold-start high-velocity window).
 pub const SIX_HOURS_SECS: u64 = 6 * 3600;
 
-/// Default half-life in seconds (36 hours, per PRD §3.1/§3.6).
-pub const DEFAULT_HALF_LIFE_SECS: f32 = 36.0 * 3600.0;
+/// Default half-life in seconds (12 hours, per PRD §3.1/§3.6).
+pub const DEFAULT_HALF_LIFE_SECS: f32 = 12.0 * 3600.0;
 
 /// Returns the shard index for a given 32-bit identifier.
 #[inline]
