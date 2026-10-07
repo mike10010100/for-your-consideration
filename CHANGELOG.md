@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.11] - 2026-10-07
+
+### Changed
+
+- **Dependency: `skyauth` 0.3.2 → 0.3.3**: Bumped the AT Protocol OAuth/DPoP authentication engine to the latest release. The update pulls in an authenticated-encryption stack (`aes-gcm` and its transitive cipher crates) and is consumed through the existing `crate::auth` re-exports; no application-facing API changes were required. All format, clippy, test, doc-test, `cargo deny`, and coverage (≥80% lines) gates pass.
+
+---
+
 ## [0.4.10] - 2026-10-06
 
 ### Fixed
