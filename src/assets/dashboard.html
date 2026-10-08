@@ -377,6 +377,24 @@ Include Replies
 </button>
 </div>
 </div>
+<!-- Content Safety (No NSFW) -->
+<div class="dial-control" style="margin-top: 0.875rem; padding-top: 0.75rem; border-top: 1px solid var(--border-light);">
+<div class="dial-label-row" style="margin-bottom: 0.45rem;">
+<label class="dial-label" style="display: flex; align-items: center; gap: 0.35rem;">
+<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-emerald);"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+Content Safety
+</label>
+<span id="badge-no-nsfw" class="dial-value-badge">NSFW Allowed (Default)</span>
+</div>
+<div style="display: flex; gap: 0.5rem;">
+<button type="button" id="btn-nsfw-include" class="btn btn-sm btn-active-tab" style="flex: 1; padding: 0.35rem 0.5rem; font-size: 0.75rem; border-radius: 6px; font-weight: 500;">
+Show All Posts
+</button>
+<button type="button" id="btn-nsfw-filter" class="btn btn-sm" style="flex: 1; padding: 0.35rem 0.5rem; font-size: 0.75rem; border-radius: 6px; font-weight: 500; background: var(--bg-surface); border: 1px solid var(--border-light); color: var(--text-secondary);">
+Hide NSFW
+</button>
+</div>
+</div>
 <!-- Minimum Engagement Floor (min_likes / engagement_floor) -->
 <div class="dial-control" style="margin-top: 0.875rem; padding-top: 0.75rem; border-top: 1px solid var(--border-light);">
 <div class="dial-label-row" style="margin-bottom: 0.45rem;">
@@ -577,6 +595,7 @@ previewDebounceTimer: null,
 currentViewer: 'did:plc:alice',
 serviceDid: '',
 includeReplies: false,
+noNsfw: false,
 minLikes: 3
 };
 const $ = id => document.getElementById(id);
@@ -628,6 +647,9 @@ badgeTopicCulture: $('badge-topic-culture'),
 badgeIncludeReplies: $('badge-include-replies'),
 btnCompositionRoot: $('btn-composition-root'),
 btnCompositionAll: $('btn-composition-all'),
+badgeNoNsfw: $('badge-no-nsfw'),
+btnNsfwInclude: $('btn-nsfw-include'),
+btnNsfwFilter: $('btn-nsfw-filter'),
 badgeEngagementFloor: $('badge-engagement-floor'),
 btnEngagementEmerging: $('btn-engagement-emerging'),
 btnEngagementBalanced: $('btn-engagement-balanced'),
@@ -1131,6 +1153,26 @@ elements.btnCompositionAll.style.border = '1px solid var(--border-light)';
 elements.btnCompositionAll.style.color = 'var(--text-secondary)';
 }
 }
+if (elements.badgeNoNsfw) {
+elements.badgeNoNsfw.textContent = state.noNsfw ? 'Hiding NSFW' : 'NSFW Allowed (Default)';
+}
+if (elements.btnNsfwInclude && elements.btnNsfwFilter) {
+const setNsfwBtn = (btn, active) => {
+if (active) {
+btn.className = 'btn btn-sm btn-active-tab';
+btn.style.background = '';
+btn.style.border = '';
+btn.style.color = '';
+} else {
+btn.className = 'btn btn-sm';
+btn.style.background = 'var(--bg-surface)';
+btn.style.border = '1px solid var(--border-light)';
+btn.style.color = 'var(--text-secondary)';
+}
+};
+setNsfwBtn(elements.btnNsfwInclude, !state.noNsfw);
+setNsfwBtn(elements.btnNsfwFilter, state.noNsfw);
+}
 if (elements.badgeEngagementFloor) {
 let floorLabel = 'Balanced';
 if (state.minLikes <= 1) floorLabel = 'Emerging';
@@ -1188,6 +1230,7 @@ params.set('news', news);
 params.set('culture', culture);
 params.set('replies', state.includeReplies ? 'all' : 'root');
 params.set('include_replies', state.includeReplies ? 'true' : 'false');
+params.set('no_nsfw', state.noNsfw ? 'true' : 'false');
 params.set('min_likes', state.minLikes.toString());
 params.set('engagement_floor', state.minLikes.toString());
 params.set('limit', '15');
@@ -1370,6 +1413,7 @@ elements.sliderTopicScience.value = 1.0;
 elements.sliderTopicNews.value = 1.0;
 elements.sliderTopicCulture.value = 1.0;
 state.includeReplies = false;
+state.noNsfw = false;
 state.minLikes = 3;
 elements.dialViewerInput.value = 'did:plc:alice';
 triggerFeedPreview();
@@ -1782,6 +1826,7 @@ freshness_hours: data.dials.freshness_half_life_hours,
 discovery_ratio: data.dials.discovery_ratio,
 topic_weights: data.dials.topics,
 include_replies: data.dials.include_replies,
+no_nsfw: data.dials.no_nsfw,
 min_likes: data.dials.min_likes
 } : null);
 if (prefs) {
@@ -1805,6 +1850,13 @@ state.includeReplies = Boolean(prefs.include_replies);
 state.includeReplies = Boolean(data.dials.include_replies);
 } else {
 state.includeReplies = false;
+}
+if (prefs.no_nsfw !== undefined) {
+state.noNsfw = Boolean(prefs.no_nsfw);
+} else if (data.dials && data.dials.no_nsfw !== undefined) {
+state.noNsfw = Boolean(data.dials.no_nsfw);
+} else {
+state.noNsfw = false;
 }
 if (prefs.min_likes !== undefined) {
 state.minLikes = Number(prefs.min_likes);
@@ -1860,6 +1912,7 @@ news: parseFloat(elements.sliderTopicNews.value),
 culture: parseFloat(elements.sliderTopicCulture.value)
 },
 include_replies: state.includeReplies,
+no_nsfw: state.noNsfw,
 min_likes: state.minLikes
 };
 try {
@@ -1996,6 +2049,18 @@ triggerFeedPreview();
 if (elements.btnCompositionAll) {
 elements.btnCompositionAll.addEventListener('click', () => {
 state.includeReplies = true;
+triggerFeedPreview();
+});
+}
+if (elements.btnNsfwInclude) {
+elements.btnNsfwInclude.addEventListener('click', () => {
+state.noNsfw = false;
+triggerFeedPreview();
+});
+}
+if (elements.btnNsfwFilter) {
+elements.btnNsfwFilter.addEventListener('click', () => {
+state.noNsfw = true;
 triggerFeedPreview();
 });
 }

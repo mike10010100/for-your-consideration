@@ -29,7 +29,7 @@ use for_your_consideration::recommender::Recommender;
 use for_your_consideration::snapshot::{
     load_snapshot_with_preferences, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION,
     SNAPSHOT_FORMAT_VERSION_V1, SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3,
-    SNAPSHOT_MAGIC,
+    SNAPSHOT_FORMAT_VERSION_V4, SNAPSHOT_MAGIC,
 };
 use for_your_consideration::types::{
     RecommendationDials, RecommendationSource, SignalType, UserDials, DEFAULT_MIN_LIKES,
@@ -293,21 +293,78 @@ fn test_stress_synthetic_snapshot_migration_matrix() {
         sec8.extend_from_slice(&0u32.to_le_bytes()); // min_likes = 0
         sec8.extend_from_slice(&1_760_000_000u64.to_le_bytes());
 
-        create_synthetic_snapshot(&path, SNAPSHOT_FORMAT_VERSION, 0, 0, 0, 0, 0, 2, &sec8);
+        create_synthetic_snapshot(&path, SNAPSHOT_FORMAT_VERSION_V4, 0, 0, 0, 0, 0, 2, &sec8);
         let prefs = Arc::new(UserPreferencesStore::new());
         let res = load_snapshot_with_preferences(&path, &interner, &graph, &prefs)
             .expect("v4 load must succeed")
             .expect("snapshot must exist");
-        assert_eq!(res.header.format_version, SNAPSHOT_FORMAT_VERSION);
+        assert_eq!(res.header.format_version, SNAPSHOT_FORMAT_VERSION_V4);
         assert_eq!(prefs.len(), 2);
 
         let d301 = prefs.get(301).unwrap();
         assert!(d301.include_replies);
         assert_eq!(d301.min_likes, 50);
+        assert!(!d301.no_nsfw, "v4 must default no_nsfw=false");
 
         let d302 = prefs.get(302).unwrap();
         assert!(!d302.include_replies);
         assert_eq!(d302.min_likes, 0);
+        assert!(!d302.no_nsfw, "v4 must default no_nsfw=false");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Case 5: Version 5 (46 bytes per preference record with no_nsfw)
+    {
+        let path = unique_temp_path("stress_v5");
+        let mut sec8 = Vec::new();
+        sec8.extend_from_slice(&2u32.to_le_bytes()); // 2 profiles
+
+        // User 401: no_nsfw = true
+        sec8.extend_from_slice(&401u32.to_le_bytes());
+        sec8.extend_from_slice(&(24.0f32 * 3600.0).to_le_bytes());
+        sec8.extend_from_slice(&0.15f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&0u8.to_le_bytes()); // include_replies = false
+        sec8.extend_from_slice(&3u32.to_le_bytes()); // min_likes = 3
+        sec8.extend_from_slice(&1u8.to_le_bytes()); // no_nsfw = true
+        sec8.extend_from_slice(&1_800_000_000u64.to_le_bytes());
+
+        // User 402: no_nsfw = false
+        sec8.extend_from_slice(&402u32.to_le_bytes());
+        sec8.extend_from_slice(&(12.0f32 * 3600.0).to_le_bytes());
+        sec8.extend_from_slice(&0.20f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1.0f32.to_le_bytes());
+        sec8.extend_from_slice(&1u8.to_le_bytes()); // include_replies = true
+        sec8.extend_from_slice(&10u32.to_le_bytes()); // min_likes = 10
+        sec8.extend_from_slice(&0u8.to_le_bytes()); // no_nsfw = false
+        sec8.extend_from_slice(&1_810_000_000u64.to_le_bytes());
+
+        create_synthetic_snapshot(&path, SNAPSHOT_FORMAT_VERSION, 0, 0, 0, 0, 0, 2, &sec8);
+        let prefs = Arc::new(UserPreferencesStore::new());
+        let res = load_snapshot_with_preferences(&path, &interner, &graph, &prefs)
+            .expect("v5 load must succeed")
+            .expect("snapshot must exist");
+        assert_eq!(res.header.format_version, SNAPSHOT_FORMAT_VERSION);
+        assert_eq!(prefs.len(), 2);
+
+        let d401 = prefs.get(401).unwrap();
+        assert!(!d401.include_replies);
+        assert_eq!(d401.min_likes, 3);
+        assert!(d401.no_nsfw, "v5 user 401 must preserve no_nsfw=true");
+
+        let d402 = prefs.get(402).unwrap();
+        assert!(d402.include_replies);
+        assert_eq!(d402.min_likes, 10);
+        assert!(!d402.no_nsfw, "v5 user 402 must preserve no_nsfw=false");
 
         let _ = std::fs::remove_file(path);
     }

@@ -538,6 +538,7 @@ async fn test_authenticated_preference_lifecycle() {
             culture: 1.0,
         }),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req_save = Request::builder()

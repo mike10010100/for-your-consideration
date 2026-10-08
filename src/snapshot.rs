@@ -15,7 +15,7 @@
 //! - **Section 3: Reverse Post Interactions**: `(post_id, [CompactEdge])`.
 //! - **Section 4: User Likes `RoaringBitmaps`**: `(user_id, serialized_bitmap)`.
 //! - **Section 5: Follow Relationships**: `(follower_id, [followed_id])`.
-//! - **Section 6: Post Metadata**: `(post_id, author_id, root_id, parent_id, created_at)`.
+//! - **Section 6: Post Metadata**: `(post_id, author_id, root_id, parent_id, created_at, is_nsfw)`.
 //! - **Section 7: Active Recent Posts**: `(post_id, last_activity_timestamp)`.
 //! - **Section 8 (v2+): User Preferences**: fixed-width per-user dial records.
 //!
@@ -50,8 +50,11 @@ use crate::types::{
 /// Magic 4-byte header identifier: `b"FYFD"` (For-You Feed).
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"FYFD";
 
-/// Current snapshot format version (4 includes Section 8 User Preferences with `include_replies` and `min_likes`).
-pub const SNAPSHOT_FORMAT_VERSION: u16 = 4;
+/// Current snapshot format version (5 adds per-post `is_nsfw` and per-user `no_nsfw`).
+pub const SNAPSHOT_FORMAT_VERSION: u16 = 5;
+
+/// Legacy snapshot format version 4 with `include_replies` and `min_likes` but no NSFW flags.
+pub const SNAPSHOT_FORMAT_VERSION_V4: u16 = 4;
 
 /// Legacy snapshot format version 3 with `include_replies` without `min_likes`.
 pub const SNAPSHOT_FORMAT_VERSION_V3: u16 = 3;
@@ -615,6 +618,7 @@ pub fn load_snapshot_with_preferences(
     if version != SNAPSHOT_FORMAT_VERSION_V1
         && version != SNAPSHOT_FORMAT_VERSION_V2
         && version != SNAPSHOT_FORMAT_VERSION_V3
+        && version != SNAPSHOT_FORMAT_VERSION_V4
         && version != SNAPSHOT_FORMAT_VERSION
     {
         return Err(FeedError::Snapshot(format!(
@@ -767,7 +771,7 @@ pub fn load_snapshot_with_preferences(
 
     // Section 6: Post Metadata
     let meta_count = stream.read_u32()? as usize;
-    let mut post_metadata = Vec::with_capacity(stream.bound_count(meta_count, 22));
+    let mut post_metadata = Vec::with_capacity(stream.bound_count(meta_count, 27));
 
     for _ in 0..meta_count {
         let pid = stream.read_u32()?;
@@ -782,6 +786,11 @@ pub fn load_snapshot_with_preferences(
         let parent_id = if has_parent { Some(parent_val) } else { None };
 
         let created_at = stream.read_u64()?;
+        let is_nsfw = if version >= 5 {
+            stream.read_u8()? != 0
+        } else {
+            false
+        };
 
         post_metadata.push((
             pid,
@@ -790,6 +799,7 @@ pub fn load_snapshot_with_preferences(
                 root_id,
                 parent_id,
                 created_at,
+                is_nsfw,
             },
         ));
     }
@@ -810,7 +820,7 @@ pub fn load_snapshot_with_preferences(
         && stream.has_more()?
     {
         let pref_count = stream.read_u32()? as usize;
-        let mut user_preferences = Vec::with_capacity(stream.bound_count(pref_count, 36));
+        let mut user_preferences = Vec::with_capacity(stream.bound_count(pref_count, 50));
 
         for _ in 0..pref_count {
             let uid = stream.read_u32()?;
@@ -831,6 +841,11 @@ pub fn load_snapshot_with_preferences(
             } else {
                 DEFAULT_MIN_LIKES
             };
+            let no_nsfw = if version >= 5 {
+                stream.read_u8()? != 0
+            } else {
+                false
+            };
             let updated_at_secs = stream.read_u64()?;
 
             let dials = UserDials {
@@ -844,6 +859,7 @@ pub fn load_snapshot_with_preferences(
                     culture,
                 },
                 include_replies,
+                no_nsfw,
                 min_likes,
                 updated_at_secs,
             };

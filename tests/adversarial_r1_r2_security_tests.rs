@@ -707,6 +707,7 @@ async fn test_service_jwt_get_feed_skeleton_integration_expired_degrades_gracefu
         serendipity_ratio: 0.35,
         topic_weights: TopicWeights::default(),
         include_replies: false,
+        no_nsfw: false,
         min_likes: 3,
         updated_at_secs: 100,
     };

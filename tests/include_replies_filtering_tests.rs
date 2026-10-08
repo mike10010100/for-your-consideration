@@ -331,6 +331,7 @@ async fn test_user_preference_persistence_of_include_replies() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(true),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req_save = Request::builder()
@@ -400,6 +401,7 @@ fn test_snapshot_v3_preferences_round_trip() {
             culture: 1.0,
         },
         include_replies: true,
+        no_nsfw: false,
         min_likes: 3,
         updated_at_secs: 1000,
     };
@@ -409,6 +411,7 @@ fn test_snapshot_v3_preferences_round_trip() {
         serendipity_ratio: 0.10,
         topic_weights: TopicWeights::default(),
         include_replies: false,
+        no_nsfw: false,
         min_likes: 3,
         updated_at_secs: 2000,
     };

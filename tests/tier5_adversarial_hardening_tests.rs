@@ -154,6 +154,7 @@ async fn test_adversarial_extreme_concurrency_mixed_rest_snapshots_and_xrpc_read
                                 culture: ((iter + 4) % 5) as f32,
                             }),
                             include_replies: Some(iter % 2 == 0),
+                            no_nsfw: None,
                             min_likes: Some((iter % 10) as u32),
                         };
                         let req = Request::builder()
@@ -317,6 +318,7 @@ async fn test_adversarial_hot_viewer_rapid_mutation_and_read_isolation() {
                         culture: 1.0,
                     }),
                     include_replies: Some(false),
+                    no_nsfw: None,
                     min_likes: Some(3),
                 };
                 let req = Request::builder()
@@ -397,6 +399,7 @@ async fn test_adversarial_all_zero_topic_weights_and_edge_multipliers() {
         discovery_ratio: 0.15,
         topic_weights: Some(zero_topics),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req_post = Request::builder()
@@ -471,6 +474,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req1 = Request::builder()
@@ -489,6 +493,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req2 = Request::builder()
@@ -507,6 +512,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req3 = Request::builder()
@@ -527,6 +533,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.15,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req4 = Request::builder()
@@ -547,6 +554,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.00,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req5 = Request::builder()
@@ -565,6 +573,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.50,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req6 = Request::builder()
@@ -583,6 +592,7 @@ async fn test_adversarial_boundary_freshness_and_discovery_dials() {
         discovery_ratio: 0.51,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req7 = Request::builder()
@@ -625,6 +635,7 @@ async fn test_adversarial_precedence_hierarchy_mixed_query_overrides() {
             culture: 1.0,
         },
         include_replies: false,
+        no_nsfw: false,
         min_likes: 3,
         updated_at_secs: 500,
     };
@@ -806,6 +817,7 @@ async fn test_adversarial_token_forgery_tampering_and_replay() {
         discovery_ratio: 0.20,
         topic_weights: Some(TopicWeights::default()),
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(3),
     };
     let req_r2 = Request::builder()

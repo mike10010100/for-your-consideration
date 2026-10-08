@@ -672,6 +672,9 @@ fn test_snapshot_v2_corrupted_section_8_rejections() {
         payload.extend_from_slice(&science.to_le_bytes());
         payload.extend_from_slice(&news.to_le_bytes());
         payload.extend_from_slice(&culture.to_le_bytes());
+        payload.extend_from_slice(&[0u8]); // include_replies = false
+        payload.extend_from_slice(&3u32.to_le_bytes()); // min_likes = 3
+        payload.extend_from_slice(&[0u8]); // no_nsfw = false
         payload.extend_from_slice(&1_700_000_000u64.to_le_bytes());
 
         let mut p_hasher = Hasher::new();

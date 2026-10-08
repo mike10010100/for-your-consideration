@@ -331,6 +331,7 @@ fn test_adversarial_parse_all_collections_and_embedded_quotes() {
             root_uri,
             parent_uri,
             created_at_secs,
+            is_nsfw,
         } => {
             assert_eq!(
                 post_uri,
@@ -346,6 +347,7 @@ fn test_adversarial_parse_all_collections_and_embedded_quotes() {
                 Some("at://did:plc:parent_author/app.bsky.feed.post/parent1")
             );
             assert_eq!(*created_at_secs, 1_700_000_000);
+            assert!(!is_nsfw);
         }
         _ => panic!("Expected PostMeta"),
     }
@@ -447,6 +449,7 @@ fn test_adversarial_graph_mutation_and_deletion_flow() {
         root_uri: None,
         parent_uri: None,
         created_at_secs: now,
+        is_nsfw: false,
     };
     apply_event_to_graph(&post_event, &interner, &graph);
 
@@ -558,6 +561,7 @@ fn test_adversarial_empirical_concurrent_read_latency_under_ingestion_load() {
                     root_uri: None,
                     parent_uri: None,
                     created_at_secs: now_ts,
+                    is_nsfw: false,
                 };
                 apply_event_to_graph(&post_event, &interner, &graph);
 

@@ -531,6 +531,13 @@ impl Recommender {
                         }
                     }
                 }
+                if dials.no_nsfw {
+                    if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                        if meta.is_nsfw() {
+                            return false;
+                        }
+                    }
+                }
                 if let Some(ref seen) = seen_bitmap {
                     if seen.contains(c.post_id) {
                         return false;
@@ -1292,6 +1299,13 @@ impl Recommender {
                         }
                     }
                 }
+                if dials.no_nsfw {
+                    if let Some(meta) = self.graph.get_post_meta(c.post_id) {
+                        if meta.is_nsfw() {
+                            return false;
+                        }
+                    }
+                }
                 if let Some(ref seen) = seen_bitmap {
                     if seen.contains(c.post_id) {
                         return false;
@@ -1993,6 +2007,9 @@ impl Recommender {
                 .get_post_meta(pid)
                 .unwrap_or_else(|| PostMeta::new(0, None, None, now_secs));
             if !dials.include_replies && meta.is_reply() {
+                continue;
+            }
+            if dials.no_nsfw && meta.is_nsfw() {
                 continue;
             }
             let Some(uri) = self.interner.lookup_str(pid) else {

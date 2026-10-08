@@ -232,6 +232,7 @@ impl UserPreferencesStore {
                 write_chunk(&dials.topic_weights.culture.to_le_bytes())?;
                 write_chunk(&[u8::from(dials.include_replies)])?;
                 write_chunk(&dials.min_likes.to_le_bytes())?;
+                write_chunk(&[u8::from(dials.no_nsfw)])?;
                 write_chunk(&dials.updated_at_secs.to_le_bytes())?;
             }
         }
