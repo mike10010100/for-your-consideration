@@ -273,6 +273,7 @@ fn test_snapshot_v4_roundtrip_all_boundary_values() {
                 culture: 0.5,
             },
             include_replies,
+            no_nsfw: false,
             min_likes,
             updated_at_secs: now + u64::from(min_likes),
         };

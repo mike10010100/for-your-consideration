@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.0] - 2026-10-08
+
+### Added
+
+- **Per-User "No NSFW Posts" Feed Toggle**: Viewers can now opt to suppress author-self-labeled adult / NSFW posts from their generated feed.
+  - **Ingestion (`src/ingest.rs`)**: `parse_jetstream_frame` now reads the `com.atproto.label.defs#selfLabels` object on `app.bsky.feed.post` records via the new `has_nsfw_self_label` helper, recognizing the content-warning vocabulary (`porn`, `sexual`, `nudity`, `graphic-media`, `graphic`, `adult`, `nsfw`, `suggestive`) in both `{ "val": ... }` object and bare-string forms, case-insensitively. The normalized `JetstreamEvent::PostMeta` event carries a new `is_nsfw` flag.
+  - **Graph (`src/graph.rs`)**: `PostMeta` gains an `is_nsfw` field (with `is_nsfw()` accessor). A new `record_post_meta_with_nsfw` records the flag; the original `record_post_meta` delegates with `is_nsfw = false`, preserving its ~350 existing call sites.
+  - **Recommender (`src/recommender.rs`)**: All three candidate filter paths (`recommend` Tier 1/2/3 pool filter, `recommend_preview_at` pool filter, and `traverse_tier3`) now exclude NSFW posts when `dials.no_nsfw` is set.
+  - **Preferences & API (`src/types.rs`, `src/server.rs`)**: `UserDials`, `RecommendationDials`, `UserDialsResponse`, `PreferencesPayloadDto`, and `SavePreferencesRequestBody` carry a `no_nsfw` dial (default `false`). `GET`/`POST /api/preferences` read and write it. `getFeedSkeleton` and `/api/feed-preview` accept `?no_nsfw=true|false` plus a `?safe_mode=1|true|on|yes` alias, with HTTP query parameters taking precedence over persisted dials (consistent with the existing freshness/discovery/replies precedence hierarchy).
+  - **Dashboard (`src/assets/dashboard.html`)**: New "Content Safety" control ("Show All Posts" / "Hide NSFW") in the Live Algorithmic Dials panel, wired into the preview query, preference save payload, reset flow, and saved-preference hydration.
+  - **Snapshot (`src/snapshot.rs`, `src/preferences.rs`)**: Snapshot format bumped to **v5**; Section 6 post-metadata records now carry a trailing `is_nsfw` byte and Section 8 preference records carry a trailing `no_nsfw` byte. Loading v1–v4 snapshots remains fully supported, defaulting both flags to `false`.
+
+### Tests
+
+- New `tests/nsfw_filtering_tests.rs` (8 tests) covering self-label parsing variants, ingestion-to-`PostMeta` propagation, graph + snapshot round-trip of the flag, `recommend`/`recommend_preview_at` filtering, XRPC `?no_nsfw=`/`?safe_mode=` override precedence on both the skeleton and preview endpoints, and `GET`/`POST /api/preferences` persistence of the `no_nsfw` dial.
+- Added `test_has_nsfw_self_label_detection_matrix` in `src/ingest.rs`; extended `tests/m3_challenger_iter2_stress.rs` with a v5 synthetic migration case (and the existing v4 case now pins `SNAPSHOT_FORMAT_VERSION_V4`).
+- Updated `PostMeta`, `UserDials`, `RecommendationDials`, `SavePreferencesRequestBody`, and `JetstreamEvent::PostMeta` construction sites across the existing test suites for the new fields.
+
+---
+
 ## [0.5.0] - 2026-10-07
 
 ### Changed

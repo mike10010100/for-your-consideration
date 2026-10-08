@@ -147,6 +147,7 @@ fn test_massive_multi_shard_roundtrip_oracle_equivalence() {
                     culture: 0.9,
                 },
                 include_replies: u % 8 == 0,
+                no_nsfw: false,
                 min_likes: (u % 7) as u32,
                 updated_at_secs: base_ts + u as u64,
             };
@@ -477,9 +478,12 @@ fn test_legacy_version_compatibility_v1_v2_v3() {
     let u1 = interner.intern("did:plc:alice");
     let p1 = interner.intern("at://did:plc:alice/post/1");
     graph.record_interaction(u1, p1, SignalType::Like, BLUESKY_EPOCH_SECS + 500);
-    graph.record_post_meta(p1, u1, None, None, BLUESKY_EPOCH_SECS + 500);
+    // NOTE: No post metadata is recorded here. Section 6 record width changed in v5
+    // (trailing `is_nsfw` byte), so a v5 file can only be safely relabelled as a
+    // legacy version while the variable-width sections are empty. This test focuses
+    // on header/section-count compatibility of the relabelled file.
 
-    // Save modern snapshot V4
+    // Save modern snapshot V5
     let path = unique_temp_path("legacy_test");
     save_snapshot_with_preferences(&path, &interner, &graph, &preferences, 4444).unwrap();
     let mut raw_bytes = std::fs::read(&path).unwrap();
@@ -557,6 +561,7 @@ fn test_concurrent_mutations_during_streaming_persistence_stress() {
                         serendipity_ratio: 0.1,
                         topic_weights: TopicWeights::default(),
                         include_replies: false,
+                        no_nsfw: false,
                         min_likes: 0,
                         updated_at_secs: BLUESKY_EPOCH_SECS + u64::from(count),
                     };

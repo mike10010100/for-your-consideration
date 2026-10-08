@@ -271,6 +271,7 @@ fn test_adversarial_cache_invalidation_lifecycle_discipline() {
             root_id: None,
             parent_id: None,
             created_at: base_time + 400,
+            is_nsfw: false,
         },
     ));
     snap.active_recent_posts.push((99, base_time + 400));

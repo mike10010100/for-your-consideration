@@ -150,10 +150,13 @@ pub struct PostMeta {
     pub parent_id: Option<u32>,
     /// Unix timestamp (in seconds) when the post was created.
     pub created_at: u64,
+    /// Whether the author self-classified this post as adult / NSFW via `app.bsky.labeler.defs#selfLabels`.
+    #[serde(default)]
+    pub is_nsfw: bool,
 }
 
 impl PostMeta {
-    /// Creates a new [`PostMeta`].
+    /// Creates a new [`PostMeta`] with a root-safe NSFW flag of `false`.
     #[must_use]
     pub const fn new(
         author_id: u32,
@@ -166,6 +169,25 @@ impl PostMeta {
             root_id,
             parent_id,
             created_at,
+            is_nsfw: false,
+        }
+    }
+
+    /// Creates a new [`PostMeta`] with an explicit author self-label NSFW classification.
+    #[must_use]
+    pub const fn with_nsfw(
+        author_id: u32,
+        root_id: Option<u32>,
+        parent_id: Option<u32>,
+        created_at: u64,
+        is_nsfw: bool,
+    ) -> Self {
+        Self {
+            author_id,
+            root_id,
+            parent_id,
+            created_at,
+            is_nsfw,
         }
     }
 
@@ -179,6 +201,12 @@ impl PostMeta {
     #[must_use]
     pub const fn is_reply(&self) -> bool {
         self.parent_id.is_some()
+    }
+
+    /// Returns `true` if the author self-classified this post as adult / NSFW.
+    #[must_use]
+    pub const fn is_nsfw(&self) -> bool {
+        self.is_nsfw
     }
 }
 
@@ -238,6 +266,9 @@ pub struct RecommendationDials {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Whether to suppress posts the author self-classified as adult / NSFW (default: false).
+    #[serde(default)]
+    pub no_nsfw: bool,
     /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
     #[serde(default = "default_min_likes")]
     pub min_likes: u32,
@@ -279,6 +310,7 @@ impl Default for RecommendationDials {
             topic_weights: TopicWeights::default(),
             explain: false,
             include_replies: false,
+            no_nsfw: false,
             min_likes: DEFAULT_MIN_LIKES,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
@@ -346,6 +378,7 @@ impl RecommendationDials {
             topic_weights: TopicWeights::default(),
             explain,
             include_replies: false,
+            no_nsfw: false,
             min_likes: DEFAULT_MIN_LIKES,
             limit,
             cursor,
@@ -430,6 +463,9 @@ pub struct UserDials {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Whether to suppress posts the author self-classified as adult / NSFW (default: false).
+    #[serde(default)]
+    pub no_nsfw: bool,
     /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
     #[serde(default = "default_min_likes")]
     pub min_likes: u32,
@@ -444,6 +480,7 @@ impl Default for UserDials {
             serendipity_ratio: DEFAULT_EXPLORE_RATIO,
             topic_weights: TopicWeights::default(),
             include_replies: false,
+            no_nsfw: false,
             min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs: 0,
         }
@@ -533,6 +570,7 @@ impl UserDials {
             serendipity_ratio: discovery_ratio,
             topic_weights,
             include_replies: false,
+            no_nsfw: false,
             min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs,
         }
@@ -542,6 +580,13 @@ impl UserDials {
     #[must_use]
     pub const fn with_include_replies(mut self, include_replies: bool) -> Self {
         self.include_replies = include_replies;
+        self
+    }
+
+    /// Sets whether to suppress author-self-labeled adult / NSFW posts.
+    #[must_use]
+    pub const fn with_no_nsfw(mut self, no_nsfw: bool) -> Self {
+        self.no_nsfw = no_nsfw;
         self
     }
 
@@ -561,6 +606,7 @@ impl UserDials {
             topic_weights: self.topic_weights,
             explain: false,
             include_replies: self.include_replies,
+            no_nsfw: self.no_nsfw,
             min_likes: self.min_likes,
             limit: DEFAULT_PAGE_LIMIT,
             cursor: None,
@@ -578,6 +624,7 @@ impl UserDials {
             serendipity_ratio: dials.explore_ratio,
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            no_nsfw: dials.no_nsfw,
             min_likes: dials.min_likes,
             updated_at_secs,
         }
@@ -589,6 +636,7 @@ impl UserDials {
         dials.explore_ratio = self.serendipity_ratio;
         dials.topic_weights = self.topic_weights;
         dials.include_replies = self.include_replies;
+        dials.no_nsfw = self.no_nsfw;
         dials.min_likes = self.min_likes;
     }
 }
@@ -638,6 +686,9 @@ pub struct UserDialsResponse {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
+    /// Whether to suppress posts the author self-classified as adult / NSFW (default: false).
+    #[serde(default)]
+    pub no_nsfw: bool,
     /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
     #[serde(default = "default_min_likes")]
     pub min_likes: u32,
@@ -652,6 +703,7 @@ impl From<UserDials> for UserDialsResponse {
             discovery_ratio: dials.discovery_ratio(),
             topics: dials.topic_weights,
             include_replies: dials.include_replies,
+            no_nsfw: dials.no_nsfw,
             min_likes: dials.min_likes,
             updated_at_secs: dials.updated_at_secs,
         }
@@ -672,8 +724,11 @@ pub struct PreferencesPayloadDto {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (default: false / root-only).
     #[serde(default)]
     pub include_replies: bool,
-    /// Minimum engagement floor threshold in likes.
-    #[serde(alias = "engagement_floor", default = "default_min_likes")]
+    /// Whether to suppress posts the author self-classified as adult / NSFW (default: false).
+    #[serde(default)]
+    pub no_nsfw: bool,
+    /// Minimum engagement floor threshold in likes required for candidate posts (default: 3).
+    #[serde(default = "default_min_likes")]
     pub min_likes: u32,
 }
 
@@ -684,6 +739,7 @@ impl From<UserDials> for PreferencesPayloadDto {
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            no_nsfw: dials.no_nsfw,
             min_likes: dials.min_likes,
         }
     }
@@ -720,6 +776,9 @@ pub struct SavePreferencesRequestBody {
     /// Whether to include reply posts or restrict exclusively to top-level root posts (optional, default: false).
     #[serde(default)]
     pub include_replies: Option<bool>,
+    /// Whether to suppress author-self-labeled adult / NSFW posts (optional, default: false).
+    #[serde(default)]
+    pub no_nsfw: Option<bool>,
     /// Minimum engagement floor threshold in likes (optional, default: 3).
     #[serde(alias = "engagement_floor", default)]
     pub min_likes: Option<u32>,
@@ -1326,6 +1385,10 @@ pub struct FeedPreviewQuery {
     pub replies: Option<String>,
     /// Alternative boolean flag for including replies.
     pub include_replies: Option<bool>,
+    /// Whether to suppress author-self-labeled adult / NSFW posts.
+    pub no_nsfw: Option<bool>,
+    /// Alternative parameter name for suppressing NSFW posts (accepts "1"/"true"/"on").
+    pub safe_mode: Option<String>,
     /// Minimum engagement floor threshold in likes (e.g. 1, 3, 10).
     #[serde(default)]
     pub min_likes: Option<u32>,
@@ -1377,6 +1440,17 @@ impl FeedPreviewQuery {
             (Some("true" | "all" | "include" | "1"), _) | (_, Some(true))
         );
         base_dials.include_replies = include_replies;
+
+        let no_nsfw = self.no_nsfw.unwrap_or(false)
+            || matches!(
+                self.safe_mode
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("1" | "true" | "on" | "yes")
+            );
+        base_dials.no_nsfw = no_nsfw;
 
         let min_likes = match (self.min_likes, self.engagement_floor.as_deref()) {
             (Some(v), _) => v.clamp(MIN_ENGAGEMENT_FLOOR, MAX_ENGAGEMENT_FLOOR),
@@ -2006,6 +2080,8 @@ mod tests {
             discovery: Some("deep_dive".to_string()),
             replies: Some("true".to_string()),
             include_replies: None,
+            no_nsfw: Some(true),
+            safe_mode: None,
             min_likes: Some(10),
             engagement_floor: None,
             art: Some(2.5),

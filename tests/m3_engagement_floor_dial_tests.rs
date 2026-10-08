@@ -352,6 +352,7 @@ fn test_m3_snapshot_v4_roundtrip_and_backward_compatibility() {
         serendipity_ratio: 0.25,
         topic_weights: TopicWeights::default(),
         include_replies: false,
+        no_nsfw: false,
         updated_at_secs: 1_234_567,
     };
     prefs.set(uid, custom_dials);
@@ -792,6 +793,7 @@ async fn test_m3_rest_preferences_lifecycle() {
         discovery_ratio: 0.20,
         topic_weights: None,
         include_replies: Some(false),
+        no_nsfw: None,
         min_likes: Some(8),
     };
     let post_req = Request::builder()

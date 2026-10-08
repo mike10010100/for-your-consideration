@@ -572,6 +572,7 @@ async fn handle_test_get_feed_skeleton(
         topic_weights: saved_dials.topic_weights,
         explain: query.explain.unwrap_or(false),
         include_replies: false,
+        no_nsfw: false,
         min_likes: saved_dials.min_likes,
         limit,
         cursor: query.cursor,

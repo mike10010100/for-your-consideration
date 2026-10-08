@@ -429,6 +429,10 @@ pub struct FeedSkeletonQuery {
     pub replies: Option<String>,
     /// Alternative boolean flag for including replies.
     pub include_replies: Option<bool>,
+    /// Whether to suppress author-self-labeled adult / NSFW posts (optional).
+    pub no_nsfw: Option<bool>,
+    /// Alternative parameter name for suppressing NSFW posts (accepts "1"/"true"/"on").
+    pub safe_mode: Option<String>,
     /// Minimum engagement floor in likes or preset string ("emerging", "balanced", "curated", or numeric).
     #[serde(alias = "engagement_floor", default)]
     pub min_likes: Option<String>,
@@ -680,6 +684,13 @@ pub async fn handle_get_feed_skeleton(
         _ => base_dials.include_replies,
     };
 
+    let no_nsfw = match (query.no_nsfw, query.safe_mode.as_deref()) {
+        (Some(v), _) => v,
+        (None, Some("1" | "true" | "on" | "yes")) => true,
+        (None, Some("0" | "false" | "off" | "no")) => false,
+        _ => base_dials.no_nsfw,
+    };
+
     let min_likes = query
         .min_likes
         .as_deref()
@@ -693,6 +704,7 @@ pub async fn handle_get_feed_skeleton(
         topic_weights,
         explain,
         include_replies,
+        no_nsfw,
         min_likes,
         limit,
         cursor: query.cursor,
@@ -1328,6 +1340,7 @@ pub async fn handle_get_preferences(
             discovery_ratio: dials.discovery_ratio(),
             topic_weights: dials.topic_weights,
             include_replies: dials.include_replies,
+            no_nsfw: dials.no_nsfw,
             min_likes: dials.min_likes,
         },
         is_custom,
@@ -1363,12 +1376,14 @@ pub async fn handle_post_preferences(
     };
 
     let include_replies = body.include_replies.unwrap_or(false);
+    let no_nsfw = body.no_nsfw.unwrap_or(false);
     let min_likes = body.min_likes.unwrap_or(DEFAULT_MIN_LIKES);
     let dials = UserDials {
         freshness_half_life_secs: body.freshness_hours * 3600.0,
         serendipity_ratio: body.discovery_ratio,
         topic_weights: body.topic_weights.unwrap_or_default(),
         include_replies,
+        no_nsfw,
         min_likes,
         updated_at_secs: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1401,6 +1416,7 @@ pub async fn handle_post_preferences(
                 discovery_ratio: dials.discovery_ratio(),
                 topic_weights: dials.topic_weights,
                 include_replies: dials.include_replies,
+                no_nsfw: dials.no_nsfw,
                 min_likes: dials.min_likes,
             }),
             dials: Some(dials.into()),
@@ -2268,6 +2284,7 @@ mod tests {
                 culture: 1.5,
             }),
             include_replies: Some(true),
+            no_nsfw: Some(false),
             min_likes: Some(10),
         };
         let req_post = Request::builder()
@@ -2393,6 +2410,7 @@ mod tests {
                 culture: 0.0,
             },
             include_replies: false,
+            no_nsfw: false,
             min_likes: DEFAULT_MIN_LIKES,
             updated_at_secs: 0,
         };

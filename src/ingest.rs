@@ -245,6 +245,9 @@ pub enum JetstreamEvent {
         parent_uri: Option<CompactString>,
         /// Unix timestamp in seconds when the post was created.
         created_at_secs: u64,
+        /// Whether the author self-classified this post as adult / NSFW.
+        #[serde(default)]
+        is_nsfw: bool,
     },
     /// Directed follow relationship.
     Follow {
@@ -912,6 +915,48 @@ pub struct RawJetstreamCommit {
     pub record: Option<serde_json::Value>,
 }
 
+/// Self-label values that classify a post as adult / NSFW content.
+///
+/// Mirrors the content-warning vocabulary used by `ATProto` clients for
+/// `com.atproto.label.defs#selfLabels` (e.g. `porn`, `sexual`, `nudity`).
+pub const NSFW_SELF_LABEL_VALUES: [&str; 8] = [
+    "porn",
+    "sexual",
+    "nudity",
+    "graphic-media",
+    "graphic",
+    "adult",
+    "nsfw",
+    "suggestive",
+];
+
+/// Returns `true` if a post record carries an adult / NSFW author self-label.
+///
+/// Reads the `labels` object (`com.atproto.label.defs#selfLabels`) and inspects
+/// its `values` array. Entries may be either `{ "val": "..." }` objects or bare
+/// strings; comparison is case-insensitive.
+#[must_use]
+pub fn has_nsfw_self_label(record: &serde_json::Value) -> bool {
+    let Some(values) = record
+        .get("labels")
+        .and_then(|labels| labels.get("values"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+
+    values.iter().any(|entry| {
+        let raw = entry
+            .get("val")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| entry.as_str());
+        raw.is_some_and(|val| {
+            let normalized = val.trim().to_ascii_lowercase();
+            NSFW_SELF_LABEL_VALUES.contains(&normalized.as_str())
+        })
+    })
+}
+
 /// Parses a raw Jetstream JSON string into normalized [`JetstreamEvent`]s and timestamp in microseconds.
 ///
 /// Returns `None` if the frame is malformed JSON, not a commit event, an unwanted collection,
@@ -1006,6 +1051,7 @@ pub fn parse_jetstream_frame(text: &str) -> Option<(Vec<JetstreamEvent>, u64)> {
                 root_uri,
                 parent_uri,
                 created_at_secs: fallback_secs,
+                is_nsfw: has_nsfw_self_label(&record),
             });
 
             // Check for embedded quote posts
@@ -1090,12 +1136,13 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
             root_uri,
             parent_uri,
             created_at_secs,
+            is_nsfw,
         } => {
             let pid = interner.intern(post_uri);
             let aid = interner.intern(author_did);
             let rid = root_uri.as_ref().map(|r| interner.intern(r));
             let paid = parent_uri.as_ref().map(|p| interner.intern(p));
-            graph.record_post_meta(pid, aid, rid, paid, *created_at_secs);
+            graph.record_post_meta_with_nsfw(pid, aid, rid, paid, *created_at_secs, *is_nsfw);
         }
         JetstreamEvent::Follow {
             follower_did,
@@ -1598,6 +1645,41 @@ mod tests {
     use crate::types::BLUESKY_EPOCH_SECS;
 
     #[test]
+    fn test_has_nsfw_self_label_detection_matrix() {
+        // No labels object -> safe.
+        let clean = serde_json::json!({ "text": "hello world" });
+        assert!(!has_nsfw_self_label(&clean));
+
+        // Empty values -> safe.
+        let empty = serde_json::json!({ "labels": { "values": [] } });
+        assert!(!has_nsfw_self_label(&empty));
+
+        // Object-form NSFW self-label.
+        let porn_obj = serde_json::json!({
+            "labels": { "values": [ { "val": "porn" } ] }
+        });
+        assert!(has_nsfw_self_label(&porn_obj));
+
+        // Bare-string form NSFW self-label, mixed case + whitespace.
+        let nudity_str = serde_json::json!({
+            "labels": { "values": [ "  Nudity  " ] }
+        });
+        assert!(has_nsfw_self_label(&nudity_str));
+
+        // Non-NSFW label only -> safe.
+        let spoiler = serde_json::json!({
+            "labels": { "values": [ { "val": "spoiler" } ] }
+        });
+        assert!(!has_nsfw_self_label(&spoiler));
+
+        // One NSFW label among benign labels -> NSFW.
+        let mixed = serde_json::json!({
+            "labels": { "values": [ { "val": "spoiler" }, { "val": "sexual" } ] }
+        });
+        assert!(has_nsfw_self_label(&mixed));
+    }
+
+    #[test]
     fn test_ingester_config_builder() {
         let config = IngesterConfig::new("ws://127.0.0.1:8080/sub")
             .with_collections(vec![CompactString::new("app.bsky.feed.like")])
@@ -1765,6 +1847,7 @@ mod tests {
                 root_uri,
                 parent_uri,
                 created_at_secs,
+                is_nsfw,
             } => {
                 assert_eq!(post_uri, "at://did:plc:author/app.bsky.feed.post/3kpost789");
                 assert_eq!(author_did, "did:plc:author");
@@ -1777,6 +1860,7 @@ mod tests {
                     Some("at://did:plc:parent/app.bsky.feed.post/parent1")
                 );
                 assert_eq!(*created_at_secs, 1_700_000_000);
+                assert!(!is_nsfw);
             }
             _ => panic!("Expected PostMeta variant"),
         }
@@ -1947,6 +2031,7 @@ mod tests {
             root_uri: None,
             parent_uri: None,
             created_at_secs: now,
+            is_nsfw: false,
         };
         apply_event_to_graph(&post_event, &interner, &graph);
         let p2_id = interner

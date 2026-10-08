@@ -358,6 +358,7 @@ async fn test_challenger2_rest_preferences_crud_and_boundary_rejection() {
         discovery_ratio: 0.15,
         topic_weights: None,
         include_replies: None,
+        no_nsfw: None,
         min_likes: Some(101),
     };
     let post_req_bad = Request::builder()
@@ -391,6 +392,7 @@ async fn test_challenger2_rest_preferences_crud_and_boundary_rejection() {
             culture: 1.0,
         }),
         include_replies: Some(true),
+        no_nsfw: None,
         min_likes: Some(10),
     };
     let post_req_valid = Request::builder()

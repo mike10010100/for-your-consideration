@@ -137,6 +137,7 @@ fn test_velocity_pool_cache_invalidation_discipline() {
             root_id: None,
             parent_id: None,
             created_at: base_time + 60,
+            is_nsfw: false,
         },
     ));
     snap.active_recent_posts.push((3, base_time + 60));
@@ -175,6 +176,7 @@ fn test_streaming_snapshot_shard_by_shard_methods() {
         serendipity_ratio: 0.2,
         topic_weights: TopicWeights::default(),
         include_replies: false,
+        no_nsfw: false,
         min_likes: 2,
         updated_at_secs: now,
     };
@@ -363,6 +365,7 @@ fn test_streaming_snapshot_roundtrip_integrity() {
                     culture: 0.8,
                 },
                 include_replies: i % 6 == 0,
+                no_nsfw: false,
                 min_likes: (i % 5) as u32,
                 updated_at_secs: ts,
             };

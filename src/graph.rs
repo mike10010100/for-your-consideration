@@ -431,7 +431,20 @@ impl GraphStore {
         parent_id: Option<u32>,
         created_at: u64,
     ) {
-        let meta = PostMeta::new(author_id, root_id, parent_id, created_at);
+        self.record_post_meta_with_nsfw(post_id, author_id, root_id, parent_id, created_at, false);
+    }
+
+    /// Records metadata for a post including its author self-label NSFW classification.
+    pub fn record_post_meta_with_nsfw(
+        &self,
+        post_id: u32,
+        author_id: u32,
+        root_id: Option<u32>,
+        parent_id: Option<u32>,
+        created_at: u64,
+        is_nsfw: bool,
+    ) {
+        let meta = PostMeta::with_nsfw(author_id, root_id, parent_id, created_at, is_nsfw);
 
         // 1. Post metadata
         {
@@ -1696,7 +1709,7 @@ impl GraphStore {
 
     /// Streams post metadata entries shard-by-shard to a writer callback without clone vectors.
     ///
-    /// Writes the 32-bit count prefix followed by `(pid, author_id, root_id, parent_id, created_at)` records.
+    /// Writes the 32-bit count prefix followed by `(pid, author_id, root_id, parent_id, created_at, is_nsfw)` records.
     /// Returns `num_post_metadata`.
     pub fn stream_post_metadata_to<F>(&self, write_chunk: &mut F) -> Result<u32>
     where
@@ -1727,6 +1740,7 @@ impl GraphStore {
                     write_chunk(&0u32.to_le_bytes())?;
                 }
                 write_chunk(&meta.created_at.to_le_bytes())?;
+                write_chunk(&[u8::from(meta.is_nsfw)])?;
             }
         }
         Ok(num_post_metadata)

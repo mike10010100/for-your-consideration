@@ -354,6 +354,7 @@ fn test_adversarial_strict_boundary_invariants() {
             culture: MIN_TOPIC_MULTIPLIER, // 0.0
         },
         include_replies: false,
+        no_nsfw: false,
         min_likes: MIN_ENGAGEMENT_FLOOR,
         updated_at_secs: 0,
     };
@@ -376,6 +377,7 @@ fn test_adversarial_strict_boundary_invariants() {
             culture: MAX_TOPIC_MULTIPLIER, // 5.0
         },
         include_replies: false,
+        no_nsfw: false,
         min_likes: MAX_ENGAGEMENT_FLOOR,
         updated_at_secs: u64::MAX,
     };
@@ -631,6 +633,7 @@ fn test_snapshot_crc32_tampering_and_forgery_attacks() {
         payload.extend_from_slice(&1.0f32.to_le_bytes()); // culture
         payload.extend_from_slice(&[0u8]); // include_replies = false
         payload.extend_from_slice(&3u32.to_le_bytes()); // min_likes = 3
+        payload.extend_from_slice(&[0u8]); // no_nsfw = false
         payload.extend_from_slice(&100u64.to_le_bytes()); // updated_at
 
         let mut p_hasher = Hasher::new();
