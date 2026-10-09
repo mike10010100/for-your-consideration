@@ -205,10 +205,39 @@ async fn test_dashboard_algorithmic_dials_and_feed_preview_elements() {
     assert!(html.contains("id=\"badge-topic-culture\""));
     assert!(html.contains("id=\"btn-reset-dials\""));
 
+    // Algorithmic Mode Presets & Dynamic Synchronization
+    assert!(html.contains("data-preset=\"realtime\""));
+    assert!(html.contains("data-preset=\"balanced\""));
+    assert!(html.contains("data-preset=\"deepdive\""));
+    assert!(html.contains("data-preset=\"explorer\""));
+    assert!(html.contains("updateModePresetButtons"));
+    assert!(html.contains("ALGO_PRESETS"));
+
     // Feed Preview
     assert!(html.contains("id=\"feed-preview-latency\""));
     assert!(html.contains("id=\"feed-candidate-count\""));
     assert!(html.contains("id=\"feed-preview-items\""));
+}
+
+#[tokio::test]
+async fn test_dashboard_algorithmic_mode_presets_and_realtime_pulse_elements() {
+    let state = create_test_state();
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(html.contains("data-preset=\"realtime\""));
+    assert!(html.contains("Realtime Pulse"));
+    assert!(html.contains("data-preset=\"balanced\""));
+    assert!(html.contains("Balanced (Default)"));
+    assert!(html.contains("data-preset=\"deepdive\""));
+    assert!(html.contains("Deep Dives"));
+    assert!(html.contains("data-preset=\"explorer\""));
+    assert!(html.contains("Explorer"));
+    assert!(html.contains("updateModePresetButtons"));
 }
 
 #[tokio::test]

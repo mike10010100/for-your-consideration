@@ -1112,6 +1112,40 @@ if (container) {
 container.classList.toggle('expanded');
 }
 }
+const ALGO_PRESETS = {
+realtime: { freshness: 2, discovery: 10, minLikes: 1, replies: false },
+balanced: { freshness: 12, discovery: 15, minLikes: 3, replies: false },
+deepdive: { freshness: 48, discovery: 20, minLikes: 10, replies: false },
+explorer: { freshness: 24, discovery: 35, minLikes: 3, replies: false }
+};
+function updateModePresetButtons() {
+if (!elements.sliderFreshness || !elements.sliderDiscovery) return;
+const freshness = Math.round(Number(elements.sliderFreshness.value));
+const discovery = Math.round(Number(elements.sliderDiscovery.value));
+let matchedKey = null;
+for (const [key, p] of Object.entries(ALGO_PRESETS)) {
+if (p.freshness === freshness && p.discovery === discovery && p.minLikes === Number(state.minLikes) && p.replies === Boolean(state.includeReplies)) {
+matchedKey = key;
+break;
+}
+}
+document.querySelectorAll('.btn-mode-preset').forEach(btn => {
+const key = btn.getAttribute('data-preset');
+if (key === matchedKey) {
+btn.className = 'btn btn-sm btn-mode-preset btn-active-tab';
+btn.style.background = '';
+btn.style.border = '';
+btn.style.color = '';
+btn.style.fontWeight = '500';
+} else {
+btn.className = 'btn btn-sm btn-mode-preset';
+btn.style.background = 'var(--bg-surface)';
+btn.style.border = '1px solid var(--border-light)';
+btn.style.color = 'var(--text-secondary)';
+btn.style.fontWeight = '';
+}
+});
+}
 function updateDialBadges() {
 const freshness = Number(elements.sliderFreshness.value);
 let freshnessLabel = 'Balanced';
@@ -1197,6 +1231,7 @@ setBtnActive(elements.btnEngagementEmerging, state.minLikes === 1);
 setBtnActive(elements.btnEngagementBalanced, state.minLikes === 3);
 setBtnActive(elements.btnEngagementCurated, state.minLikes === 10);
 }
+updateModePresetButtons();
 }
 function triggerFeedPreview() {
 updateDialBadges();
@@ -2010,27 +2045,11 @@ elements.dialViewerInput.value = v;
 triggerFeedPreview();
 });
 });
-const ALGO_PRESETS = {
-realtime: { freshness: 2, discovery: 10, minLikes: 1, replies: false },
-balanced: { freshness: 12, discovery: 15, minLikes: 3, replies: false },
-deepdive: { freshness: 48, discovery: 20, minLikes: 10, replies: false },
-explorer: { freshness: 24, discovery: 35, minLikes: 3, replies: false }
-};
 document.querySelectorAll('.btn-mode-preset').forEach(btn => {
 btn.addEventListener('click', () => {
 const presetKey = btn.getAttribute('data-preset');
 const p = ALGO_PRESETS[presetKey];
 if (p) {
-document.querySelectorAll('.btn-mode-preset').forEach(b => {
-b.className = 'btn btn-sm btn-mode-preset';
-b.style.background = 'var(--bg-surface)';
-b.style.border = '1px solid var(--border-light)';
-b.style.color = 'var(--text-secondary)';
-});
-btn.className = 'btn btn-sm btn-mode-preset btn-active-tab';
-btn.style.background = '';
-btn.style.border = '';
-btn.style.color = '';
 elements.sliderFreshness.value = p.freshness;
 elements.sliderDiscovery.value = p.discovery;
 state.minLikes = p.minLikes;
