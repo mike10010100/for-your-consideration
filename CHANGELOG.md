@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.1] - 2026-10-09
+
+### Fixed
+
+- **Algorithmic Presets Dynamic UI Synchronization**: Fixed an issue where selecting the "Realtime Pulse" preset (or any non-default preset) would visually revert to "Balanced (Default)" in the dashboard Web UI after page reloads or saved-preference hydration, despite the user's settings successfully persisting and actively driving the feed algorithm.
+  - Added `updateModePresetButtons()` to inspect current dial values (`freshness`, `discovery`, `min_likes`, `include_replies`) against `ALGO_PRESETS` and dynamically toggle the active tab styling (`btn-active-tab`) across all preset buttons.
+  - Integrated preset synchronization into `updateDialBadges()`, ensuring the active preset tab is kept in lockstep during initial load, session preference hydration (`loadSavedPreferences`), dial resets, and manual slider/button adjustments.
+
+---
+
 ## [0.6.0] - 2026-10-08
 
 ### Added
