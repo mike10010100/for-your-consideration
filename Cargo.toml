@@ -25,45 +25,45 @@ mimalloc = ["dep:mimalloc"]
 skyauth = { version = "0.3.3", features = ["axum"] }
 
 # Memory Allocators
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Async Runtime & Concurrency
 tokio = { version = "1.40", features = ["full"] }
 tokio-util = "0.7"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = "0.3"
 parking_lot = "0.12"
 arc-swap = "1.7"
 
 # HTTP Web Framework & Networking
-axum = { version = "0.7", features = ["macros", "json"] }
+axum = { version = "0.8", features = ["macros", "json"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 http = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 
 # Fast In-Memory Graph & Interner
-roaring = "0.10"
+roaring = "0.11"
 ahash = "0.8"
-compact_str = { version = "0.8", features = ["serde"] }
+compact_str = { version = "0.10", features = ["serde"] }
 
 # Serialization & ATProto Data
 crc32fast = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-base64 = "0.22"
-rand = "0.8"
-sha2 = "0.10"
-p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.23"
+rand = "0.10"
+sha2 = "0.11"
+p256 = { version = "0.14", features = ["ecdsa"] }
 # ES256K verification for ATProto Service Auth JWTs (secp256k1 keys from DID documents)
-k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "alloc"] }
 
 # Observability & Errors
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror = "1.0"
+thiserror = "2.0"
 
 [dev-dependencies]
 proptest = "1.5"
