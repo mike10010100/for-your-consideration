@@ -605,7 +605,7 @@ mod tests {
         // Build a valid compressed key
         let signing = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
         let verifying = signing.verifying_key();
-        let compressed = verifying.to_encoded_point(true).as_bytes().to_vec();
+        let compressed = verifying.to_sec1_point(true).as_bytes().to_vec();
 
         let multikey_bytes = [vec![MULTIKEY_SECP256K1_PREFIX], compressed].concat();
         let encoded = format!("z{}", test_bs58_encode(&multikey_bytes));
@@ -643,7 +643,7 @@ mod tests {
     fn test_extract_signing_key_from_document() {
         let signing = SigningKey::from_bytes(&[9u8; 32].into()).unwrap();
         let verifying = signing.verifying_key();
-        let compressed_bytes = verifying.to_encoded_point(true);
+        let compressed_bytes = verifying.to_sec1_point(true);
         let compressed = compressed_bytes.as_bytes();
         let multikey_bytes = [vec![MULTIKEY_SECP256K1_PREFIX], compressed.to_vec()].concat();
         let multibase = format!("z{}", test_bs58_encode(&multikey_bytes));
@@ -662,7 +662,7 @@ mod tests {
 
         let extracted = ServiceAuthVerifier::extract_signing_key_from_document(&doc).unwrap();
         assert_eq!(
-            extracted.to_encoded_point(true).as_bytes(),
+            extracted.to_sec1_point(true).as_bytes(),
             compressed,
             "round-tripped key must match"
         );

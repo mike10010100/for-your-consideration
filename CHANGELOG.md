@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-10-14
+
+### Changed
+
+- **Rust Dependencies**: Upgraded `axum` (0.8), `tower-http` (0.7), `tokio-tungstenite` (0.30), `tikv-jemallocator` (0.7), `roaring` (0.11), `compact_str` (0.10), `base64` (0.23), `rand` (0.10), `sha2` (0.11), `p256` (0.14), `k256` (0.14), and `thiserror` (2.0), updating WebSocket frame types, SEC1 point encoding, and RNG invocations accordingly.
+
+---
+
 ## [0.6.2] - 2026-10-10
 
 ### Changed

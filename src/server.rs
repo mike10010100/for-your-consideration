@@ -34,7 +34,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use compact_str::CompactString;
 use parking_lot::RwLock;
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -865,7 +865,7 @@ pub async fn handle_get_oauth_login(
 
     let pkce = generate_pkce_pair();
     let mut state_bytes = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut state_bytes);
+    rand::rng().fill_bytes(&mut state_bytes);
     let state_nonce = URL_SAFE_NO_PAD.encode(state_bytes);
 
     let is_localhost = state.hostname.starts_with("localhost")

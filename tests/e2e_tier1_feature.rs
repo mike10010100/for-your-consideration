@@ -1971,7 +1971,7 @@ fn test_f25_cursor_resumes_without_duplicate_events() {
 
 #[test]
 fn test_f26_heartbeat_ping_pong_response() {
-    let msg = Message::Ping(vec![1, 2, 3]);
+    let msg = Message::Ping(vec![1, 2, 3].into());
     assert!(msg.is_ping());
 }
 

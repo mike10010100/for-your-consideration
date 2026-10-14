@@ -1550,7 +1550,7 @@ pub async fn run_slice_reader_reconnect_loop(
                     }
                 } => {
                     trace!(slice_idx = slice_idx, "Sending keepalive WebSocket ping.");
-                    if ws_stream.send(Message::Ping(Vec::new())).await.is_err() {
+                    if ws_stream.send(Message::Ping(Vec::new().into())).await.is_err() {
                         warn!(slice_idx = slice_idx, "Failed to send keepalive ping, reconnecting.");
                         break;
                     }
@@ -2092,7 +2092,7 @@ mod tests {
                                                 } => {
                                                     match msg {
                                                         Some(json) => {
-                                                            if ws.send(Message::Text(json)).await.is_err() {
+                                                            if ws.send(Message::Text(json.into())).await.is_err() {
                                                                 break;
                                                             }
                                                         }
