@@ -29,7 +29,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use compact_str::CompactString;
 use for_your_consideration::prelude::*;
-use rand::RngCore;
+use rand::Rng;
 use sha2::Digest;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
@@ -384,7 +384,7 @@ async fn main() -> Result<()> {
                 ));
             }
             let mut key = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut key);
+            rand::rng().fill_bytes(&mut key);
             Ok((key, false))
         },
         |sec| {
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
                     ));
                 }
                 let mut key = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut key);
+                rand::rng().fill_bytes(&mut key);
                 Ok((key, false))
             } else {
                 let hash = sha2::Sha256::digest(trimmed.as_bytes());

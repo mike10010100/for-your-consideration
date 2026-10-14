@@ -136,7 +136,7 @@ impl FastMockJetstreamServer {
                                             }),
                                         };
 
-                                        if ws.send(Message::Text(json.to_string())).await.is_err() {
+                                        if ws.send(Message::Text(json.to_string().into())).await.is_err() {
                                             break;
                                         }
                                     }
@@ -435,7 +435,7 @@ impl FlappingMockServer {
                                             }
                                         });
 
-                                        let _ = ws.send(Message::Text(payload.to_string())).await;
+                                        let _ = ws.send(Message::Text(payload.to_string().into())).await;
                                         tokio::time::sleep(Duration::from_millis(5)).await;
                                     }
                                     // Abrupt socket drop (no close frame)
@@ -559,7 +559,7 @@ impl SilentMockServer {
                                             }
                                         }
                                     });
-                                    let _ = ws.send(Message::Text(payload.to_string())).await;
+                                    let _ = ws.send(Message::Text(payload.to_string().into())).await;
 
                                     // Then stay silent indefinitely
                                     loop {

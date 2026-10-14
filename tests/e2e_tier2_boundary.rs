@@ -1837,7 +1837,7 @@ async fn test_f26_heartbeat_hung_tcp_detection() {
 
 #[test]
 fn test_f26_heartbeat_unsolicited_pong_ignore() {
-    let pong = Message::Pong(vec![1, 2, 3]);
+    let pong = Message::Pong(vec![1, 2, 3].into());
     assert!(pong.is_pong());
 }
 

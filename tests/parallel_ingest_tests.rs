@@ -64,7 +64,7 @@ impl MockJetstreamEndpoint {
                                             } => {
                                                 match msg {
                                                     Some(json) => {
-                                                        if ws.send(Message::Text(json)).await.is_err() {
+                                                        if ws.send(Message::Text(json.into())).await.is_err() {
                                                             break;
                                                         }
                                                     }
