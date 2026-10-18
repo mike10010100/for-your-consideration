@@ -1735,6 +1735,10 @@ fn test_t2_f4_04_invalid_did_scheme_returns_400() {
     assert!(!is_valid_did("did:unknown:12345"));
     assert!(!is_valid_did("did:plc:"));
     assert!(!is_valid_did("did:web:"));
+    assert!(!is_valid_did("did:plc:x/../../foo"));
+    assert!(!is_valid_did("did:plc:abc?q=1"));
+    assert!(!is_valid_did("did:web:host/path#"));
+    assert!(!is_valid_did("did:web:-bad.example.com"));
     assert!(!is_valid_did("not_a_did_at_all"));
     assert!(!is_valid_did(""));
     assert!(is_valid_did("did:plc:z72i7hdynmk6r22z27h6tvur"));

@@ -74,7 +74,25 @@ impl ServiceJwtPayload {
 /// Validates whether a string is a syntactically valid AT Protocol DID (`did:plc:...` or `did:web:...`).
 #[must_use]
 pub fn is_valid_did(did: &str) -> bool {
-    (did.starts_with("did:plc:") && did.len() > 8) || (did.starts_with("did:web:") && did.len() > 8)
+    if let Some(id) = did.strip_prefix("did:plc:") {
+        return !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    }
+    if let Some(host) = did.strip_prefix("did:web:") {
+        return !host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|l| {
+                !l.is_empty()
+                    && l.len() <= 63
+                    && !l.starts_with('-')
+                    && !l.ends_with('-')
+                    && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+    }
+    false
 }
 
 /// Extracts viewer DID from Axum HTTP request headers.
@@ -1281,16 +1299,19 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         });
     }
 
-    if trimmed.starts_with("did:") && !is_valid_did(trimmed) {
-        return Err(FeedError::InvalidInput(format!(
-            "Invalid DID format: '{trimmed}'"
-        )));
+    if trimmed.starts_with("did:") {
+        if !is_valid_did(trimmed) {
+            return Err(FeedError::InvalidInput(format!(
+                "Invalid DID format: '{trimmed}'"
+            )));
+        }
+        skyauth::identity::validate_did_syntax(trimmed)
+            .map_err(|e| FeedError::InvalidInput(format!("Invalid DID format '{trimmed}': {e}")))?;
     }
 
     let client = build_secure_http_client();
-    let input_was_did = trimmed.starts_with("did:");
 
-    let (did, mut handle) = if input_was_did {
+    let (did, mut handle) = if trimmed.starts_with("did:") {
         (trimmed.to_string(), trimmed.to_string())
     } else {
         // Resolve handle -> DID via com.atproto.identity.resolveHandle
@@ -1317,6 +1338,11 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         let resolved_did = json["did"]
             .as_str()
             .ok_or_else(|| FeedError::Auth("Missing DID in resolveHandle response".to_string()))?;
+        skyauth::identity::validate_did_syntax(resolved_did).map_err(|e| {
+            FeedError::Auth(format!(
+                "Invalid DID '{resolved_did}' in resolveHandle response: {e}"
+            ))
+        })?;
         (resolved_did.to_string(), trimmed.to_string())
     };
 
@@ -1332,7 +1358,7 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         )));
     };
 
-    let valid_did_url = validate_outbound_url(&did_doc_url, false)?;
+    let valid_did_url = validate_outbound_url_async(&did_doc_url, false).await?;
     let pds_endpoint = match client.get(&valid_did_url).send().await {
         Ok(res) if res.status().is_success() => {
             let json = res.json::<serde_json::Value>().await.map_err(|e| {
@@ -1359,7 +1385,7 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
                     if s_type == "AtprotoPersonalDataServer" || s_id == "#atproto_pds" {
                         if let Some(ep) = s["serviceEndpoint"].as_str() {
                             if let Ok(valid_ep) =
-                                validate_outbound_url(ep.trim_end_matches('/'), false)
+                                validate_outbound_url_async(ep.trim_end_matches('/'), false).await
                             {
                                 found_endpoint = Some(valid_ep);
                                 break;
@@ -1368,96 +1394,98 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
                     }
                 }
             }
-            found_endpoint.unwrap_or_else(|| "https://bsky.social".to_string())
+            found_endpoint.ok_or_else(|| {
+                FeedError::Auth(format!(
+                    "DID document for '{did}' does not contain a valid AtprotoPersonalDataServer endpoint"
+                ))
+            })?
         }
-        Ok(res) if input_was_did => {
+        Ok(res) => {
             return Err(FeedError::Auth(format!(
                 "Could not resolve DID document for '{did}' (HTTP {})",
                 res.status()
             )));
         }
-        Err(e) if input_was_did => {
+        Err(e) => {
             return Err(FeedError::Auth(format!(
                 "Failed to fetch DID document for '{did}': {e}"
             )));
         }
-        _ => "https://bsky.social".to_string(),
     };
 
     // Discover OAuth Authorization Server from PDS metadata (RFC 9728)
     let protected_res_url = format!("{pds_endpoint}/.well-known/oauth-protected-resource");
-    let auth_server = if let Ok(valid_prot_url) = validate_outbound_url(&protected_res_url, false) {
-        match client.get(&valid_prot_url).send().await {
-            Ok(res) if res.status().is_success() => {
-                res.json::<serde_json::Value>().await.map_or_else(
-                    |_| pds_endpoint.clone(),
-                    |json| {
-                        json["authorization_servers"]
+    let auth_server =
+        if let Ok(valid_prot_url) = validate_outbound_url_async(&protected_res_url, false).await {
+            match client.get(&valid_prot_url).send().await {
+                Ok(res) if res.status().is_success() => {
+                    if let Ok(json) = res.json::<serde_json::Value>().await {
+                        let candidate = json["authorization_servers"]
                             .as_array()
                             .and_then(|arr| arr.first())
-                            .and_then(|val| val.as_str())
-                            .and_then(|s| {
-                                validate_outbound_url(s.trim_end_matches('/'), false).ok()
-                            })
-                            .unwrap_or_else(|| pds_endpoint.clone())
-                    },
-                )
+                            .and_then(|val| val.as_str());
+                        if let Some(s) = candidate {
+                            validate_outbound_url_async(s.trim_end_matches('/'), false)
+                                .await
+                                .unwrap_or_else(|_| pds_endpoint.clone())
+                        } else {
+                            pds_endpoint.clone()
+                        }
+                    } else {
+                        pds_endpoint.clone()
+                    }
+                }
+                _ => pds_endpoint.clone(),
             }
-            _ => pds_endpoint.clone(),
-        }
-    } else {
-        pds_endpoint.clone()
-    };
+        } else {
+            pds_endpoint.clone()
+        };
 
     // Discover OAuth Authorization Server Metadata (RFC 8414)
     let auth_server_metadata_url = format!("{auth_server}/.well-known/oauth-authorization-server");
-    let (auth_endpoint, token_endpoint, par_endpoint, require_par) =
-        if let Ok(valid_meta_url) = validate_outbound_url(&auth_server_metadata_url, false) {
-            match client.get(&valid_meta_url).send().await {
-                Ok(res) if res.status().is_success() => {
-                    res.json::<serde_json::Value>().await.map_or_else(
-                        |_| {
-                            (
-                                format!("{auth_server}/oauth/authorize"),
-                                format!("{auth_server}/oauth/token"),
-                                None,
-                                false,
-                            )
-                        },
-                        |json| {
-                            let auth_ep = json["authorization_endpoint"]
-                                .as_str()
-                                .and_then(|s| validate_outbound_url(s, false).ok())
-                                .unwrap_or_else(|| format!("{auth_server}/oauth/authorize"));
-                            let token_ep = json["token_endpoint"]
-                                .as_str()
-                                .and_then(|s| validate_outbound_url(s, false).ok())
-                                .unwrap_or_else(|| format!("{auth_server}/oauth/token"));
-                            let par_ep = json["pushed_authorization_request_endpoint"]
-                                .as_str()
-                                .and_then(|s| validate_outbound_url(s, false).ok());
-                            let req_par = json["require_pushed_authorization_requests"]
-                                .as_bool()
-                                .unwrap_or(false);
-                            (auth_ep, token_ep, par_ep, req_par)
-                        },
-                    )
+    let default_endpoints = || {
+        (
+            format!("{auth_server}/oauth/authorize"),
+            format!("{auth_server}/oauth/token"),
+            None,
+            false,
+        )
+    };
+    let (auth_endpoint, token_endpoint, par_endpoint, require_par) = if let Ok(valid_meta_url) =
+        validate_outbound_url_async(&auth_server_metadata_url, false).await
+    {
+        match client.get(&valid_meta_url).send().await {
+            Ok(res) if res.status().is_success() => {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    let auth_ep = match json["authorization_endpoint"].as_str() {
+                        Some(s) => validate_outbound_url_async(s, false)
+                            .await
+                            .unwrap_or_else(|_| format!("{auth_server}/oauth/authorize")),
+                        None => format!("{auth_server}/oauth/authorize"),
+                    };
+                    let token_ep = match json["token_endpoint"].as_str() {
+                        Some(s) => validate_outbound_url_async(s, false)
+                            .await
+                            .unwrap_or_else(|_| format!("{auth_server}/oauth/token")),
+                        None => format!("{auth_server}/oauth/token"),
+                    };
+                    let par_ep = match json["pushed_authorization_request_endpoint"].as_str() {
+                        Some(s) => validate_outbound_url_async(s, false).await.ok(),
+                        None => None,
+                    };
+                    let req_par = json["require_pushed_authorization_requests"]
+                        .as_bool()
+                        .unwrap_or(false);
+                    (auth_ep, token_ep, par_ep, req_par)
+                } else {
+                    default_endpoints()
                 }
-                _ => (
-                    format!("{auth_server}/oauth/authorize"),
-                    format!("{auth_server}/oauth/token"),
-                    None,
-                    false,
-                ),
             }
-        } else {
-            (
-                format!("{auth_server}/oauth/authorize"),
-                format!("{auth_server}/oauth/token"),
-                None,
-                false,
-            )
-        };
+            _ => default_endpoints(),
+        }
+    } else {
+        default_endpoints()
+    };
 
     Ok(ResolvedPdsIdentity {
         did: did.into(),

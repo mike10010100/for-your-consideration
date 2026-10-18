@@ -788,6 +788,9 @@ async fn test_oauth_preview_empty_handle_returns_bad_request() {
         .unwrap();
     let bad_did_resp = app.clone().oneshot(bad_did_req).await.unwrap();
     assert_eq!(bad_did_resp.status(), StatusCode::BAD_REQUEST);
+    let bad_did_body = bad_did_resp.into_body().collect().await.unwrap().to_bytes();
+    let bad_did_error: serde_json::Value = serde_json::from_slice(&bad_did_body).unwrap();
+    assert_eq!(bad_did_error["error"], "IdentityResolutionFailed");
 
     // Unresolvable handle returns 400 Bad Request instead of fabricating a fake did:plc:
     let bad_handle_req = Request::builder()
@@ -796,6 +799,14 @@ async fn test_oauth_preview_empty_handle_returns_bad_request() {
         .unwrap();
     let bad_handle_resp = app.clone().oneshot(bad_handle_req).await.unwrap();
     assert_eq!(bad_handle_resp.status(), StatusCode::BAD_REQUEST);
+    let body = bad_handle_resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"], "IdentityResolutionFailed");
 
     // Bare handle "@alice" resolves to alice.bsky.social with assumed_bsky_social = true in debug fixture mode
     #[cfg(debug_assertions)]
