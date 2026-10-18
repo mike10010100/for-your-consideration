@@ -778,6 +778,38 @@ async fn test_oauth_preview_empty_handle_returns_bad_request() {
         .uri("/api/oauth/preview?handle=")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Invalid DID format returns 400 Bad Request instead of fabricating a fake DID
+    let bad_did_req = Request::builder()
+        .uri("/api/oauth/preview?handle=did:unknown:invalid")
+        .body(Body::empty())
+        .unwrap();
+    let bad_did_resp = app.clone().oneshot(bad_did_req).await.unwrap();
+    assert_eq!(bad_did_resp.status(), StatusCode::BAD_REQUEST);
+
+    // Unresolvable handle returns 400 Bad Request instead of fabricating a fake did:plc:
+    let bad_handle_req = Request::builder()
+        .uri("/api/oauth/preview?handle=nonexistent-domain-999999.invalid")
+        .body(Body::empty())
+        .unwrap();
+    let bad_handle_resp = app.clone().oneshot(bad_handle_req).await.unwrap();
+    assert_eq!(bad_handle_resp.status(), StatusCode::BAD_REQUEST);
+
+    // Bare handle "@alice" resolves to alice.bsky.social with assumed_bsky_social = true in debug fixture mode
+    #[cfg(debug_assertions)]
+    {
+        let ok_req = Request::builder()
+            .uri("/api/oauth/preview?handle=%40alice")
+            .body(Body::empty())
+            .unwrap();
+        let ok_resp = app.oneshot(ok_req).await.unwrap();
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+        let body = ok_resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: OAuthPreviewResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.handle.as_str(), "alice.bsky.social");
+        assert!(parsed.assumed_bsky_social);
+        assert_eq!(parsed.pds_host, "bsky.social");
+    }
 }

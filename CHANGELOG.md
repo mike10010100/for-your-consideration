@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-10-18
+
+### Fixed
+
+- **Strict Pre-Flight & OAuth Identity Resolution (`src/auth.rs`, `GET /api/oauth/preview`)**:
+  - Removed the synthetic `did:plc:<handle>` fallback in `resolve_identity_pds` when `com.atproto.identity.resolveHandle` fails over the network so mistyped or nonexistent handles return `400 Bad Request` (`IdentityResolutionFailed`) on `/api/oauth/preview` and `/api/oauth/login` instead of fabricating a synthetic DID.
+  - Enforced DID syntax and DID document resolution checks when a raw `did:` identifier is supplied to `resolve_identity_pds`.
+  - Switched handle resolution in `resolve_identity_pds` to `https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle`.
+
+---
+
 ## [0.6.4] - 2026-10-18
 
 ### Added

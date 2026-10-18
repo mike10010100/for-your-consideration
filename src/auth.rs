@@ -1087,7 +1087,7 @@ impl Default for OAuthUserSessionStore {
 }
 
 /// Default handle domain assumed when a user enters a bare single-label handle (e.g. `alice` -> `alice.bsky.social`).
-pub const DEFAULT_HANDLE_DOMAIN: &str = "bsky.social";
+pub const DEFAULT_HANDLE_DOMAIN: &str = skyauth::identity::DEFAULT_HANDLE_DOMAIN;
 
 /// Reserved single-label hostnames that must never be auto-completed to `.bsky.social`.
 const RESERVED_SINGLE_LABEL_HANDLES: &[&str] = &[
@@ -1281,32 +1281,43 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         });
     }
 
-    let client = build_secure_http_client();
+    if trimmed.starts_with("did:") && !is_valid_did(trimmed) {
+        return Err(FeedError::InvalidInput(format!(
+            "Invalid DID format: '{trimmed}'"
+        )));
+    }
 
-    let (did, mut handle) = if trimmed.starts_with("did:") {
+    let client = build_secure_http_client();
+    let input_was_did = trimmed.starts_with("did:");
+
+    let (did, mut handle) = if input_was_did {
         (trimmed.to_string(), trimmed.to_string())
     } else {
         // Resolve handle -> DID via com.atproto.identity.resolveHandle
-        let encoded_handle = percent_encode_query_param(trimmed);
-        let resolve_url = format!(
-            "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={encoded_handle}"
-        );
-        let resp = client.get(&resolve_url).send().await;
-        match resp {
-            Ok(res) if res.status().is_success() => {
-                let json: serde_json::Value = res.json().await.map_err(|e| {
-                    FeedError::Auth(format!("Failed to parse resolveHandle JSON: {e}"))
-                })?;
-                let resolved_did = json["did"].as_str().ok_or_else(|| {
-                    FeedError::Auth("Missing DID in resolveHandle response".to_string())
-                })?;
-                (resolved_did.to_string(), trimmed.to_string())
-            }
-            _ => (
-                format!("did:plc:{}", trimmed.replace('.', "_")),
-                trimmed.to_string(),
-            ),
+        let resp = client
+            .get("https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle")
+            .query(&[("handle", trimmed)])
+            .send()
+            .await
+            .map_err(|e| {
+                FeedError::Auth(format!(
+                    "Failed to query resolveHandle for '{trimmed}': {e}"
+                ))
+            })?;
+        if !resp.status().is_success() {
+            return Err(FeedError::Auth(format!(
+                "Could not resolve AT Protocol handle '{trimmed}' (HTTP {})",
+                resp.status()
+            )));
         }
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| FeedError::Auth(format!("Failed to parse resolveHandle JSON: {e}")))?;
+        let resolved_did = json["did"]
+            .as_str()
+            .ok_or_else(|| FeedError::Auth("Missing DID in resolveHandle response".to_string()))?;
+        (resolved_did.to_string(), trimmed.to_string())
     };
 
     // Resolve DID document -> PDS endpoint (and canonical handle from alsoKnownAs if input was a DID)
@@ -1316,55 +1327,61 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         let domain = did.strip_prefix("did:web:").unwrap_or("");
         format!("https://{domain}/.well-known/did.json")
     } else {
-        format!("https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={handle}")
+        return Err(FeedError::InvalidInput(format!(
+            "Unsupported DID method: '{did}'"
+        )));
     };
 
-    let pds_endpoint = if let Ok(valid_did_url) = validate_outbound_url(&did_doc_url, false) {
-        match client.get(&valid_did_url).send().await {
-            Ok(res) if res.status().is_success() => {
-                res.json::<serde_json::Value>().await.map_or_else(
-                    |_| "https://bsky.social".to_string(),
-                    |json| {
-                        if handle.starts_with("did:") {
-                            if let Some(aka_arr) = json["alsoKnownAs"].as_array() {
-                                for aka in aka_arr {
-                                    if let Some(h) =
-                                        aka.as_str().and_then(|s| s.strip_prefix("at://"))
-                                    {
-                                        let trimmed_h = h.trim();
-                                        if !trimmed_h.is_empty() {
-                                            handle = trimmed_h.to_ascii_lowercase();
-                                            break;
-                                        }
-                                    }
-                                }
+    let valid_did_url = validate_outbound_url(&did_doc_url, false)?;
+    let pds_endpoint = match client.get(&valid_did_url).send().await {
+        Ok(res) if res.status().is_success() => {
+            let json = res.json::<serde_json::Value>().await.map_err(|e| {
+                FeedError::Auth(format!("Failed to parse DID document for '{did}': {e}"))
+            })?;
+            if handle.starts_with("did:") {
+                if let Some(aka_arr) = json["alsoKnownAs"].as_array() {
+                    for aka in aka_arr {
+                        if let Some(h) = aka.as_str().and_then(|s| s.strip_prefix("at://")) {
+                            let trimmed_h = h.trim();
+                            if !trimmed_h.is_empty() {
+                                handle = trimmed_h.to_ascii_lowercase();
+                                break;
                             }
                         }
-                        let mut found_endpoint = None;
-                        if let Some(services) = json["service"].as_array() {
-                            for s in services {
-                                let s_type = s["type"].as_str().unwrap_or("");
-                                let s_id = s["id"].as_str().unwrap_or("");
-                                if s_type == "AtprotoPersonalDataServer" || s_id == "#atproto_pds" {
-                                    if let Some(ep) = s["serviceEndpoint"].as_str() {
-                                        if let Ok(valid_ep) =
-                                            validate_outbound_url(ep.trim_end_matches('/'), false)
-                                        {
-                                            found_endpoint = Some(valid_ep);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        found_endpoint.unwrap_or_else(|| "https://bsky.social".to_string())
-                    },
-                )
+                    }
+                }
             }
-            _ => "https://bsky.social".to_string(),
+            let mut found_endpoint = None;
+            if let Some(services) = json["service"].as_array() {
+                for s in services {
+                    let s_type = s["type"].as_str().unwrap_or("");
+                    let s_id = s["id"].as_str().unwrap_or("");
+                    if s_type == "AtprotoPersonalDataServer" || s_id == "#atproto_pds" {
+                        if let Some(ep) = s["serviceEndpoint"].as_str() {
+                            if let Ok(valid_ep) =
+                                validate_outbound_url(ep.trim_end_matches('/'), false)
+                            {
+                                found_endpoint = Some(valid_ep);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            found_endpoint.unwrap_or_else(|| "https://bsky.social".to_string())
         }
-    } else {
-        "https://bsky.social".to_string()
+        Ok(res) if input_was_did => {
+            return Err(FeedError::Auth(format!(
+                "Could not resolve DID document for '{did}' (HTTP {})",
+                res.status()
+            )));
+        }
+        Err(e) if input_was_did => {
+            return Err(FeedError::Auth(format!(
+                "Failed to fetch DID document for '{did}': {e}"
+            )));
+        }
+        _ => "https://bsky.social".to_string(),
     };
 
     // Discover OAuth Authorization Server from PDS metadata (RFC 9728)
