@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Syncs official AT Protocol Lexicon schema definitions from upstream repository.
-UPSTREAM_BASE="https://raw.githubusercontent.com/bluesky-social/atproto/main/lexicons"
+UPSTREAM_BASE="https://raw.githubusercontent.com/bluesky-social/atproto/main/packages/api/lexicons"
 LEXICON_DIR="lexicons/app/bsky/feed"
 
 mkdir -p "${LEXICON_DIR}"

@@ -1117,14 +1117,31 @@ pub async fn handle_get_oauth_typeahead(
     }
 
     let limit = query.limit.unwrap_or(6).clamp(1, 15);
-    let encoded_q = percent_encode_query_param(clean_q);
-    let url = format!(
-        "https://public.api.bsky.app/xrpc/app.bsky.actor.searchActorsTypeahead?q={encoded_q}&limit={limit}"
-    );
+    let sanitized_q: String = clean_q
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    if sanitized_q.len() < 2 {
+        return (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(OAuthTypeaheadResponse { actors: Vec::new() }),
+        )
+            .into_response();
+    }
+    let limit_str = limit.to_string();
     let client = build_secure_http_client();
 
     let mut actors = Vec::new();
-    if let Ok(resp) = client.get(&url).send().await {
+    if let Ok(resp) = client
+        .get("https://public.api.bsky.app/xrpc/app.bsky.actor.searchActorsTypeahead")
+        .query(&[("q", sanitized_q.as_str()), ("limit", limit_str.as_str())])
+        .send()
+        .await
+    {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(arr) = json["actors"].as_array() {
@@ -1255,11 +1272,12 @@ pub async fn handle_get_oauth_preview(Query(query): Query<OAuthPreviewQuery>) ->
 
     if !skip_remote_profile {
         let client = build_secure_http_client();
-        let encoded_actor = percent_encode_query_param(resolved.did.as_str());
-        let profile_url = format!(
-            "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={encoded_actor}"
-        );
-        if let Ok(resp) = client.get(&profile_url).send().await {
+        if let Ok(resp) = client
+            .get("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+            .query(&[("actor", resolved.did.as_str())])
+            .send()
+            .await
+        {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if let Some(dn) = json["displayName"]
