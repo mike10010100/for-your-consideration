@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-10-18
+
+### Added
+
+- **Enhanced AT Protocol (Atmosphere) OAuth Sign-In Experience**:
+  - **Bare Handle `.bsky.social` Completion (`src/auth.rs`)**: Added `normalize_user_handle` and `DEFAULT_HANDLE_DOMAIN` so single-label handles entered without a domain (e.g. `alice` or `@alice`) automatically resolve as `alice.bsky.social`, while preserving custom domains and DIDs.
+  - **Live Handle Typeahead (`GET /api/oauth/typeahead`)**: Added `handle_get_oauth_typeahead` proxying `app.bsky.actor.searchActorsTypeahead` to return matching actor profiles (`did`, `handle`, `display_name`, `avatar`) as the user types.
+  - **Pre-Flight Identity & Provider Confirmation (`GET /api/oauth/preview`)**: Added `handle_get_oauth_preview` and `ResolvedPdsIdentity::pds_host()` / `auth_server_host()` to resolve the user's DID, canonical handle, profile metadata, and PDS/Auth Server host before redirecting away from the app.
+  - **4-View Dashboard Sign-In Modal (`src/assets/dashboard.html`)**:
+    1. **Saved Accounts ("Welcome back")**: Remembers previously authenticated accounts in `localStorage` (`fyc_saved_accounts`) for 1-click sign-in, with an **Edit / `✕` ("Forget account on this device")** mode and **"+ Use another account"**.
+    2. **Handle Input + Typeahead**: Prompts for *"Bluesky or AT Protocol (Atmosphere) Handle"*, preserves password-manager autofill (`autocomplete="username"`), displays an inline `No domain included — .bsky.social is assumed` hint, and shows live typeahead suggestions.
+    3. **"Is this you?" Pre-Flight Confirmation Card**: Displays the resolved avatar, display name, `@handle`, DID, and **Account Provider (Host)** badge with a **`Continue to <provider-host> →`** CTA, *"Stepping out to `<provider-host>`…"* handoff message, **`Switch account`** button, and *"🔒 For Your Consideration never sees your password"* reassurance.
+    4. **"How signing in works" (`ⓘ` Explainer)**: Explains AT Protocol OAuth using the *"Sign in with Google"* analogy, a 3-step `You → Your Provider → FYC` visual flow, and a pre-login permissions summary (**"With your permission, FYC can"** vs. **"It can't"**).
+
+---
+
 ## [0.6.3] - 2026-10-14
 
 ### Changed

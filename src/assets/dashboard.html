@@ -472,40 +472,140 @@ Evaluating recommendation proof chain...
 </div>
 </div>
 </div>
-<!-- Passwordless OAuth Sign In with Bluesky Modal -->
+<!-- Passwordless OAuth Sign In with Bluesky / AT Protocol Modal -->
 <div id="login-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-login-title">
-<div class="modal-dialog" id="login-modal-content" style="max-width: 460px;">
-<div class="modal-header">
-<h3 id="modal-login-title" class="modal-title">
+<div class="modal-dialog" id="login-modal-content" style="max-width: 480px;">
+<div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
+<h3 id="modal-login-title" class="modal-title" style="display: flex; align-items: center; gap: 0.5rem;">
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-cyan);">
 <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
 </svg>
-Sign In with Bluesky
+<span id="modal-login-title-text">Sign in</span>
 </h3>
+<div style="display: flex; align-items: center; gap: 0.4rem;">
+<button type="button" id="login-info-toggle-btn" title="How signing in works" aria-label="How signing in works" style="background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25); color: var(--accent-cyan); width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 700; cursor: pointer;">&#9432;</button>
 <button id="login-modal-close" class="modal-close-btn" aria-label="Close modal">&times;</button>
 </div>
-<div class="modal-body">
-<!-- Zero-Password OAuth Notice -->
-<div class="proof-summary-banner" style="background: rgba(14, 165, 233, 0.08); border-color: rgba(56, 189, 248, 0.3); font-size: 0.8125rem;">
-<strong>Zero-Password Authentication:</strong> Enter your Bluesky handle or DID below to sign in securely via official ATProto OAuth. No App Passwords required.
 </div>
+<div class="modal-body" style="display: flex; flex-direction: column; gap: 0.875rem;">
 <!-- Error Feedback Alert -->
 <div id="login-error-alert" style="display: none; background: rgba(244, 63, 94, 0.12); border: 1px solid rgba(244, 63, 94, 0.35); color: var(--accent-rose); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.8125rem;"></div>
-<!-- Form -->
-<form id="login-form" onsubmit="event.preventDefault();" style="display: flex; flex-direction: column; gap: 0.875rem;">
-<div class="dial-control">
-<label for="input-handle" class="dial-label">Bluesky Handle or DID</label>
-<input type="text" id="input-handle" class="search-input" placeholder="e.g. alice.bsky.social" autocomplete="username" required>
+
+<!-- View 1: Saved Accounts ("Welcome back") -->
+<div id="login-view-saved" style="display: none; flex-direction: column; gap: 0.75rem;">
+<div style="display: flex; align-items: center; justify-content: space-between;">
+<span style="font-size: 0.78rem; color: var(--text-muted); font-weight: 600;">Choose an account to continue</span>
+<button type="button" id="login-saved-edit-btn" style="background: none; border: none; color: var(--accent-cyan); font-size: 0.78rem; font-weight: 600; cursor: pointer; padding: 0;">Edit</button>
 </div>
-<div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-<button type="submit" id="btn-submit-login" class="btn btn-primary" style="flex: 1;">
-Continue with Bluesky &rarr;
+<div id="login-saved-accounts-list" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+<button type="button" id="login-use-another-btn" class="btn" style="width: 100%; justify-content: center; margin-top: 0.25rem;">
++ Use another account
 </button>
-<button type="button" id="btn-cancel-login" class="btn" style="flex: 0.6;">
+</div>
+
+<!-- View 2: Handle Input + Live Typeahead -->
+<div id="login-view-input" style="display: flex; flex-direction: column; gap: 0.875rem;">
+<div class="proof-summary-banner" style="background: rgba(14, 165, 233, 0.08); border-color: rgba(56, 189, 248, 0.3); font-size: 0.8125rem; margin: 0;">
+<strong>Zero-Password Authentication:</strong> Enter your Bluesky or AT Protocol (Atmosphere) handle to sign in securely via your provider. No App Passwords required.
+</div>
+<form id="login-form" onsubmit="event.preventDefault();" style="display: flex; flex-direction: column; gap: 0.875rem;">
+<div class="dial-control" style="position: relative;">
+<label for="input-handle" class="dial-label">Bluesky or AT Protocol (Atmosphere) Handle</label>
+<div style="position: relative; display: flex; align-items: center;">
+<span style="position: absolute; left: 0.75rem; color: var(--text-muted); font-weight: 600; pointer-events: none;">@</span>
+<input type="text" id="input-handle" name="username" class="search-input" style="padding-left: 1.85rem; width: 100%;" placeholder="alice.bsky.social or yourdomain.com" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="email" required>
+</div>
+<div id="login-bare-handle-hint" style="display: none; margin-top: 0.35rem; font-size: 0.75rem; color: var(--accent-cyan);">
+No domain included &mdash; <code>.bsky.social</code> is assumed (<span id="login-bare-handle-preview" style="font-weight: 600;"></span>)
+</div>
+<div id="login-typeahead-list" role="listbox" aria-label="Matching AT Protocol accounts" style="display: none; position: absolute; top: 100%; left: 0; right: 0; margin-top: 0.3rem; background: var(--bg-panel, #0f172a); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 10px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55); z-index: 60; max-height: 230px; overflow-y: auto;"></div>
+</div>
+<div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+<button type="submit" id="btn-submit-login" class="btn btn-primary" style="flex: 1; justify-content: center;">
+Continue &rarr;
+</button>
+<button type="button" id="btn-cancel-login" class="btn" style="flex: 0.45; justify-content: center;">
 Cancel
 </button>
 </div>
+<button type="button" id="login-back-to-saved-btn" style="display: none; background: none; border: none; color: var(--accent-cyan); font-size: 0.78rem; font-weight: 600; cursor: pointer; text-align: center; padding: 0.25rem 0;">
+&larr; Back to saved accounts
+</button>
 </form>
+</div>
+
+<!-- View 3: Pre-Flight Identity & Provider Confirmation ("Is this you?") -->
+<div id="login-view-confirm" style="display: none; flex-direction: column; gap: 0.85rem;">
+<div style="background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px; padding: 0.9rem; display: flex; align-items: center; gap: 0.85rem;">
+<div id="login-confirm-avatar-wrap" style="width: 48px; height: 48px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.35); display: flex; align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; font-weight: 700; color: var(--accent-cyan); font-size: 1.1rem;">@</div>
+<div style="min-width: 0; flex: 1;">
+<div id="login-confirm-display-name" style="font-weight: 700; font-size: 0.95rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+<div id="login-confirm-handle" style="font-size: 0.82rem; color: var(--accent-cyan); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+<div id="login-confirm-did" style="font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 0.15rem;"></div>
+</div>
+</div>
+<div style="background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 10px; padding: 0.7rem 0.85rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; font-size: 0.78rem;">
+<span style="color: var(--text-muted);">Account Provider (Host)</span>
+<span id="login-confirm-provider-badge" style="font-family: var(--font-mono); font-weight: 600; color: var(--accent-cyan);">bsky.social</span>
+</div>
+<div id="login-stepping-out-box" style="display: none; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 10px; padding: 0.7rem 0.85rem; font-size: 0.78rem; color: var(--accent-emerald); text-align: center;">
+Stepping out to <strong id="login-stepping-out-host">bsky.social</strong>&hellip; You'll come right back after approving.
+</div>
+<button type="button" id="login-confirm-continue-btn" class="btn btn-primary" style="width: 100%; justify-content: center; padding: 0.7rem 1rem; font-weight: 700;">
+Continue to <span id="login-confirm-provider-btn-host">bsky.social</span> &rarr;
+</button>
+<button type="button" id="login-confirm-switch-btn" class="btn" style="width: 100%; justify-content: center;">
+Switch account
+</button>
+<div style="text-align: center; font-size: 0.74rem; color: var(--text-muted);">
+&#128274; For Your Consideration never sees your password.
+</div>
+</div>
+
+<!-- View 4: "How signing in works" Explainer -->
+<div id="login-view-explainer" style="display: none; flex-direction: column; gap: 0.85rem; font-size: 0.8rem; color: var(--text-secondary);">
+<div style="background: rgba(56, 189, 248, 0.07); border: 1px solid rgba(56, 189, 248, 0.22); border-radius: 10px; padding: 0.75rem 0.9rem; line-height: 1.45;">
+Signing in with your <strong>Bluesky or AT Protocol (Atmosphere)</strong> account works just like <em>"Sign in with Google"</em> &mdash; you approve access on your own provider, and your password never touches this app.
+</div>
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.45rem; text-align: center; background: rgba(15, 23, 42, 0.65); border: 1px solid var(--border-subtle, rgba(148,163,184,0.18)); border-radius: 10px; padding: 0.65rem 0.4rem; font-size: 0.73rem;">
+<div>
+<div style="font-size: 1.1rem; margin-bottom: 0.2rem;">&#128100; &rarr; &#128273;</div>
+<div style="font-weight: 700; color: var(--text-primary);">1. You</div>
+<div style="color: var(--text-muted);">Enter your @handle</div>
+</div>
+<div>
+<div style="font-size: 1.1rem; margin-bottom: 0.2rem;">&#127968; &rarr; &#127903;&#65039;</div>
+<div style="font-weight: 700; color: var(--accent-cyan);">2. Your Provider</div>
+<div style="color: var(--text-muted);">Verifies you directly</div>
+</div>
+<div>
+<div style="font-size: 1.1rem; margin-bottom: 0.2rem;">&#9989;</div>
+<div style="font-weight: 700; color: var(--accent-emerald);">3. FYC</div>
+<div style="color: var(--text-muted);">Gets a scoped token</div>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem;">
+<div style="background: rgba(16, 185, 129, 0.07); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 10px; padding: 0.65rem 0.75rem;">
+<div style="font-weight: 700; color: var(--accent-emerald); margin-bottom: 0.35rem; font-size: 0.76rem;">&#10003; With your permission, FYC can:</div>
+<ul style="margin: 0; padding-left: 1rem; font-size: 0.73rem; line-height: 1.45; color: var(--text-secondary);">
+<li>Verify your @handle &amp; DID</li>
+<li>Save your custom feed dials</li>
+<li>Publish a feed generator record when you ask</li>
+</ul>
+</div>
+<div style="background: rgba(244, 63, 94, 0.07); border: 1px solid rgba(244, 63, 94, 0.25); border-radius: 10px; padding: 0.65rem 0.75rem;">
+<div style="font-weight: 700; color: var(--accent-rose); margin-bottom: 0.35rem; font-size: 0.76rem;">&#10005; It can't:</div>
+<ul style="margin: 0; padding-left: 1rem; font-size: 0.73rem; line-height: 1.45; color: var(--text-secondary);">
+<li>See your password</li>
+<li>Read your private DMs</li>
+<li>Post or follow without your action</li>
+</ul>
+</div>
+</div>
+<button type="button" id="login-explainer-back-btn" class="btn btn-primary" style="width: 100%; justify-content: center;">
+Got it, back to sign in
+</button>
+</div>
 </div>
 </div>
 </div>
@@ -1558,6 +1658,13 @@ svg.innerHTML = svgContent;
 const AUTH_TOKEN_KEY = 'fyc_auth_token';
 const USER_DID_KEY = 'fyc_user_did';
 const USER_HANDLE_KEY = 'fyc_user_handle';
+const SAVED_ACCOUNTS_KEY = 'fyc_saved_accounts';
+let loginCurrentView = 'input';
+let loginPreviousView = 'input';
+let loginSavedEditMode = false;
+let loginPendingIdentity = null;
+let loginTypeaheadTimer = null;
+
 function getAuthSession() {
 const token = localStorage.getItem(AUTH_TOKEN_KEY);
 const did = localStorage.getItem(USER_DID_KEY);
@@ -1571,11 +1678,78 @@ function setAuthSession(token, did, handle) {
 localStorage.setItem(AUTH_TOKEN_KEY, token);
 localStorage.setItem(USER_DID_KEY, did);
 localStorage.setItem(USER_HANDLE_KEY, handle || did);
+upsertSavedAccount({ did, handle: handle || did });
 }
 function clearAuthSession() {
 localStorage.removeItem(AUTH_TOKEN_KEY);
 localStorage.removeItem(USER_DID_KEY);
 localStorage.removeItem(USER_HANDLE_KEY);
+}
+function getSavedAccounts() {
+try {
+const raw = localStorage.getItem(SAVED_ACCOUNTS_KEY);
+if (!raw) return [];
+const parsed = JSON.parse(raw);
+return Array.isArray(parsed) ? parsed.filter(a => a && (a.did || a.handle)) : [];
+} catch (_) {
+return [];
+}
+}
+function saveAccountsList(list) {
+try {
+localStorage.setItem(SAVED_ACCOUNTS_KEY, JSON.stringify(list.slice(0, 8)));
+} catch (_) {}
+}
+function upsertSavedAccount(account) {
+if (!account || (!account.did && !account.handle)) return;
+const list = getSavedAccounts();
+const normHandle = (account.handle || '').replace(/^@/, '').toLowerCase();
+const existingIdx = list.findIndex(a =>
+(account.did && a.did === account.did) ||
+(normHandle && (a.handle || '').replace(/^@/, '').toLowerCase() === normHandle)
+);
+const merged = {
+did: account.did || (existingIdx >= 0 ? list[existingIdx].did : ''),
+handle: (account.handle || (existingIdx >= 0 ? list[existingIdx].handle : '')).replace(/^@/, ''),
+display_name: account.display_name || (existingIdx >= 0 ? list[existingIdx].display_name : null) || null,
+avatar: account.avatar || (existingIdx >= 0 ? list[existingIdx].avatar : null) || null,
+pds_host: account.pds_host || (existingIdx >= 0 ? list[existingIdx].pds_host : null) || null,
+last_used: Date.now()
+};
+if (existingIdx >= 0) {
+list.splice(existingIdx, 1);
+}
+list.unshift(merged);
+saveAccountsList(list);
+}
+function forgetSavedAccount(didOrHandle) {
+const list = getSavedAccounts().filter(a => a.did !== didOrHandle && a.handle !== didOrHandle);
+saveAccountsList(list);
+renderSavedAccountsList();
+if (list.length === 0) {
+loginSavedEditMode = false;
+showLoginView('input');
+}
+}
+function normalizeBareHandle(raw) {
+const trimmed = (raw || '').trim().replace(/^@+/, '');
+if (!trimmed) return { normalized: '', isBare: false };
+if (trimmed.startsWith('did:') || trimmed.includes('.') || trimmed.includes(':')) {
+return { normalized: trimmed, isBare: false };
+}
+return { normalized: `${trimmed}.bsky.social`, isBare: true };
+}
+function updateBareHandleHint() {
+const hintEl = $('login-bare-handle-hint');
+const previewEl = $('login-bare-handle-preview');
+if (!hintEl || !elements.inputHandle) return;
+const { normalized, isBare } = normalizeBareHandle(elements.inputHandle.value);
+if (isBare && normalized) {
+if (previewEl) previewEl.textContent = `@${normalized}`;
+hintEl.style.display = 'block';
+} else {
+hintEl.style.display = 'none';
+}
 }
 function showPreferencesToast(message, isError = false) {
 if (!elements.preferencesToast || !elements.preferencesToastMessage) return;
@@ -1599,7 +1773,222 @@ elements.preferencesToast.style.display = 'none';
 function hidePreferencesToast() {
 if (elements.preferencesToast) elements.preferencesToast.style.display = 'none';
 }
+function showLoginView(view) {
+if (view !== 'explainer') {
+loginPreviousView = view;
+}
+loginCurrentView = view;
+const views = {
+saved: $('login-view-saved'),
+input: $('login-view-input'),
+confirm: $('login-view-confirm'),
+explainer: $('login-view-explainer')
+};
+Object.keys(views).forEach(k => {
+if (views[k]) {
+views[k].style.display = k === view ? 'flex' : 'none';
+}
+});
+const titleText = $('modal-login-title-text');
+if (titleText) {
+if (view === 'saved') titleText.textContent = 'Welcome back';
+else if (view === 'confirm') titleText.textContent = 'Is this you?';
+else if (view === 'explainer') titleText.textContent = 'How signing in works';
+else titleText.textContent = 'Sign in';
+}
+const backBtn = $('login-back-to-saved-btn');
+if (backBtn) {
+backBtn.style.display = (view === 'input' && getSavedAccounts().length > 0) ? 'block' : 'none';
+}
+hideTypeaheadDropdown();
+}
+function renderSavedAccountsList() {
+const container = $('login-saved-accounts-list');
+const editBtn = $('login-saved-edit-btn');
+if (!container) return;
+const accounts = getSavedAccounts();
+if (editBtn) {
+editBtn.textContent = loginSavedEditMode ? 'Done' : 'Edit';
+editBtn.style.display = accounts.length > 0 ? 'inline-block' : 'none';
+}
+container.innerHTML = '';
+accounts.forEach(acct => {
+const row = document.createElement('div');
+row.style.cssText = 'display: flex; align-items: center; gap: 0.65rem; background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 10px; padding: 0.6rem 0.75rem;';
+const initial = ((acct.display_name || acct.handle || 'U').replace(/^@/, '').charAt(0) || 'U').toUpperCase();
+const avatarHtml = acct.avatar
+? `<img src="${escapeHtml(acct.avatar)}" alt="" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0;">`
+: `<div style="width: 36px; height: 36px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.35); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--accent-cyan); font-size: 0.9rem; flex-shrink: 0;">${escapeHtml(initial)}</div>`;
+const mainBtn = document.createElement('button');
+mainBtn.type = 'button';
+mainBtn.style.cssText = 'display: flex; align-items: center; gap: 0.65rem; flex: 1; min-width: 0; background: none; border: none; color: inherit; text-align: left; cursor: pointer; padding: 0;';
+mainBtn.innerHTML = `
+${avatarHtml}
+<div style="min-width: 0; flex: 1;">
+<div style="font-weight: 700; font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(acct.display_name || `@${acct.handle}`)}</div>
+<div style="font-size: 0.75rem; color: var(--accent-cyan); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">@${escapeHtml((acct.handle || '').replace(/^@/, ''))}${acct.pds_host ? ` &middot; <span style="color: var(--text-muted);">${escapeHtml(acct.pds_host)}</span>` : ''}</div>
+</div>
+<span style="color: var(--accent-cyan); font-weight: 700;">&rarr;</span>
+`;
+mainBtn.addEventListener('click', () => {
+const target = acct.handle || acct.did;
+if (elements.inputHandle) elements.inputHandle.value = target;
+executeFinalOAuthRedirect(target);
+});
+row.appendChild(mainBtn);
+if (loginSavedEditMode) {
+const delBtn = document.createElement('button');
+delBtn.type = 'button';
+delBtn.title = 'Forget account on this device';
+delBtn.setAttribute('aria-label', 'Forget account on this device');
+delBtn.style.cssText = 'background: rgba(244, 63, 94, 0.15); border: 1px solid rgba(244, 63, 94, 0.35); color: var(--accent-rose); width: 26px; height: 26px; border-radius: 50%; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; font-size: 0.78rem; flex-shrink: 0;';
+delBtn.innerHTML = '&#10005;';
+delBtn.addEventListener('click', (ev) => {
+ev.stopPropagation();
+forgetSavedAccount(acct.did || acct.handle);
+});
+row.appendChild(delBtn);
+}
+container.appendChild(row);
+});
+}
+function hideTypeaheadDropdown() {
+const listEl = $('login-typeahead-list');
+if (listEl) {
+listEl.style.display = 'none';
+listEl.innerHTML = '';
+}
+}
+function renderTypeaheadDropdown(actors) {
+const listEl = $('login-typeahead-list');
+if (!listEl) return;
+if (!Array.isArray(actors) || actors.length === 0) {
+hideTypeaheadDropdown();
+return;
+}
+listEl.innerHTML = '';
+actors.forEach(actor => {
+const item = document.createElement('button');
+item.type = 'button';
+item.setAttribute('role', 'option');
+item.style.cssText = 'width: 100%; display: flex; align-items: center; gap: 0.65rem; padding: 0.55rem 0.75rem; background: transparent; border: none; border-bottom: 1px solid rgba(148, 163, 184, 0.1); color: inherit; text-align: left; cursor: pointer;';
+const initial = ((actor.display_name || actor.handle || 'U').charAt(0) || 'U').toUpperCase();
+const avatarHtml = actor.avatar
+? `<img src="${escapeHtml(actor.avatar)}" alt="" style="width: 30px; height: 30px; border-radius: 50%; object-fit: cover; flex-shrink: 0;">`
+: `<div style="width: 30px; height: 30px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--accent-cyan); font-size: 0.78rem; flex-shrink: 0;">${escapeHtml(initial)}</div>`;
+item.innerHTML = `
+${avatarHtml}
+<div style="min-width: 0; flex: 1;">
+<div style="font-weight: 600; font-size: 0.82rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(actor.display_name || `@${actor.handle}`)}</div>
+<div style="font-size: 0.73rem; color: var(--accent-cyan); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">@${escapeHtml(actor.handle)}</div>
+</div>
+`;
+item.addEventListener('click', () => {
+if (elements.inputHandle) {
+elements.inputHandle.value = actor.handle;
+}
+updateBareHandleHint();
+hideTypeaheadDropdown();
+handleOAuthLoginSubmit(null, actor);
+});
+listEl.appendChild(item);
+});
+listEl.style.display = 'block';
+}
+function onHandleInputTypeahead() {
+updateBareHandleHint();
+if (loginTypeaheadTimer) clearTimeout(loginTypeaheadTimer);
+const raw = elements.inputHandle ? elements.inputHandle.value.trim().replace(/^@+/, '') : '';
+if (raw.length < 2 || raw.startsWith('did:')) {
+hideTypeaheadDropdown();
+return;
+}
+loginTypeaheadTimer = setTimeout(async () => {
+try {
+const res = await fetch(`/api/oauth/typeahead?q=${encodeURIComponent(raw)}&limit=6`);
+if (!res.ok) return;
+const data = await res.json();
+if (data && Array.isArray(data.actors)) {
+renderTypeaheadDropdown(data.actors);
+}
+} catch (_) {}
+}, 180);
+}
+function openConfirmIdentityView(preview) {
+loginPendingIdentity = preview;
+const avatarWrap = $('login-confirm-avatar-wrap');
+const dispEl = $('login-confirm-display-name');
+const handleEl = $('login-confirm-handle');
+const didEl = $('login-confirm-did');
+const providerBadge = $('login-confirm-provider-badge');
+const providerBtnHost = $('login-confirm-provider-btn-host');
+const steppingOutBox = $('login-stepping-out-box');
+const continueBtn = $('login-confirm-continue-btn');
+const cleanHandle = (preview.handle || '').replace(/^@/, '');
+const providerHost = preview.pds_host || preview.auth_server_host || 'bsky.social';
+if (avatarWrap) {
+if (preview.avatar) {
+avatarWrap.innerHTML = `<img src="${escapeHtml(preview.avatar)}" alt="" style="width: 100%; height: 100%; object-fit: cover;">`;
+} else {
+const initial = ((preview.display_name || cleanHandle || 'U').charAt(0) || 'U').toUpperCase();
+avatarWrap.textContent = initial;
+}
+}
+if (dispEl) dispEl.textContent = preview.display_name || `@${cleanHandle}`;
+if (handleEl) handleEl.textContent = `@${cleanHandle}`;
+if (didEl) didEl.textContent = preview.did || '';
+if (providerBadge) providerBadge.textContent = providerHost;
+if (providerBtnHost) providerBtnHost.textContent = providerHost;
+if (steppingOutBox) steppingOutBox.style.display = 'none';
+if (continueBtn) continueBtn.disabled = false;
+showLoginView('confirm');
+}
+async function executeFinalOAuthRedirect(rawHandleOrDid, identityMeta) {
+const { normalized } = normalizeBareHandle(rawHandleOrDid);
+const target = normalized || (rawHandleOrDid || '').trim();
+if (!target) return;
+const continueBtn = $('login-confirm-continue-btn');
+const steppingOutBox = $('login-stepping-out-box');
+const steppingOutHost = $('login-stepping-out-host');
+const hostLabel = (identityMeta && (identityMeta.pds_host || identityMeta.auth_server_host)) || 'your provider';
+if (continueBtn) continueBtn.disabled = true;
+if (steppingOutHost) steppingOutHost.textContent = hostLabel;
+if (steppingOutBox) steppingOutBox.style.display = 'block';
+if (elements.btnSubmitLogin) {
+elements.btnSubmitLogin.disabled = true;
+elements.btnSubmitLogin.textContent = 'Connecting to Provider...';
+}
+if (elements.loginErrorAlert) elements.loginErrorAlert.style.display = 'none';
+try {
+const res = await fetch(`/api/oauth/login?handle=${encodeURIComponent(target)}`);
+const data = await res.json().catch(() => ({}));
+if (!res.ok) {
+throw new Error(data.message || `OAuth initiation failed (HTTP ${res.status})`);
+}
+if (identityMeta && (identityMeta.did || identityMeta.handle)) {
+upsertSavedAccount(identityMeta);
+}
+if (data.authorization_url) {
+window.location.href = data.authorization_url;
+} else {
+throw new Error('No authorization URL returned from server');
+}
+} catch (err) {
+if (steppingOutBox) steppingOutBox.style.display = 'none';
+if (continueBtn) continueBtn.disabled = false;
+if (elements.loginErrorAlert) {
+elements.loginErrorAlert.textContent = err.message || 'Failed to initiate OAuth login.';
+elements.loginErrorAlert.style.display = 'block';
+}
+if (elements.btnSubmitLogin) {
+elements.btnSubmitLogin.disabled = false;
+elements.btnSubmitLogin.textContent = 'Continue →';
+}
+}
+}
 function openLoginModal(notice) {
+hideTypeaheadDropdown();
+loginSavedEditMode = false;
 if (elements.loginErrorAlert) {
 if (notice) {
 elements.loginErrorAlert.textContent = notice;
@@ -1610,48 +1999,69 @@ elements.loginErrorAlert.style.display = 'none';
 }
 if (elements.btnSubmitLogin) {
 elements.btnSubmitLogin.disabled = false;
-elements.btnSubmitLogin.textContent = 'Continue with Bluesky →';
+elements.btnSubmitLogin.textContent = 'Continue →';
+}
+const saved = getSavedAccounts();
+if (saved.length > 0 && !notice) {
+renderSavedAccountsList();
+showLoginView('saved');
+} else {
+showLoginView('input');
+updateBareHandleHint();
 }
 if (elements.loginModal) elements.loginModal.classList.add('active');
-if (elements.inputHandle) elements.inputHandle.focus();
+if (loginCurrentView === 'input' && elements.inputHandle) {
+elements.inputHandle.focus();
+}
 }
 function closeLoginModal() {
+hideTypeaheadDropdown();
 if (elements.loginModal) elements.loginModal.classList.remove('active');
 }
-async function handleOAuthLoginSubmit(e) {
+async function handleOAuthLoginSubmit(e, preselectedActor) {
 if (e) e.preventDefault();
-const handle = elements.inputHandle ? elements.inputHandle.value.trim() : '';
-if (!handle) {
+hideTypeaheadDropdown();
+const rawInput = preselectedActor && preselectedActor.handle
+? preselectedActor.handle
+: (elements.inputHandle ? elements.inputHandle.value.trim() : '');
+const { normalized } = normalizeBareHandle(rawInput);
+if (!normalized) {
 if (elements.loginErrorAlert) {
-elements.loginErrorAlert.textContent = 'Please enter your Bluesky handle or DID (e.g. alice.bsky.social).';
+elements.loginErrorAlert.textContent = 'Please enter your Bluesky or AT Protocol handle (e.g. alice.bsky.social).';
 elements.loginErrorAlert.style.display = 'block';
 }
 return;
 }
 if (elements.btnSubmitLogin) {
 elements.btnSubmitLogin.disabled = true;
-elements.btnSubmitLogin.textContent = 'Connecting to Bluesky OAuth...';
+elements.btnSubmitLogin.textContent = 'Resolving identity...';
 }
 if (elements.loginErrorAlert) elements.loginErrorAlert.style.display = 'none';
 try {
-const res = await fetch(`/api/oauth/login?handle=${encodeURIComponent(handle)}`);
-const data = await res.json().catch(() => ({}));
-if (!res.ok) {
-throw new Error(data.message || `OAuth initiation failed (HTTP ${res.status})`);
+const previewRes = await fetch(`/api/oauth/preview?handle=${encodeURIComponent(normalized)}`);
+if (previewRes.ok) {
+const preview = await previewRes.json();
+if (preselectedActor) {
+if (!preview.display_name && preselectedActor.display_name) preview.display_name = preselectedActor.display_name;
+if (!preview.avatar && preselectedActor.avatar) preview.avatar = preselectedActor.avatar;
 }
-if (data.authorization_url) {
-window.location.href = data.authorization_url;
-} else {
-throw new Error('No authorization URL returned from server');
+if (elements.btnSubmitLogin) {
+elements.btnSubmitLogin.disabled = false;
+elements.btnSubmitLogin.textContent = 'Continue →';
 }
+openConfirmIdentityView(preview);
+return;
+}
+const errData = await previewRes.json().catch(() => ({}));
+throw new Error(errData.message || `Could not resolve handle "${normalized}" (HTTP ${previewRes.status})`);
 } catch (err) {
 if (elements.loginErrorAlert) {
-elements.loginErrorAlert.textContent = err.message || 'Failed to initiate OAuth login.';
+elements.loginErrorAlert.textContent = err.message || 'Failed to resolve AT Protocol handle.';
 elements.loginErrorAlert.style.display = 'block';
 }
 if (elements.btnSubmitLogin) {
 elements.btnSubmitLogin.disabled = false;
-elements.btnSubmitLogin.textContent = 'Continue with Bluesky →';
+elements.btnSubmitLogin.textContent = 'Continue →';
 }
 }
 }
@@ -1681,6 +2091,10 @@ if (!res.ok) {
 throw new Error(data.message || `OAuth exchange failed (HTTP ${res.status})`);
 }
 setAuthSession(data.token, data.did, data.handle);
+fetch(`/api/oauth/preview?handle=${encodeURIComponent(data.handle || data.did)}`)
+.then(r => r.ok ? r.json() : null)
+.then(preview => { if (preview) upsertSavedAccount(preview); })
+.catch(() => {});
 window.history.replaceState({}, document.title, window.location.pathname || '/dashboard');
 await syncAuthState();
 showPreferencesToast(`🎉 Signed in as @${data.handle || data.did}!`);
@@ -2120,6 +2534,64 @@ elements.loginForm.addEventListener('submit', handleOAuthLoginSubmit);
 }
 if (elements.btnSubmitLogin) {
 elements.btnSubmitLogin.addEventListener('click', handleOAuthLoginSubmit);
+}
+if (elements.inputHandle) {
+elements.inputHandle.addEventListener('input', onHandleInputTypeahead);
+elements.inputHandle.addEventListener('keydown', (e) => {
+if (e.key === 'Escape') hideTypeaheadDropdown();
+});
+}
+const infoToggleBtn = $('login-info-toggle-btn');
+if (infoToggleBtn) {
+infoToggleBtn.addEventListener('click', () => {
+if (loginCurrentView === 'explainer') {
+showLoginView(loginPreviousView || 'input');
+} else {
+showLoginView('explainer');
+}
+});
+}
+const explainerBackBtn = $('login-explainer-back-btn');
+if (explainerBackBtn) {
+explainerBackBtn.addEventListener('click', () => {
+showLoginView(loginPreviousView || 'input');
+});
+}
+const savedEditBtn = $('login-saved-edit-btn');
+if (savedEditBtn) {
+savedEditBtn.addEventListener('click', () => {
+loginSavedEditMode = !loginSavedEditMode;
+renderSavedAccountsList();
+});
+}
+const useAnotherBtn = $('login-use-another-btn');
+if (useAnotherBtn) {
+useAnotherBtn.addEventListener('click', () => {
+showLoginView('input');
+if (elements.inputHandle) elements.inputHandle.focus();
+});
+}
+const backToSavedBtn = $('login-back-to-saved-btn');
+if (backToSavedBtn) {
+backToSavedBtn.addEventListener('click', () => {
+renderSavedAccountsList();
+showLoginView('saved');
+});
+}
+const confirmContinueBtn = $('login-confirm-continue-btn');
+if (confirmContinueBtn) {
+confirmContinueBtn.addEventListener('click', () => {
+const target = (loginPendingIdentity && (loginPendingIdentity.handle || loginPendingIdentity.did))
+|| (elements.inputHandle ? elements.inputHandle.value : '');
+executeFinalOAuthRedirect(target, loginPendingIdentity);
+});
+}
+const confirmSwitchBtn = $('login-confirm-switch-btn');
+if (confirmSwitchBtn) {
+confirmSwitchBtn.addEventListener('click', () => {
+showLoginView('input');
+if (elements.inputHandle) elements.inputHandle.focus();
+});
 }
 if (elements.btnLogout) {
 elements.btnLogout.addEventListener('click', handleSignOut);

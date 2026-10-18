@@ -44,9 +44,10 @@ use tracing::{error, info};
 use crate::auth::{
     authenticate_pds_session_with_secret, build_secure_http_client,
     exchange_oauth_code_with_secret, extract_session_did_from_headers_with_secret,
-    generate_pkce_pair, percent_encode_query_param, publish_feed_generator_record,
-    resolve_identity_pds, validate_service_jwt, DPoPKey, OAuthSessionState, OAuthStateStore,
-    OAuthUserSessionStore, DEFAULT_OAUTH_STATE_TTL_SECS, DEFAULT_SESSION_SECRET,
+    generate_pkce_pair, normalize_user_handle, percent_encode_query_param,
+    publish_feed_generator_record, resolve_identity_pds, validate_service_jwt, DPoPKey,
+    OAuthSessionState, OAuthStateStore, OAuthUserSessionStore, DEFAULT_OAUTH_STATE_TTL_SECS,
+    DEFAULT_SESSION_SECRET,
 };
 use crate::error::{FeedError, Result};
 use crate::ingest::IngestionTracker;
@@ -56,11 +57,12 @@ use crate::snapshot::SnapshotStatusTracker;
 use crate::types::{
     ActiveUsersTelemetryInfo, ApiErrorResponse, ExplainQuery, FeedPreviewQuery, FeedPublishRequest,
     FeedSkeletonResponse, GenericStatusResponse, GraphTelemetryInfo, ImpressionTelemetryInfo,
-    InternerTelemetryInfo, LoginRequestBody, MemoryTelemetryInfo, OAuthCallbackRequest,
-    OAuthClientMetadata, OAuthLoginQuery, OAuthLoginResponse, PreferencesPayloadDto,
-    PreferencesResponseDto, RecommendationDials, SavePreferencesRequestBody, SkeletonFeedPost,
-    TasteTwinsQuery, TelemetryResponse, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
-    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, MAX_TOPIC_MULTIPLIER, TOPIC_MIN,
+    InternerTelemetryInfo, LoginRequestBody, MemoryTelemetryInfo, OAuthActorSuggestion,
+    OAuthCallbackRequest, OAuthClientMetadata, OAuthLoginQuery, OAuthLoginResponse,
+    OAuthPreviewQuery, OAuthPreviewResponse, OAuthTypeaheadQuery, OAuthTypeaheadResponse,
+    PreferencesPayloadDto, PreferencesResponseDto, RecommendationDials, SavePreferencesRequestBody,
+    SkeletonFeedPost, TasteTwinsQuery, TelemetryResponse, TopicWeights, UserDials,
+    DEFAULT_MIN_LIKES, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, MAX_TOPIC_MULTIPLIER, TOPIC_MIN,
 };
 
 /// Embedded HTML content for the interactive web dashboard single-page application.
@@ -488,6 +490,8 @@ pub fn create_xrpc_router(state: AppState) -> Router {
         .route("/api/explain", get(handle_get_explain))
         .route("/api/auth/login", post(handle_post_auth_login))
         .route("/api/oauth/login", get(handle_get_oauth_login))
+        .route("/api/oauth/typeahead", get(handle_get_oauth_typeahead))
+        .route("/api/oauth/preview", get(handle_get_oauth_preview))
         .route("/api/oauth/callback", post(handle_post_oauth_callback))
         .route("/api/feed/publish", post(handle_post_feed_publish))
         .route(
@@ -1057,6 +1061,269 @@ pub async fn handle_get_oauth_login(
             status: CompactString::new("ok"),
             authorization_url: auth_url,
             state: state_nonce,
+        }),
+    )
+        .into_response()
+}
+
+/// Handler for `GET /api/oauth/typeahead`: returns live actor suggestions for the Sign-In modal.
+pub async fn handle_get_oauth_typeahead(
+    Query(query): Query<OAuthTypeaheadQuery>,
+) -> impl IntoResponse {
+    let raw_q = query.q.as_deref().unwrap_or("").trim();
+    let clean_q = raw_q
+        .strip_prefix("at://")
+        .unwrap_or(raw_q)
+        .trim_start_matches('@')
+        .trim();
+
+    if clean_q.len() < 2 || clean_q.len() > 128 {
+        return (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(OAuthTypeaheadResponse { actors: Vec::new() }),
+        )
+            .into_response();
+    }
+
+    #[cfg(debug_assertions)]
+    if clean_q.starts_with("mock_") || clean_q.starts_with("test_") {
+        let lower = clean_q.to_ascii_lowercase();
+        let handle = if lower.contains('.') {
+            lower
+        } else {
+            format!("{lower}.bsky.social")
+        };
+        let did = format!("did:plc:{}", handle.replace('.', "_"));
+        return (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(OAuthTypeaheadResponse {
+                actors: vec![OAuthActorSuggestion {
+                    did: did.into(),
+                    handle: handle.into(),
+                    display_name: Some("Test Actor".to_string()),
+                    avatar: None,
+                }],
+            }),
+        )
+            .into_response();
+    }
+
+    let limit = query.limit.unwrap_or(6).clamp(1, 15);
+    let sanitized_q: String = clean_q
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    if sanitized_q.len() < 2 {
+        return (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(OAuthTypeaheadResponse { actors: Vec::new() }),
+        )
+            .into_response();
+    }
+    let limit_str = limit.to_string();
+    let client = build_secure_http_client();
+
+    let mut actors = Vec::new();
+    if let Ok(resp) = client
+        .get("https://public.api.bsky.app/xrpc/app.bsky.actor.searchActorsTypeahead")
+        .query(&[("q", sanitized_q.as_str()), ("limit", limit_str.as_str())])
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = json["actors"].as_array() {
+                    for item in arr {
+                        let Some(did) = item["did"].as_str() else {
+                            continue;
+                        };
+                        let Some(handle) = item["handle"].as_str() else {
+                            continue;
+                        };
+                        let display_name = item["displayName"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from);
+                        let avatar = item["avatar"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from);
+                        actors.push(OAuthActorSuggestion {
+                            did: CompactString::new(did),
+                            handle: CompactString::new(handle),
+                            display_name,
+                            avatar,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        Json(OAuthTypeaheadResponse { actors }),
+    )
+        .into_response()
+}
+
+/// Handler for `GET /api/oauth/preview`: resolves a handle or DID prior to OAuth redirect
+/// so the user can confirm their identity and hosting provider ("Is this you? Continue to `<pds_host>`").
+pub async fn handle_get_oauth_preview(Query(query): Query<OAuthPreviewQuery>) -> impl IntoResponse {
+    let Some(raw) = query
+        .handle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "InvalidRequest",
+                "Missing required 'handle' parameter",
+            )),
+        )
+            .into_response();
+    };
+
+    let stripped = raw
+        .strip_prefix("at://")
+        .unwrap_or(raw)
+        .trim_start_matches('@')
+        .trim_end_matches('/')
+        .trim();
+    if stripped.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            Json(ApiErrorResponse::new(
+                "InvalidRequest",
+                "Handle cannot be empty",
+            )),
+        )
+            .into_response();
+    }
+
+    let normalized = normalize_user_handle(raw);
+    let assumed_bsky_social = !stripped.starts_with("did:")
+        && !stripped.contains('.')
+        && normalized != stripped.to_ascii_lowercase();
+
+    let resolved = match resolve_identity_pds(&normalized).await {
+        Ok(res) => res,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(ApiErrorResponse::new(
+                    "IdentityResolutionFailed",
+                    err.to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let pds_host = resolved.pds_host();
+    let auth_server_host = resolved.auth_server_host();
+
+    let mut display_name = None;
+    let mut avatar = None;
+    let mut handle = resolved.handle.clone();
+
+    #[cfg(debug_assertions)]
+    let skip_remote_profile = resolved.did.starts_with("did:mock:")
+        || resolved.did.starts_with("did:plc:mock")
+        || resolved.did.starts_with("did:plc:alice")
+        || resolved.did.starts_with("did:plc:bob")
+        || resolved.did.starts_with("did:plc:carol")
+        || resolved.did.starts_with("did:plc:test_")
+        || resolved.did.starts_with("did:plc:user_");
+    #[cfg(not(debug_assertions))]
+    let skip_remote_profile = false;
+
+    if !skip_remote_profile {
+        let client = build_secure_http_client();
+        if let Ok(resp) = client
+            .get("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+            .query(&[("actor", resolved.did.as_str())])
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(dn) = json["displayName"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        display_name = Some(dn.to_string());
+                    }
+                    if let Some(av) = json["avatar"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        avatar = Some(av.to_string());
+                    }
+                    if handle.starts_with("did:") {
+                        if let Some(h) = json["handle"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            handle = CompactString::new(h);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        Json(OAuthPreviewResponse {
+            status: CompactString::new("ok"),
+            did: resolved.did,
+            handle,
+            display_name,
+            avatar,
+            pds_endpoint: resolved.pds_endpoint,
+            pds_host,
+            auth_server_host,
+            assumed_bsky_social,
         }),
     )
         .into_response()

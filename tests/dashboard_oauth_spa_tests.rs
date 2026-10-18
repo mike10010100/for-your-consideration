@@ -712,3 +712,72 @@ async fn test_query_parameters_override_saved_preferences() {
     let resp_feed = app.oneshot(req_feed).await.unwrap();
     assert_eq!(resp_feed.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_spa_contains_enhanced_atmosphere_login_flow_views() {
+    let state = create_rich_dashboard_test_state();
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+
+    // 4 views + typeahead + bare-handle completion hint + explainer + stepping-out state
+    assert!(html.contains("id=\"login-view-saved\""));
+    assert!(html.contains("id=\"login-view-input\""));
+    assert!(html.contains("id=\"login-view-confirm\""));
+    assert!(html.contains("id=\"login-view-explainer\""));
+    assert!(html.contains("id=\"login-typeahead-list\""));
+    assert!(html.contains("id=\"login-bare-handle-hint\""));
+    assert!(html.contains("id=\"login-info-toggle-btn\""));
+    assert!(html.contains("id=\"login-confirm-provider-badge\""));
+    assert!(html.contains("id=\"login-stepping-out-box\""));
+    assert!(html.contains("/api/oauth/typeahead"));
+    assert!(html.contains("/api/oauth/preview"));
+    assert!(html.contains("Bluesky or AT Protocol (Atmosphere) Handle"));
+    assert!(html.contains("never sees your password"));
+}
+
+#[test]
+fn test_normalize_user_handle_bare_and_qualified() {
+    assert_eq!(normalize_user_handle("alice"), "alice.bsky.social");
+    assert_eq!(normalize_user_handle("@alice"), "alice.bsky.social");
+    assert_eq!(normalize_user_handle("  @Alice  "), "alice.bsky.social");
+    assert_eq!(normalize_user_handle("dame.is"), "dame.is");
+    assert_eq!(normalize_user_handle("@dame.is"), "dame.is");
+    assert_eq!(
+        normalize_user_handle("did:plc:ewvi7nxzyoun6zhxrhs64oiz"),
+        "did:plc:ewvi7nxzyoun6zhxrhs64oiz"
+    );
+    assert_eq!(normalize_user_handle(""), "");
+}
+
+#[tokio::test]
+async fn test_oauth_typeahead_short_query_returns_empty_actors() {
+    let state = create_rich_dashboard_test_state();
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder()
+        .uri("/api/oauth/typeahead?q=a")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let parsed: OAuthTypeaheadResponse = serde_json::from_slice(&body).unwrap();
+    assert!(parsed.actors.is_empty());
+}
+
+#[tokio::test]
+async fn test_oauth_preview_empty_handle_returns_bad_request() {
+    let state = create_rich_dashboard_test_state();
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder()
+        .uri("/api/oauth/preview?handle=")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

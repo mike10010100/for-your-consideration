@@ -1629,6 +1629,69 @@ pub struct OAuthLoginResponse {
     pub state: String,
 }
 
+/// Query parameters for `GET /api/oauth/typeahead` (live handle autocomplete).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthTypeaheadQuery {
+    /// Prefix query string to match against AT Protocol handles.
+    pub q: Option<String>,
+    /// Maximum number of suggestions to return (default: 6, max: 15).
+    pub limit: Option<usize>,
+}
+
+/// A single actor suggestion entry returned by `GET /api/oauth/typeahead`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthActorSuggestion {
+    /// Canonical DID (`did:plc:...` or `did:web:...`).
+    pub did: CompactString,
+    /// Canonical handle (`alice.bsky.social`).
+    pub handle: CompactString,
+    /// Optional profile display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Optional avatar image URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+/// Response payload for `GET /api/oauth/typeahead`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthTypeaheadResponse {
+    /// Ordered list of matching actor suggestions.
+    pub actors: Vec<OAuthActorSuggestion>,
+}
+
+/// Query parameters for `GET /api/oauth/preview` (pre-flight identity & provider confirmation).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthPreviewQuery {
+    /// Handle or DID to preview before redirecting to the user's PDS / authorization server.
+    pub handle: Option<String>,
+}
+
+/// Response payload for `GET /api/oauth/preview` ("Is this you?").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthPreviewResponse {
+    /// Operation status string (e.g. "ok").
+    pub status: CompactString,
+    /// Canonical user DID (`did:plc:...` or `did:web:...`).
+    pub did: CompactString,
+    /// Canonical user handle (`alice.bsky.social`).
+    pub handle: CompactString,
+    /// Optional profile display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Optional profile avatar image URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    /// Full PDS service endpoint URL (e.g. `https://bsky.social`).
+    pub pds_endpoint: String,
+    /// Human-readable PDS provider host (e.g. `bsky.social`).
+    pub pds_host: String,
+    /// Human-readable OAuth authorization server host (e.g. `bsky.social`).
+    pub auth_server_host: String,
+    /// Whether `.bsky.social` was automatically assumed for a bare handle input.
+    pub assumed_bsky_social: bool,
+}
+
 /// Request body for `POST /api/oauth/callback`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthCallbackRequest {
