@@ -1086,6 +1086,104 @@ impl Default for OAuthUserSessionStore {
     }
 }
 
+/// Default handle domain assumed when a user enters a bare single-label handle (e.g. `alice` -> `alice.bsky.social`).
+pub const DEFAULT_HANDLE_DOMAIN: &str = "bsky.social";
+
+/// Reserved single-label hostnames that must never be auto-completed to `.bsky.social`.
+const RESERVED_SINGLE_LABEL_HANDLES: &[&str] = &[
+    "localhost",
+    "local",
+    "invalid",
+    "test",
+    "example",
+    "internal",
+    "intranet",
+    "corp",
+    "lan",
+    "home",
+    "arpa",
+];
+
+/// Normalizes a user-supplied AT Protocol handle or DID, automatically appending
+/// `.bsky.social` when a valid single-label bare handle (e.g. `alice` or `@alice`) is given.
+///
+/// Strips surrounding whitespace, leading `@` symbols, `at://` prefixes, and
+/// `https://bsky.app/profile/` URL prefixes.
+#[must_use]
+pub fn normalize_user_handle(raw: &str) -> String {
+    let mut s = raw.trim();
+    if let Some(rest) = s.strip_prefix("at://") {
+        s = rest.trim();
+    } else if let Some(rest) = s
+        .strip_prefix("https://bsky.app/profile/")
+        .or_else(|| s.strip_prefix("http://bsky.app/profile/"))
+    {
+        s = rest.split(['/', '?', '#']).next().unwrap_or(rest).trim();
+    }
+    let clean = s.trim_start_matches('@').trim_end_matches('/').trim();
+    if clean.is_empty() {
+        return String::new();
+    }
+    if clean.starts_with("did:") {
+        return clean.to_string();
+    }
+
+    let lower = clean.to_ascii_lowercase();
+    if !lower.contains('.') && is_completable_bare_label(&lower) {
+        return format!("{lower}.{DEFAULT_HANDLE_DOMAIN}");
+    }
+    lower
+}
+
+fn is_completable_bare_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 63 {
+        return false;
+    }
+    if label.starts_with('-') || label.ends_with('-') {
+        return false;
+    }
+    if RESERVED_SINGLE_LABEL_HANDLES.contains(&label) {
+        return false;
+    }
+    if label.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    label
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Extracts the lowercase hostname from an HTTP(S) endpoint URL, falling back to `fallback`.
+#[must_use]
+pub fn extract_url_host(url_str: &str, fallback: &str) -> String {
+    let trimmed = url_str.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let host_port = authority.split('@').next_back().unwrap_or(authority);
+    let host = if host_port.starts_with('[') {
+        host_port
+            .split(']')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[')
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    let clean = host.trim().to_ascii_lowercase();
+    if clean.is_empty() {
+        fallback.to_string()
+    } else {
+        clean
+    }
+}
+
 /// Resolved `ATProto` identity and PDS OAuth endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPdsIdentity {
@@ -1105,9 +1203,25 @@ pub struct ResolvedPdsIdentity {
     pub require_par: bool,
 }
 
+impl ResolvedPdsIdentity {
+    /// Returns the human-readable hostname of the user's PDS (e.g. `bsky.social`).
+    #[must_use]
+    pub fn pds_host(&self) -> String {
+        extract_url_host(&self.pds_endpoint, DEFAULT_HANDLE_DOMAIN)
+    }
+
+    /// Returns the human-readable hostname of the user's OAuth authorization server.
+    #[must_use]
+    pub fn auth_server_host(&self) -> String {
+        let pds_h = self.pds_host();
+        extract_url_host(&self.auth_endpoint, &pds_h)
+    }
+}
+
 /// Resolves an `ATProto` handle or DID to its authoritative PDS and OAuth endpoints via `ATProto` identity resolution.
 pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentity> {
-    let trimmed = identifier.trim().trim_start_matches('@');
+    let normalized = normalize_user_handle(identifier);
+    let trimmed = normalized.as_str();
     if trimmed.is_empty() {
         return Err(FeedError::InvalidInput(
             "Identifier cannot be empty".to_string(),
@@ -1169,7 +1283,7 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
 
     let client = build_secure_http_client();
 
-    let (did, handle) = if trimmed.starts_with("did:") {
+    let (did, mut handle) = if trimmed.starts_with("did:") {
         (trimmed.to_string(), trimmed.to_string())
     } else {
         // Resolve handle -> DID via com.atproto.identity.resolveHandle
@@ -1195,7 +1309,7 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
         }
     };
 
-    // Resolve DID document -> PDS endpoint
+    // Resolve DID document -> PDS endpoint (and canonical handle from alsoKnownAs if input was a DID)
     let did_doc_url = if did.starts_with("did:plc:") {
         format!("https://plc.directory/{did}")
     } else if did.starts_with("did:web:") {
@@ -1211,6 +1325,21 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
                 res.json::<serde_json::Value>().await.map_or_else(
                     |_| "https://bsky.social".to_string(),
                     |json| {
+                        if handle.starts_with("did:") {
+                            if let Some(aka_arr) = json["alsoKnownAs"].as_array() {
+                                for aka in aka_arr {
+                                    if let Some(h) =
+                                        aka.as_str().and_then(|s| s.strip_prefix("at://"))
+                                    {
+                                        let trimmed_h = h.trim();
+                                        if !trimmed_h.is_empty() {
+                                            handle = trimmed_h.to_ascii_lowercase();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let mut found_endpoint = None;
                         if let Some(services) = json["service"].as_array() {
                             for s in services {
