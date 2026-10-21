@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -22,7 +22,7 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # AT Protocol OAuth & Cryptography Library (Formally Verified)
-skyauth = { version = "0.3.6", features = ["axum"] }
+skyauth = { version = "0.3.7", features = ["axum"] }
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.7", optional = true }
@@ -33,6 +33,8 @@ tokio = { version = "1.40", features = ["full"] }
 tokio-util = "0.7"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1.0.10"
 futures-util = "0.3"
 parking_lot = "0.12"
 arc-swap = "1.7"
@@ -68,6 +70,7 @@ thiserror = "2.0"
 [dev-dependencies]
 proptest = "1.5"
 http-body-util = "0.1"
+rustls-pki-types = "1.12"
 
 [[bench]]
 name = "recommendation_latency"
