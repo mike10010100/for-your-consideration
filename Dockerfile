@@ -8,7 +8,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /app
 
 # Copy dependency manifests
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source to pre-build dependencies for caching
 RUN mkdir src benches && \
@@ -16,7 +16,7 @@ RUN mkdir src benches && \
     echo "" > src/lib.rs && \
     echo "fn main() {}" > benches/recommendation_latency.rs && \
     echo "fn main() {}" > benches/memory_footprint.rs && \
-    cargo build --release || true && \
+    cargo build --release --locked || true && \
     rm -rf src benches
 
 # Copy real source code and assets
@@ -26,7 +26,7 @@ COPY assets ./assets
 
 # Build production release binary (clean dummy crate artifacts so real code is compiled)
 RUN rm -rf target/release/deps/for_your_consideration* target/release/for-your-consideration* target/release/.fingerprint/for-your-consideration* target/release/.fingerprint/for_your_consideration* && \
-    cargo build --release --bin for-your-consideration && \
+    cargo build --release --locked --bin for-your-consideration && \
     strip target/release/for-your-consideration
 
 # ==============================================================================
@@ -34,9 +34,15 @@ RUN rm -rf target/release/deps/for_your_consideration* target/release/for-your-c
 # ==============================================================================
 FROM debian:bookworm-slim AS runtime
 
-# Install CA certificates for secure WSS/HTTPS connections and curl for healthchecks
+# Install CA certificates for secure WSS/HTTPS connections and curl for healthchecks,
+# and explicitly distrust the October 2026 compromised eMudhra / Comodo AAA roots in the OS store.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
+    sed -i \
+      -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
+      -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
+      /etc/ca-certificates.conf && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Create dedicated non-root user and group

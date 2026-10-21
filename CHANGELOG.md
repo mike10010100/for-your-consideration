@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-10-21
+
+### Security
+
+- **eMudhra Intermediate CA Compromise Mitigation** (`Cargo.toml`, `Cargo.lock`, `deny.toml`, `Dockerfile`, `tests/emudhra_tls_distrust_tests.rs`):
+  - Upgraded `skyauth` to `0.3.7`, enforced `rustls-webpki >= 0.103.16` and `webpki-roots >= 1.0.10` in `[dependencies]`, and banned vulnerable versions (`rustls-webpki < 0.103.16`, `webpki-roots < 1.0.10`, `webpki-root-certs < 1.0.10`) in `deny.toml`.
+  - Ensures all outbound HTTPS and WSS connections (Jetstream firehose ingestion, DID/handle resolution, OAuth 2.1 PDS discovery, and AppView lookups) reject the 8 compromised eMudhra intermediate CA SubjectPublicKeyInfos (`Error::CertDistrusted`) across both direct `emSign` and Sectigo `AAA Certificate Services` cross-signed chains.
+  - Updated `Dockerfile` to copy `Cargo.lock`, build with `--locked`, and explicitly distrust `mozilla/emSign_ECC_Root_CA_-_G3.crt` and `mozilla/Comodo_AAA_Services_root.crt` in `/etc/ca-certificates.conf`.
+
+---
+
 ## [0.6.5] - 2026-10-18
 
 ### Fixed
