@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-10-26
+
+### Security
+
+- **Transitive Cryptographic & Runtime Advisory Remediation** (`Cargo.toml`, `Cargo.lock`, `deny.toml`):
+  - Upgraded `skyauth` to `0.3.8`, `crypto-bigint` to `0.7.10` (`RUSTSEC-2026-0387`), `ctutils` to `0.4.6` (`RUSTSEC-2026-0385`), `quinn-proto` to `0.11.19` (`RUSTSEC-2026-0338`, `RUSTSEC-2026-0340`, `RUSTSEC-2026-0343`), and `tokio` to `1.54.1` (`RUSTSEC-2026-0386`).
+  - Banned vulnerable prior releases (`crypto-bigint < 0.7.6`, `ctutils < 0.4.4`, `quinn-proto < 0.11.18`, `tokio < 1.53.3`) in `deny.toml`.
+
+---
+
 ## [0.6.6] - 2026-10-21
 
 ### Security
