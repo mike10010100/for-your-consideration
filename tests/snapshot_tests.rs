@@ -570,3 +570,253 @@ fn test_compact_memory_stores_garbage_collection() {
 
     let _ = std::fs::remove_file(&snapshot_path);
 }
+
+#[test]
+fn test_compact_memory_stores_preserves_nsfw_and_author_posts() {
+    let interner = StringInterner::new();
+    let graph = GraphStore::new();
+    let preferences = UserPreferencesStore::new();
+
+    let uid_viewer = interner.intern("did:plc:viewer");
+    let uid_author = interner.intern("did:plc:author");
+    let _dead = interner.intern("did:plc:unreferenced_dead_string");
+    let pid_sfw = interner.intern("at://did:plc:author/app.bsky.feed.post/sfw");
+    let pid_nsfw = interner.intern("at://did:plc:author/app.bsky.feed.post/nsfw");
+    let pid_stale = interner.intern("at://did:plc:author/app.bsky.feed.post/stale");
+
+    let now = BLUESKY_EPOCH_SECS + 100_000;
+    let old = BLUESKY_EPOCH_SECS + 1_000;
+
+    graph.record_interaction(uid_viewer, pid_sfw, SignalType::Like, now);
+    graph.record_interaction(uid_viewer, pid_nsfw, SignalType::Repost, now + 10);
+    graph.record_interaction(uid_viewer, pid_stale, SignalType::Like, old);
+
+    graph.record_post_meta_with_nsfw(pid_sfw, uid_author, None, None, now, false);
+    graph.record_post_meta_with_nsfw(
+        pid_nsfw,
+        uid_author,
+        Some(pid_sfw),
+        Some(pid_sfw),
+        now + 10,
+        true,
+    );
+    graph.record_post_meta_with_nsfw(pid_stale, uid_author, None, None, old, true);
+
+    graph.prune_older_than(BLUESKY_EPOCH_SECS + 50_000);
+    assert_eq!(graph.total_nodes(), graph.stats().total_nodes());
+
+    let compact_stats = compact_memory_stores(&interner, &graph, &preferences);
+    assert_eq!(compact_stats.strings_before, 6);
+    assert_eq!(compact_stats.strings_after, 4);
+
+    let new_author = interner
+        .lookup_id("did:plc:author")
+        .expect("author must exist");
+    let new_sfw = interner
+        .lookup_id("at://did:plc:author/app.bsky.feed.post/sfw")
+        .expect("sfw post must exist");
+    let new_nsfw = interner
+        .lookup_id("at://did:plc:author/app.bsky.feed.post/nsfw")
+        .expect("nsfw post must exist");
+
+    let meta_sfw = graph.get_post_meta(new_sfw).expect("sfw meta must exist");
+    assert_eq!(meta_sfw.author_id, new_author);
+    assert!(
+        !meta_sfw.is_nsfw,
+        "SFW post must remain is_nsfw=false after compaction"
+    );
+
+    let meta_nsfw = graph.get_post_meta(new_nsfw).expect("nsfw meta must exist");
+    assert_eq!(meta_nsfw.author_id, new_author);
+    assert_eq!(meta_nsfw.root_id, Some(new_sfw));
+    assert_eq!(meta_nsfw.parent_id, Some(new_sfw));
+    assert!(
+        meta_nsfw.is_nsfw,
+        "NSFW post must preserve is_nsfw=true after compaction"
+    );
+
+    let mut author_posts = graph.get_author_posts(new_author);
+    author_posts.sort_unstable();
+    let mut expected_posts = vec![new_sfw, new_nsfw];
+    expected_posts.sort_unstable();
+    assert_eq!(author_posts, expected_posts);
+}
+
+#[test]
+fn test_prune_older_than_map_hysteresis_and_sparse_shrink() {
+    let graph = GraphStore::new();
+    let base_ts = BLUESKY_EPOCH_SECS + 10_000;
+
+    // Populate shard 0 with 512 distinct users and posts (all multiples of 64 route to shard 0)
+    for i in 1..=512u32 {
+        let uid = i * 64;
+        let pid = (i + 10_000) * 64;
+        let ts = if i <= 32 {
+            base_ts + 10
+        } else {
+            base_ts + 1_000
+        };
+        graph.record_interaction(uid, pid, SignalType::Like, ts);
+        graph.record_post_meta_with_nsfw(pid, uid, None, None, ts, i % 2 == 0);
+    }
+
+    let size_before = graph.estimated_size_bytes();
+    assert_eq!(graph.total_nodes(), 1024);
+
+    // 1. Steady-state prune removing only ~6.25% (32 of 512) entries:
+    // map capacity is within 2x of length, so hysteresis keeps existing bucket allocation.
+    graph.prune_older_than(base_ts + 500);
+    assert_eq!(graph.total_nodes(), 960);
+    assert_eq!(graph.total_nodes(), graph.stats().total_nodes());
+    let size_steady = graph.estimated_size_bytes();
+
+    // 2. Sparse prune removing all remaining entries: capacity exceeds 2x len + floor(64),
+    // so shrink_map_if_sparse reclaims shard map allocations.
+    graph.prune_older_than(base_ts + 2_000);
+    assert_eq!(graph.total_nodes(), 0);
+    let size_empty = graph.estimated_size_bytes();
+    assert!(
+        size_empty < size_steady / 4 && size_empty < size_before / 4,
+        "Expected sparse prune to shrink shard maps: before={size_before}, steady={size_steady}, empty={size_empty}"
+    );
+}
+
+#[test]
+fn test_systematic_prune_compact_and_snapshot_oracle_exploration() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Deterministic xorshift64 generator (seed = 0x5EED_2026_1029)
+    let mut rng_state: u64 = 0x5EED_2026_1029;
+    let mut next_u64 = || -> u64 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        rng_state
+    };
+
+    for case_idx in 0..25u32 {
+        let interner = StringInterner::new();
+        let graph = GraphStore::new();
+        let preferences = UserPreferencesStore::new();
+
+        // Independent reference model keyed by string URIs/DIDs
+        // edges_oracle: (user_did, post_uri, sig_code) -> timestamp
+        let mut edges_oracle: BTreeMap<(String, String, u8), u64> = BTreeMap::new();
+        // meta_oracle: post_uri -> (author_did, created_at, is_nsfw)
+        let mut meta_oracle: BTreeMap<String, (String, u64, bool)> = BTreeMap::new();
+
+        let num_users = ((next_u64() % 20) + 1) as usize;
+        let num_posts = ((next_u64() % 40) + 1) as usize;
+        let num_ops = ((next_u64() % 80) + 10) as usize;
+        let base_ts = BLUESKY_EPOCH_SECS + 10_000;
+
+        // Pre-intern some dead strings
+        for d in 0..(case_idx % 7) {
+            interner.intern(&format!("did:plc:dead_{case_idx}_{d}"));
+        }
+
+        for _ in 0..num_ops {
+            let u_idx = (next_u64() as usize) % num_users;
+            let p_idx = (next_u64() as usize) % num_posts;
+            let a_idx = (next_u64() as usize) % num_users;
+            let user_did = format!("did:plc:u_{case_idx}_{u_idx}");
+            let author_did = format!("did:plc:u_{case_idx}_{a_idx}");
+            let post_uri = format!("at://{author_did}/app.bsky.feed.post/p_{case_idx}_{p_idx}");
+
+            let ts = base_ts + (next_u64() % 2_000);
+            let is_nsfw = (next_u64() & 1) == 1;
+            let sig_code = (next_u64() % 3) as u8;
+            let sig = match sig_code {
+                0 => SignalType::Like,
+                1 => SignalType::Repost,
+                _ => SignalType::Quote,
+            };
+
+            let uid = interner.intern(&user_did);
+            let aid = interner.intern(&author_did);
+            let pid = interner.intern(&post_uri);
+
+            edges_oracle
+                .entry((user_did.clone(), post_uri.clone(), sig_code))
+                .or_insert(ts);
+            graph.record_interaction(uid, pid, sig, ts);
+
+            meta_oracle.insert(post_uri.clone(), (author_did.clone(), ts, is_nsfw));
+            graph.record_post_meta_with_nsfw(pid, aid, None, None, ts, is_nsfw);
+        }
+
+        assert_eq!(graph.total_nodes(), graph.stats().total_nodes());
+
+        // Pick a cutoff that prunes a subset (or boundary 0% / 100%) of records
+        let cutoff = match case_idx % 5 {
+            0 => base_ts,         // retain 100%
+            1 => base_ts + 3_000, // prune 100%
+            _ => base_ts + (next_u64() % 2_000),
+        };
+
+        graph.prune_older_than(cutoff);
+        edges_oracle.retain(|_, &mut ts| ts >= cutoff);
+        meta_oracle.retain(|_, (_, ts, _)| *ts >= cutoff);
+
+        assert_eq!(graph.total_nodes(), graph.stats().total_nodes());
+
+        // Compact memory stores
+        let _ = compact_memory_stores(&interner, &graph, &preferences);
+        assert_eq!(graph.total_nodes(), graph.stats().total_nodes());
+
+        // Save and reload into fresh instances
+        let snap_path = temp_snapshot_path(&format!("oracle_{case_idx}"));
+        save_snapshot_with_preferences(&snap_path, &interner, &graph, &preferences, 999)
+            .expect("save must succeed");
+
+        let rest_interner = StringInterner::new();
+        let rest_graph = GraphStore::new();
+        let rest_prefs = UserPreferencesStore::new();
+        load_snapshot_with_preferences(&snap_path, &rest_interner, &rest_graph, &rest_prefs)
+            .expect("load must succeed")
+            .expect("snapshot must exist");
+        let _ = std::fs::remove_file(&snap_path);
+
+        assert_eq!(rest_graph.total_nodes(), rest_graph.stats().total_nodes());
+        assert_eq!(rest_graph.stats().total_interactions, edges_oracle.len());
+        assert_eq!(rest_graph.stats().total_metadata_entries, meta_oracle.len());
+
+        // Verify every surviving post metadata and NSFW flag matches the oracle
+        let mut expected_author_posts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (post_uri, (author_did, exp_ts, exp_nsfw)) in &meta_oracle {
+            let pid = rest_interner
+                .lookup_id(post_uri)
+                .expect("surviving post_uri must be interned");
+            let aid = rest_interner
+                .lookup_id(author_did)
+                .expect("surviving author_did must be interned");
+            let meta = rest_graph
+                .get_post_meta(pid)
+                .expect("surviving post meta must exist");
+            assert_eq!(meta.author_id, aid);
+            assert_eq!(meta.created_at, *exp_ts);
+            assert_eq!(
+                meta.is_nsfw, *exp_nsfw,
+                "case {case_idx}: NSFW mismatch for {post_uri}"
+            );
+            expected_author_posts
+                .entry(author_did.clone())
+                .or_default()
+                .insert(post_uri.clone());
+        }
+
+        // Verify author_posts index matches oracle
+        for (author_did, exp_uris) in &expected_author_posts {
+            let aid = rest_interner.lookup_id(author_did).unwrap();
+            let actual_pids = rest_graph.get_author_posts(aid);
+            let actual_uris: BTreeSet<String> = actual_pids
+                .into_iter()
+                .map(|pid| rest_interner.lookup_str(pid).unwrap().to_string())
+                .collect();
+            assert_eq!(
+                &actual_uris, exp_uris,
+                "case {case_idx}: author_posts mismatch"
+            );
+        }
+    }
+}

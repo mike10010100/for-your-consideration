@@ -201,29 +201,32 @@ impl StringInterner {
         }
 
         for (shard_idx, ids) in shard_ids.into_iter().enumerate() {
-            let mut guard = self.shards[shard_idx].write();
-            let old_to_str = std::mem::take(&mut guard.to_str);
-            let _ = std::mem::take(&mut guard.to_id);
+            {
+                let mut guard = self.shards[shard_idx].write();
+                let old_to_str = std::mem::take(&mut guard.to_str);
+                let _ = std::mem::take(&mut guard.to_id);
 
-            let mut new_to_str = Vec::with_capacity(ids.len());
-            let mut new_to_id = AHashMap::with_capacity(ids.len());
+                let mut new_to_str = Vec::with_capacity(ids.len());
+                let mut new_to_id = AHashMap::with_capacity(ids.len());
 
-            for old_id in ids {
-                let (_, old_local) = id_to_shard_and_local(old_id);
-                if let Some(s) = old_to_str.get(old_local) {
-                    let new_local = new_to_str.len();
-                    let new_id = local_to_id(shard_idx, new_local);
-                    id_map.insert(old_id, new_id);
-                    new_to_id.insert(s.clone(), new_id);
-                    new_to_str.push(s.clone());
+                for old_id in ids {
+                    let (_, old_local) = id_to_shard_and_local(old_id);
+                    if let Some(s) = old_to_str.get(old_local) {
+                        let new_local = new_to_str.len();
+                        let new_id = local_to_id(shard_idx, new_local);
+                        id_map.insert(old_id, new_id);
+                        new_to_id.insert(s.clone(), new_id);
+                        new_to_str.push(s.clone());
+                    }
                 }
+
+                new_to_str.shrink_to_fit();
+                new_to_id.shrink_to_fit();
+
+                guard.to_str = new_to_str;
+                guard.to_id = new_to_id;
             }
-
-            new_to_str.shrink_to_fit();
-            new_to_id.shrink_to_fit();
-
-            guard.to_str = new_to_str;
-            guard.to_id = new_to_id;
+            std::thread::yield_now();
         }
 
         id_map

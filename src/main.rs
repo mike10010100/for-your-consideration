@@ -494,12 +494,17 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Serializes periodic prune/compaction, periodic snapshot, and shutdown snapshot writes
+    // so maintenance tasks never contend on graph locks simultaneously or race the `.tmp` path.
+    let snapshot_save_slot: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
+
     // Spawn Periodic Store Pruning task (SEC-06 memory bounding)
     let prune_interner = Arc::clone(&interner);
     let prune_graph = Arc::clone(&graph);
     let prune_preferences = Arc::clone(&preferences_store);
     let prune_impression_store = Arc::clone(&recommender.impression_store);
     let prune_cancel = cancel_token.clone();
+    let prune_save_slot = Arc::clone(&snapshot_save_slot);
     let prune_interval_secs = std::env::var("PRUNE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -509,6 +514,7 @@ async fn main() -> Result<()> {
     tasks.spawn(async move {
         let mut interval = tokio::time::interval(prune_interval);
         interval.tick().await; // Consume initial immediate tick (startup prune already ran)
+        let mut last_compacted_strings = prune_interner.len();
         loop {
             tokio::select! {
                 () = prune_cancel.cancelled() => {
@@ -525,33 +531,71 @@ async fn main() -> Result<()> {
                         .and_then(|d| d.parse::<u64>().ok())
                         .unwrap_or(DEFAULT_RETENTION_DAYS);
                     let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
-                    prune_graph.prune_older_than(prune_cutoff);
-                    prune_impression_store.prune_expired(now_secs);
-                    prune_oauth_store.prune_expired(
-                        for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
-                        now_secs,
-                    );
-                    prune_user_oauth_sessions.prune_expired(now_secs);
-                    prune_active_users.prune_older_than(now_secs.saturating_sub(900));
-                    tracing::debug!(
-                        retention_days = retention_days,
-                        prune_cutoff = prune_cutoff,
-                        "Periodic memory pruning pass completed"
-                    );
 
-                    let active_nodes = prune_graph.stats().total_nodes();
-                    if prune_interner.len() > active_nodes.saturating_mul(2).max(100_000) {
-                        let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
-                            &prune_interner,
-                            &prune_graph,
-                            &prune_preferences,
+                    let p_interner = Arc::clone(&prune_interner);
+                    let p_graph = Arc::clone(&prune_graph);
+                    let p_preferences = Arc::clone(&prune_preferences);
+                    let p_impressions = Arc::clone(&prune_impression_store);
+                    let p_oauth = Arc::clone(&prune_oauth_store);
+                    let p_sessions = Arc::clone(&prune_user_oauth_sessions);
+                    let p_active = Arc::clone(&prune_active_users);
+                    let p_slot = Arc::clone(&prune_save_slot);
+                    let baseline_strings = last_compacted_strings;
+
+                    let prune_res = tokio::task::spawn_blocking(move || {
+                        let _guard = p_slot.blocking_lock();
+                        let prune_start = std::time::Instant::now();
+                        p_graph.prune_older_than(prune_cutoff);
+                        p_impressions.prune_expired(now_secs);
+                        p_oauth.prune_expired(
+                            for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
+                            now_secs,
                         );
-                        info!(
-                            strings_before = compact_stats.strings_before,
-                            strings_after = compact_stats.strings_after,
-                            duration_ms = compact_stats.duration_ms,
-                            "Periodic memory compaction completed"
+                        p_sessions.prune_expired(now_secs);
+                        p_active.prune_older_than(now_secs.saturating_sub(900));
+                        let prune_duration_ms = prune_start.elapsed().as_secs_f64() * 1000.0;
+                        tracing::debug!(
+                            retention_days = retention_days,
+                            prune_cutoff = prune_cutoff,
+                            duration_ms = prune_duration_ms,
+                            "Periodic memory pruning pass completed"
                         );
+
+                        let active_nodes = p_graph.total_nodes();
+                        let current_strings = p_interner.len();
+                        let growth_threshold = baseline_strings
+                            .saturating_add(baseline_strings / 2)
+                            .max(100_000);
+                        if current_strings > active_nodes.saturating_mul(2).max(100_000)
+                            && current_strings > growth_threshold
+                        {
+                            let compact_stats =
+                                for_your_consideration::snapshot::compact_memory_stores(
+                                    &p_interner,
+                                    &p_graph,
+                                    &p_preferences,
+                                );
+                            info!(
+                                strings_before = compact_stats.strings_before,
+                                strings_after = compact_stats.strings_after,
+                                duration_ms = compact_stats.duration_ms,
+                                "Periodic memory compaction completed"
+                            );
+                            Some(compact_stats.strings_after)
+                        } else {
+                            None
+                        }
+                    })
+                    .await;
+
+                    match prune_res {
+                        Ok(Some(new_baseline)) => {
+                            last_compacted_strings = new_baseline;
+                        }
+                        Ok(None) => {}
+                        Err(join_err) => {
+                            warn!(error = %join_err, "Periodic prune spawn_blocking join error");
+                        }
                     }
                 }
             }
@@ -568,8 +612,6 @@ async fn main() -> Result<()> {
     let snapshot_interval = Duration::from_secs(snapshot_config.interval_secs);
     let snapshot_ingester_stats = Arc::clone(ingester.stats());
     let periodic_snapshot_tracker = Arc::clone(&snapshot_tracker);
-    // Serializes periodic and shutdown snapshot writes so they never race the same `.tmp` path.
-    let snapshot_save_slot: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
     let periodic_save_slot = Arc::clone(&snapshot_save_slot);
 
     tasks.spawn(async move {
@@ -582,7 +624,7 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
-                    // Periodic memory bounding: Prune stores (SEC-06)
+                    // Periodic memory bounding: Prune stores (SEC-06) inside spawn_blocking
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -592,14 +634,6 @@ async fn main() -> Result<()> {
                         .and_then(|d| d.parse::<u64>().ok())
                         .unwrap_or(DEFAULT_RETENTION_DAYS);
                     let prune_cutoff = now_secs.saturating_sub(retention_days.saturating_mul(86400));
-                    snapshot_graph.prune_older_than(prune_cutoff);
-                    snapshot_impression_store.prune_expired(now_secs);
-                    snapshot_oauth_store.prune_expired(
-                        for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
-                        now_secs,
-                    );
-                    snapshot_user_oauth_sessions.prune_expired(now_secs);
-                    snapshot_active_users.prune_older_than(now_secs.saturating_sub(900));
 
                     // NOTE: Compaction is intentionally NOT run here. It is an O(data) rebuild that
                     // can take minutes on large stores and would both delay this checkpoint and
@@ -616,11 +650,24 @@ async fn main() -> Result<()> {
                     let snap_interner = Arc::clone(&snapshot_interner);
                     let snap_graph = Arc::clone(&snapshot_graph);
                     let snap_preferences = Arc::clone(&snapshot_preferences);
+                    let snap_impressions = Arc::clone(&snapshot_impression_store);
+                    let snap_oauth = Arc::clone(&snapshot_oauth_store);
+                    let snap_sessions = Arc::clone(&snapshot_user_oauth_sessions);
+                    let snap_active = Arc::clone(&snapshot_active_users);
                     let save_slot = Arc::clone(&periodic_save_slot);
 
                     let save_res = tokio::task::spawn_blocking(move || {
-                        // Serialize against any concurrent (shutdown) save on the same `.tmp` path.
+                        // Serialize against any concurrent prune/compaction or shutdown save.
                         let _guard = save_slot.blocking_lock();
+                        snap_graph.prune_older_than(prune_cutoff);
+                        snap_impressions.prune_expired(now_secs);
+                        snap_oauth.prune_expired(
+                            for_your_consideration::auth::DEFAULT_OAUTH_STATE_TTL_SECS,
+                            now_secs,
+                        );
+                        snap_sessions.prune_expired(now_secs);
+                        snap_active.prune_older_than(now_secs.saturating_sub(900));
+
                         save_snapshot_with_preferences(
                             &snap_path,
                             &snap_interner,
