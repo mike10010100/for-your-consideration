@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-10-29
+
+### Fixed
+
+- **Non-Blocking Periodic Pruning, Shard Map Hysteresis & Compaction `is_nsfw` Preservation** (`src/graph.rs`, `src/interner.rs`, `src/main.rs`, `tests/snapshot_tests.rs`):
+  - Replaced unconditional `guard.shrink_to_fit()` calls across all 64 shards in `GraphStore::prune_older_than` with `shrink_map_if_sparse` hysteresis (`capacity > len * 2` with a floor of `64`), combined double-pass `iter_mut()` + `retain()` sweeps into single-pass `retain()` loops, and added cooperative `std::thread::yield_now()` yields between shards to prevent ~20s write-lock stalls and upstream Jetstream WebSocket resets on 15-minute prune ticks.
+  - Added `GraphStore::total_nodes` (`O(NUM_SHARDS)`) so periodic pruning checks active node counts without scanning inner edge vectors.
+  - Offloaded periodic pruning and conditional compaction in `src/main.rs` onto `tokio::task::spawn_blocking` serialized via `snapshot_save_slot`, and added `last_compacted_strings` growth hysteresis (>= 50% growth above post-compaction baseline) before triggering full memory compaction.
+  - Fixed `GraphStore::compact` resetting `PostMeta::is_nsfw` to `false` by using `PostMeta::with_nsfw`, and rebuilt `author_posts` directly into per-shard maps during the `post_metadata` pass instead of acquiring write locks and scanning `.contains(&pid)` per post.
+
+---
+
 ## [0.6.7] - 2026-10-26
 
 ### Security
