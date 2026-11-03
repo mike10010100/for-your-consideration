@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -22,9 +22,9 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # AT Protocol OAuth & Cryptography Library (Formally Verified)
-skyauth = { version = "0.3.10", features = ["axum"] }
+skyauth = { version = "0.3.11", features = ["axum"] }
 # AT Protocol Data Plane, Lexicon & Jetstream Ingestion Library (storage-free mode)
-skybase = { version = "0.1.7", default-features = false }
+skybase = { version = "0.1.8", default-features = false }
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.7", optional = true }

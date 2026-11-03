@@ -834,4 +834,36 @@ mod tests {
         assert!(res.is_err());
         assert!(res.err().unwrap().to_string().contains("#atproto"));
     }
+
+    #[tokio::test]
+    async fn test_verifier_accessors_p256_test_key_and_resolve_signing_key() {
+        let verifier = ServiceAuthVerifier::default();
+        let _ = ServiceAuthVerifier::with_plc_url("http://127.0.0.1:9999", true);
+        assert_eq!(verifier.cache_len(), 0);
+        assert!(format!("{verifier:?}").contains("ServiceAuthVerifier"));
+
+        let k256_sk = SigningKey::from_bytes(&[17u8; 32].into()).unwrap();
+        let k256_vk = *k256_sk.verifying_key();
+        verifier.register_test_atproto_key(
+            "did:plc:k256test123",
+            AtprotoVerifyingKey::Secp256k1(k256_vk),
+        );
+        assert_eq!(
+            *verifier
+                .resolve_signing_key("did:plc:k256test123", 100)
+                .await
+                .unwrap(),
+            k256_vk
+        );
+        verifier.remove_test_key("did:plc:k256test123");
+
+        let p256_sk = p256::ecdsa::SigningKey::from_bytes((&[19u8; 32]).into()).unwrap();
+        let p256_vk = *p256_sk.verifying_key();
+        verifier.register_test_p256_key("did:plc:p256test123", p256_vk);
+        assert!(verifier
+            .resolve_signing_key("did:plc:p256test123", 100)
+            .await
+            .is_err());
+        verifier.clear_cache();
+    }
 }
