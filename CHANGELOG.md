@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] - 2026-11-02
+
+### Fixed
+
+- **Unseen-First Impression Fatigue Ceiling & Compounded Repeated-Impression Damping** (`src/recommender.rs`, `tests/impression_tests.rs`):
+  - Fixed an issue where high-consensus viral posts (`base_score * FATIGUE_MIN_FLOOR > unseen_score`) remained pinned at the #1 slot across repeated feed refreshes until the viewer liked the post.
+  - Added an unseen-first fatigue ceiling in `Recommender::recommend` and `Recommender::recommend_preview_at` that scales active fatigue penalties below the minimum positive unseen candidate score (`0.95 * min_unseen_score`), ensuring already-served posts within the 6-hour fatigue window never outrank fresh unseen candidates while preserving relative ordering and exact `ScoreBreakdown` decomposition (`final_score = taste_similarity * time_decay * topic_boost * fatigue_penalty`).
+  - Added per-post active impression count tracking (`ViewerImpressionHistory::counts`, `get_impression_count`) and `ImpressionStore::evaluate_compounded_fatigue_penalty` ($\text{Multiplier}(\Delta t)^k$, $k \in [1, 8]$) so posts served multiple times in small or exhausted candidate pools decay exponentially across repeated impressions.
+
+---
+
 ## [0.6.8] - 2026-10-29
 
 ### Fixed

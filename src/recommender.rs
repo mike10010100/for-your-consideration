@@ -115,6 +115,8 @@ pub struct ViewerImpressionHistory {
     pub post_ids: RoaringBitmap,
     /// Map from `post_id` to the most recent served timestamp.
     pub timestamps: AHashMap<u32, u64>,
+    /// Map from `post_id` to the number of impressions within the active fatigue window.
+    pub counts: AHashMap<u32, u32>,
     /// Sliding FIFO queue for bounded capacity eviction.
     pub queue: VecDeque<ImpressionEntry>,
     /// Maximum capacity of impressions before oldest entries are evicted.
@@ -135,6 +137,7 @@ impl ViewerImpressionHistory {
         Self {
             post_ids: RoaringBitmap::new(),
             timestamps: AHashMap::with_capacity(initial_cap),
+            counts: AHashMap::with_capacity(initial_cap),
             queue: VecDeque::with_capacity(initial_cap),
             max_capacity,
         }
@@ -142,8 +145,23 @@ impl ViewerImpressionHistory {
 
     /// Records an impression for a given post ID at the specified unix timestamp.
     pub fn record_impression(&mut self, post_id: u32, timestamp_secs: u64) {
+        let next_count = if let Some(&prev_ts) = self.timestamps.get(&post_id) {
+            if timestamp_secs.abs_diff(prev_ts) < FATIGUE_WINDOW_SECS {
+                self.counts
+                    .get(&post_id)
+                    .copied()
+                    .unwrap_or(1)
+                    .saturating_add(1)
+                    .min(8)
+            } else {
+                1
+            }
+        } else {
+            1
+        };
         self.post_ids.insert(post_id);
         self.timestamps.insert(post_id, timestamp_secs);
+        self.counts.insert(post_id, next_count);
         self.queue.push_back(ImpressionEntry {
             post_id,
             served_at_secs: timestamp_secs,
@@ -156,6 +174,7 @@ impl ViewerImpressionHistory {
                     if latest_ts <= oldest.served_at_secs {
                         self.timestamps.remove(&oldest.post_id);
                         self.post_ids.remove(oldest.post_id);
+                        self.counts.remove(&oldest.post_id);
                     }
                 }
             }
@@ -169,6 +188,15 @@ impl ViewerImpressionHistory {
             return None;
         }
         self.timestamps.get(&post_id).copied()
+    }
+
+    /// Returns the number of impressions recorded for a post within the active fatigue window.
+    #[must_use]
+    pub fn get_impression_count(&self, post_id: u32) -> u32 {
+        if !self.post_ids.contains(post_id) {
+            return 0;
+        }
+        self.counts.get(&post_id).copied().unwrap_or(1)
     }
 
     /// Checks if a post ID exists in this impression history.
@@ -198,6 +226,7 @@ impl ViewerImpressionHistory {
                         if latest_ts <= oldest.served_at_secs {
                             self.timestamps.remove(&oldest.post_id);
                             self.post_ids.remove(oldest.post_id);
+                            self.counts.remove(&oldest.post_id);
                         }
                     }
                 }
@@ -293,6 +322,46 @@ impl ImpressionStore {
             let recovery = 1.0 - (-((dt as f32) / FATIGUE_TAU_SECS)).exp();
             let multiplier = (1.0 - FATIGUE_MIN_FLOOR).mul_add(recovery, FATIGUE_MIN_FLOOR);
             Some(multiplier.clamp(FATIGUE_MIN_FLOOR, 1.0))
+        }
+    }
+
+    /// Evaluates the fatigue penalty for a candidate post, compounding exponentially across
+    /// repeated impressions within the active fatigue window:
+    ///
+    /// $$\text{Multiplier}(\Delta t, k) = \text{Multiplier}(\Delta t)^k$$
+    ///
+    /// where $k \in [1, 8]$ is the number of times the post has been served to the viewer
+    /// within [`FATIGUE_WINDOW_SECS`]. For a single impression ($k = 1$), this is identical
+    /// to [`ImpressionStore::evaluate_fatigue_penalty`].
+    #[must_use]
+    pub fn evaluate_compounded_fatigue_penalty(
+        &self,
+        viewer_id: u32,
+        post_id: u32,
+        now_secs: u64,
+    ) -> Option<f32> {
+        let shard_idx = Self::shard_index(viewer_id);
+        let guard = self.shards[shard_idx].read();
+        let Some(history) = guard.viewers.get(&viewer_id) else {
+            return Some(1.0);
+        };
+        let Some(served_ts) = history.get_served_timestamp(post_id) else {
+            return Some(1.0);
+        };
+
+        let dt = now_secs.saturating_sub(served_ts);
+        if dt >= FATIGUE_WINDOW_SECS {
+            Some(1.0)
+        } else {
+            let recovery = 1.0 - (-((dt as f32) / FATIGUE_TAU_SECS)).exp();
+            let base_mult = (1.0 - FATIGUE_MIN_FLOOR)
+                .mul_add(recovery, FATIGUE_MIN_FLOOR)
+                .clamp(FATIGUE_MIN_FLOOR, 1.0);
+            let count = history
+                .get_impression_count(post_id)
+                .clamp(1, 8)
+                .cast_signed();
+            Some(base_mult.powi(count))
         }
     }
 
@@ -606,14 +675,43 @@ impl Recommender {
         // 1. Seen / Liked deduplication & Self-post exclusion & Root-only & Engagement Floor filtering
         filter_candidate_pool(&mut candidates);
 
-        // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping)
+        // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping & Unseen-First Ceiling)
         if let Some(uid) = viewer_id {
-            for c in &mut candidates {
-                if let Some(multiplier) = self
+            let mut min_unseen_score: Option<f32> = None;
+            let mut max_fatigued_score: f32 = 0.0;
+            let mut multipliers: Vec<f32> = Vec::with_capacity(candidates.len());
+
+            for c in &candidates {
+                let mult = self
                     .impression_store
-                    .evaluate_fatigue_penalty(uid, c.post_id, now_secs)
+                    .evaluate_compounded_fatigue_penalty(uid, c.post_id, now_secs)
+                    .unwrap_or(1.0);
+                multipliers.push(mult);
+                if mult >= 1.0 {
+                    if c.score > 0.0 {
+                        min_unseen_score =
+                            Some(min_unseen_score.map_or(c.score, |m| m.min(c.score)));
+                    }
+                } else {
+                    let dampened = c.score * mult;
+                    if dampened > max_fatigued_score {
+                        max_fatigued_score = dampened;
+                    }
+                }
+            }
+
+            let ceiling_scale = match min_unseen_score {
+                Some(min_unseen)
+                    if max_fatigued_score >= min_unseen * 0.95 && max_fatigued_score > 0.0 =>
                 {
-                    c.score *= multiplier;
+                    (min_unseen * 0.95) / max_fatigued_score
+                }
+                _ => 1.0,
+            };
+
+            for (c, mult) in candidates.iter_mut().zip(multipliers) {
+                if mult < 1.0 {
+                    c.score *= mult * ceiling_scale;
                 }
             }
 
@@ -1496,7 +1594,7 @@ impl Recommender {
 
                     let fatigue_penalty = self
                         .impression_store
-                        .evaluate_fatigue_penalty(uid, pid, now_secs)
+                        .evaluate_compounded_fatigue_penalty(uid, pid, now_secs)
                         .unwrap_or(0.0);
 
                     let consensus_boost = calculate_consensus_boost(curator_count);
@@ -1600,7 +1698,7 @@ impl Recommender {
 
                     let fatigue_penalty = self
                         .impression_store
-                        .evaluate_fatigue_penalty(uid, pid, now_secs)
+                        .evaluate_compounded_fatigue_penalty(uid, pid, now_secs)
                         .unwrap_or(0.0);
 
                     let taste_similarity = 1.5 * social_proof;
@@ -1663,7 +1761,7 @@ impl Recommender {
 
                 let fatigue_penalty = viewer_id.map_or(1.0, |uid| {
                     self.impression_store
-                        .evaluate_fatigue_penalty(uid, pid, now_secs)
+                        .evaluate_compounded_fatigue_penalty(uid, pid, now_secs)
                         .unwrap_or(0.0)
                 });
 
@@ -1697,6 +1795,35 @@ impl Recommender {
 
         // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter & Root-only & Engagement floor filtering
         filter_preview_pool(&mut candidate_evals);
+
+        // Apply unseen-first fatigue ceiling so already-served posts in the active
+        // fatigue window cannot outrank fresh unseen candidates on feed refresh.
+        let mut min_unseen_score: Option<f32> = None;
+        let mut max_fatigued_score: f32 = 0.0;
+        for c in &candidate_evals {
+            let s = c.score_breakdown.final_score;
+            if c.score_breakdown.fatigue_penalty >= 1.0 {
+                if s > 0.0 {
+                    min_unseen_score = Some(min_unseen_score.map_or(s, |m| m.min(s)));
+                }
+            } else if s > max_fatigued_score {
+                max_fatigued_score = s;
+            }
+        }
+        if let Some(min_unseen) = min_unseen_score {
+            if max_fatigued_score >= min_unseen * 0.95 && max_fatigued_score > 0.0 {
+                let ceiling_scale = (min_unseen * 0.95) / max_fatigued_score;
+                for c in &mut candidate_evals {
+                    if c.score_breakdown.fatigue_penalty < 1.0 {
+                        c.score_breakdown.fatigue_penalty *= ceiling_scale;
+                        c.score_breakdown.final_score = c.score_breakdown.taste_similarity
+                            * c.score_breakdown.time_decay
+                            * c.score_breakdown.topic_boost
+                            * c.score_breakdown.fatigue_penalty;
+                    }
+                }
+            }
+        }
 
         // 2. Sort descending by final_score
         candidate_evals.sort_by(|a, b| {
