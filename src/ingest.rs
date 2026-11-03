@@ -54,7 +54,7 @@ use tracing::{debug, info, trace, warn};
 use crate::error::{FeedError, Result};
 use crate::graph::GraphStore;
 use crate::interner::StringInterner;
-use crate::types::{IngestionVelocityInfo, SignalType, BLUESKY_EPOCH_SECS};
+use crate::types::{IngestionVelocityInfo, SignalType, TopicCategory, BLUESKY_EPOCH_SECS};
 
 /// Default production Jetstream WebSocket endpoint.
 pub const DEFAULT_JETSTREAM_URL: &str = "wss://jetstream1.us-east.bsky.network/subscribe";
@@ -960,6 +960,160 @@ pub fn has_nsfw_self_label(record: &serde_json::Value) -> bool {
     })
 }
 
+const STAGED_TOPIC_SHARDS: usize = 64;
+const MAX_STAGED_TOPICS_PER_SHARD: usize = 2_048;
+
+static STAGED_POST_TOPICS: std::sync::LazyLock<
+    [parking_lot::Mutex<ahash::AHashMap<CompactString, TopicCategory>>; STAGED_TOPIC_SHARDS],
+> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|_| parking_lot::Mutex::new(ahash::AHashMap::new()))
+});
+
+#[inline]
+fn staged_topic_shard_idx(uri: &str) -> usize {
+    let mut h: usize = 5381;
+    for b in uri.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(usize::from(b));
+    }
+    h & (STAGED_TOPIC_SHARDS - 1)
+}
+
+fn stage_post_topic(post_uri: &str, topic: TopicCategory) {
+    let idx = staged_topic_shard_idx(post_uri);
+    let mut guard = STAGED_POST_TOPICS[idx].lock();
+    if guard.len() >= MAX_STAGED_TOPICS_PER_SHARD && !guard.contains_key(post_uri) {
+        if let Some(victim) = guard.keys().next().cloned() {
+            guard.remove(&victim);
+        }
+    }
+    guard.insert(CompactString::new(post_uri), topic);
+}
+
+fn take_staged_post_topic(post_uri: &str) -> Option<TopicCategory> {
+    let idx = staged_topic_shard_idx(post_uri);
+    STAGED_POST_TOPICS[idx].lock().remove(post_uri)
+}
+
+/// Parses an AT Protocol post URI (`at://<author_did>/<collection>/<rkey>`) into `(author_did, rkey)`.
+#[must_use]
+pub fn parse_at_post_uri(uri: &str) -> Option<(&str, &str)> {
+    let rest = uri.strip_prefix("at://")?;
+    let (author_did, after_author) = rest.split_once('/')?;
+    if author_did.is_empty() {
+        return None;
+    }
+    let (_collection, rkey) = after_author.split_once('/')?;
+    let rkey = rkey.split('/').next().unwrap_or(rkey);
+    if rkey.is_empty() {
+        return None;
+    }
+    Some((author_did, rkey))
+}
+
+/// Decodes an AT Protocol 13-character base32-sortable TID into a Unix timestamp in seconds.
+///
+/// Returns `None` if `rkey` is not a valid TID (`234567abcdefghijklmnopqrstuvwxyz`) within a
+/// plausible timestamp range.
+#[must_use]
+pub fn decode_tid_timestamp_secs(rkey: &str) -> Option<u64> {
+    if rkey.len() != 13 {
+        return None;
+    }
+    let mut val: u64 = 0;
+    for b in rkey.bytes() {
+        let digit: u64 = match b {
+            b'2'..=b'7' => u64::from(b - b'2'),
+            b'a'..=b'z' => u64::from(b - b'a') + 6,
+            _ => return None,
+        };
+        val = (val << 5) | digit;
+    }
+    if (val >> 63) != 0 {
+        return None;
+    }
+    let timestamp_us = val >> 10;
+    let timestamp_secs = timestamp_us / 1_000_000;
+    if (BLUESKY_EPOCH_SECS..=4_102_444_800).contains(&timestamp_secs) {
+        Some(timestamp_secs)
+    } else {
+        None
+    }
+}
+
+fn accumulate_topic_tokens(text: &str, weight: u32, scores: &mut [u32; 5]) {
+    let lower = text.to_ascii_lowercase();
+    for token in lower.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(cat) = crate::recommender::match_uri_keywords(token) {
+            scores[cat.to_index()] = scores[cat.to_index()].saturating_add(weight);
+        }
+    }
+}
+
+/// Classifies an `app.bsky.feed.post` JSON record into a [`TopicCategory`].
+///
+/// Inspects explicit hashtags (`tags`, `facets[].features[].tag`), post `text`, link facets, and
+/// external embed metadata (`uri`, `title`, `description`). Returns `None` if no topic domain
+/// keywords match.
+#[must_use]
+pub fn classify_post_record(record: &serde_json::Value) -> Option<TopicCategory> {
+    let mut scores = [0u32; 5];
+
+    // 1. Explicit record tags (weight 2)
+    if let Some(tags) = record.get("tags").and_then(serde_json::Value::as_array) {
+        for tag in tags.iter().filter_map(serde_json::Value::as_str) {
+            accumulate_topic_tokens(tag, 2, &mut scores);
+        }
+    }
+
+    // 2. Richtext facets (#tag weight 2, #link weight 1)
+    if let Some(facets) = record.get("facets").and_then(serde_json::Value::as_array) {
+        for facet in facets {
+            if let Some(features) = facet.get("features").and_then(serde_json::Value::as_array) {
+                for feat in features {
+                    if let Some(tag) = feat.get("tag").and_then(serde_json::Value::as_str) {
+                        accumulate_topic_tokens(tag, 2, &mut scores);
+                    }
+                    if let Some(uri) = feat.get("uri").and_then(serde_json::Value::as_str) {
+                        accumulate_topic_tokens(uri, 1, &mut scores);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Post body text (weight 1)
+    if let Some(text) = record.get("text").and_then(serde_json::Value::as_str) {
+        accumulate_topic_tokens(text, 1, &mut scores);
+    }
+
+    // 4. External embed metadata (weight 1)
+    if let Some(embed) = record.get("embed") {
+        let external = embed
+            .get("external")
+            .or_else(|| embed.get("media").and_then(|media| media.get("external")));
+        if let Some(ext) = external {
+            for field in ["uri", "title", "description"] {
+                if let Some(s) = ext.get(field).and_then(serde_json::Value::as_str) {
+                    accumulate_topic_tokens(s, 1, &mut scores);
+                }
+            }
+        }
+    }
+
+    let mut best_cat: Option<TopicCategory> = None;
+    let mut best_score = 0u32;
+    for (idx, &score) in scores.iter().enumerate() {
+        if score > best_score {
+            best_score = score;
+            best_cat = Some(crate::types::TOPIC_CATEGORIES[idx]);
+        }
+    }
+    best_cat
+}
+
 /// Parses a raw Jetstream JSON string into normalized [`JetstreamEvent`]s and timestamp in microseconds.
 ///
 /// Returns `None` if the frame is malformed JSON, not a commit event, an unwanted collection,
@@ -1048,6 +1202,10 @@ pub fn parse_jetstream_frame(text: &str) -> Option<(Vec<JetstreamEvent>, u64)> {
                 .and_then(serde_json::Value::as_str)
                 .map(CompactString::new);
 
+            if let Some(topic) = classify_post_record(&record) {
+                stage_post_topic(post_uri.as_str(), topic);
+            }
+
             events.push(JetstreamEvent::PostMeta {
                 post_uri,
                 author_did: msg.did.clone(),
@@ -1131,6 +1289,15 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
         } => {
             let uid = interner.intern(user_did);
             let pid = interner.intern(post_uri);
+            if graph.get_post_meta(pid).is_none() {
+                if let Some((author_did, rkey)) = parse_at_post_uri(post_uri) {
+                    let aid = interner.intern(author_did);
+                    let created_at = decode_tid_timestamp_secs(rkey)
+                        .filter(|&ts| ts <= timestamp_secs.saturating_add(3600))
+                        .unwrap_or(*timestamp_secs);
+                    graph.record_post_meta(pid, aid, None, None, created_at);
+                }
+            }
             graph.record_interaction(uid, pid, *signal, *timestamp_secs);
         }
         JetstreamEvent::PostMeta {
@@ -1146,6 +1313,12 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
             let rid = root_uri.as_ref().map(|r| interner.intern(r));
             let paid = parent_uri.as_ref().map(|p| interner.intern(p));
             graph.record_post_meta_with_nsfw(pid, aid, rid, paid, *created_at_secs, *is_nsfw);
+            if let Some(topic) = take_staged_post_topic(post_uri)
+                .or_else(|| crate::recommender::match_creator_seed(author_did))
+                .or_else(|| crate::recommender::match_uri_keywords(post_uri))
+            {
+                graph.record_post_topic(pid, topic);
+            }
         }
         JetstreamEvent::Follow {
             follower_did,
@@ -1160,7 +1333,13 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
             collection,
             rkey,
         } => {
-            // In ATProto Jetstream, record deletions carry the record rkey but omit the target subject URI.
+            if collection == "app.bsky.feed.post" && !did.is_empty() && !rkey.is_empty() {
+                let post_uri = format!("at://{did}/app.bsky.feed.post/{rkey}");
+                if let Some(pid) = interner.lookup_id(&post_uri) {
+                    graph.remove_post(pid);
+                }
+            }
+            // For like/repost/follow deletions, record deletions carry the record rkey but omit the target subject URI.
             // Avoid deleting arbitrary first interactions to prevent graph state drift (SEC-05).
             if let Some(uid) = interner.lookup_id(did) {
                 tracing::trace!(
@@ -2482,5 +2661,76 @@ mod tests {
         let info3 = tracker.get_velocity_info();
         assert!((info3.backfill_progress_percent - 100.0).abs() < 0.1);
         assert!(info3.is_live);
+    }
+
+    #[test]
+    fn test_classify_post_record_and_delete_post_lifecycle() {
+        let interner = StringInterner::new();
+        let graph = GraphStore::new();
+
+        // 1. Parse a post commit frame with non-keyword TID rkey and Rust/Linux text + hashtag
+        let frame = serde_json::json!({
+            "did": "did:plc:z72i7hdynmk6r22z27h6tvur",
+            "time_us": 1_710_000_000_000_000u64,
+            "kind": "commit",
+            "commit": {
+                "operation": "create",
+                "collection": "app.bsky.feed.post",
+                "rkey": "3k2yihcrp6f2c",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "Writing a zero-copy async Rust kernel driver on Linux today",
+                    "tags": ["rustlang", "systems"],
+                    "createdAt": "2024-03-09T16:00:00Z"
+                }
+            }
+        })
+        .to_string();
+
+        let (events, _) = parse_jetstream_frame(&frame).unwrap();
+        assert_eq!(events.len(), 1);
+        for ev in &events {
+            apply_event_to_graph(ev, &interner, &graph);
+        }
+
+        let post_uri = "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post/3k2yihcrp6f2c";
+        let pid = interner.lookup_id(post_uri).unwrap();
+        assert_eq!(graph.get_post_topic(pid), Some(TopicCategory::Tech));
+
+        // 2. Interaction on an older post without a prior PostMeta event synthesizes PostMeta
+        //    from the AT-URI author DID and base32-sortable TID timestamp.
+        let orphan_uri = "at://did:plc:orphan_author/app.bsky.feed.post/3k2yihcrp6f2c";
+        let like_ev = JetstreamEvent::Interaction {
+            user_did: CompactString::new("did:plc:liker"),
+            post_uri: CompactString::new(orphan_uri),
+            signal: SignalType::Like,
+            timestamp_secs: 1_710_000_500,
+        };
+        apply_event_to_graph(&like_ev, &interner, &graph);
+
+        let orphan_pid = interner.lookup_id(orphan_uri).unwrap();
+        let orphan_aid = interner.lookup_id("did:plc:orphan_author").unwrap();
+        let synth_meta = graph.get_post_meta(orphan_pid).unwrap();
+        assert_eq!(synth_meta.author_id, orphan_aid);
+        assert!(synth_meta.created_at >= BLUESKY_EPOCH_SECS);
+
+        // 3. Delete the first post via Jetstream delete commit
+        let del_frame = serde_json::json!({
+            "did": "did:plc:z72i7hdynmk6r22z27h6tvur",
+            "time_us": 1_710_000_600_000_000u64,
+            "kind": "commit",
+            "commit": {
+                "operation": "delete",
+                "collection": "app.bsky.feed.post",
+                "rkey": "3k2yihcrp6f2c"
+            }
+        })
+        .to_string();
+        let (del_events, _) = parse_jetstream_frame(&del_frame).unwrap();
+        for ev in &del_events {
+            apply_event_to_graph(ev, &interner, &graph);
+        }
+        assert!(graph.get_post_meta(pid).is_none());
+        assert!(graph.get_post_topic(pid).is_none());
     }
 }

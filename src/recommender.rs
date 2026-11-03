@@ -235,6 +235,39 @@ impl ViewerImpressionHistory {
             }
         }
     }
+
+    /// Remaps all post IDs in this viewer's impression history according to `id_map`,
+    /// dropping any post IDs not present in `id_map`.
+    pub fn compact(&mut self, id_map: &AHashMap<u32, u32>) {
+        let mut new_post_ids = RoaringBitmap::new();
+        let mut new_timestamps = AHashMap::with_capacity(self.timestamps.len());
+        let mut new_counts = AHashMap::with_capacity(self.counts.len());
+        let mut new_queue = VecDeque::with_capacity(self.queue.len());
+
+        for entry in self.queue.drain(..) {
+            if let Some(&new_pid) = id_map.get(&entry.post_id) {
+                new_queue.push_back(ImpressionEntry {
+                    post_id: new_pid,
+                    served_at_secs: entry.served_at_secs,
+                });
+                new_post_ids.insert(new_pid);
+                if let Some(&ts) = self.timestamps.get(&entry.post_id) {
+                    new_timestamps.insert(new_pid, ts);
+                }
+                if let Some(&cnt) = self.counts.get(&entry.post_id) {
+                    new_counts.insert(new_pid, cnt);
+                }
+            }
+        }
+
+        new_timestamps.shrink_to_fit();
+        new_counts.shrink_to_fit();
+        new_queue.shrink_to_fit();
+        self.post_ids = new_post_ids;
+        self.timestamps = new_timestamps;
+        self.counts = new_counts;
+        self.queue = new_queue;
+    }
 }
 
 /// Single lock shard storing impression histories for a subset of viewers.
@@ -409,6 +442,45 @@ impl ImpressionStore {
     pub fn clear(&self) {
         for shard in &self.shards {
             shard.write().viewers.clear();
+        }
+    }
+
+    /// Collects all viewer IDs and post IDs currently referenced across all impression shards.
+    #[must_use]
+    pub fn collect_referenced_ids(&self) -> RoaringBitmap {
+        let mut ids = RoaringBitmap::new();
+        for shard in &self.shards {
+            let guard = shard.read();
+            for (&viewer_id, history) in &guard.viewers {
+                if !history.is_empty() {
+                    ids.insert(viewer_id);
+                    ids |= &history.post_ids;
+                }
+            }
+        }
+        ids
+    }
+
+    /// Compacts and remaps all viewer IDs and post IDs across all impression shards using `id_map`.
+    pub fn compact(&self, id_map: &AHashMap<u32, u32>) {
+        for (s, shard) in self.shards.iter().enumerate() {
+            {
+                let mut guard = shard.write();
+                let old_viewers = std::mem::take(&mut guard.viewers);
+                let mut new_viewers = AHashMap::with_capacity(old_viewers.len());
+                for (old_uid, mut history) in old_viewers {
+                    if let Some(&new_uid) = id_map.get(&old_uid) {
+                        debug_assert_eq!(Self::shard_index(new_uid), s);
+                        history.compact(id_map);
+                        if !history.is_empty() {
+                            new_viewers.insert(new_uid, history);
+                        }
+                    }
+                }
+                new_viewers.shrink_to_fit();
+                guard.viewers = new_viewers;
+            }
+            std::thread::yield_now();
         }
     }
 
@@ -951,8 +1023,11 @@ impl Recommender {
                                 .unwrap_or_else(|| CompactString::new("unknown"));
                             let created_at =
                                 meta.as_ref().map_or(BLUESKY_EPOCH_SECS, |m| m.created_at);
-                            let category =
-                                classify_post(pid, uri.as_str(), Some(author_did.as_str()));
+                            let category = self.classify_post_with_graph(
+                                pid,
+                                uri.as_str(),
+                                Some(author_did.as_str()),
+                            );
                             *category_counts.entry(category).or_insert(0) += 1;
 
                             shared_posts.push(SharedPostInfo {
@@ -970,7 +1045,11 @@ impl Recommender {
                             let meta = self.graph.get_post_meta(pid);
                             let author_did =
                                 meta.and_then(|m| self.interner.lookup_str(m.author_id));
-                            let category = classify_post(pid, uri.as_str(), author_did.as_deref());
+                            let category = self.classify_post_with_graph(
+                                pid,
+                                uri.as_str(),
+                                author_did.as_deref(),
+                            );
                             *category_counts.entry(category).or_insert(0) += 1;
                         }
                     }
@@ -1029,11 +1108,12 @@ impl Recommender {
             });
         };
 
-        let meta = self.graph.get_post_meta(pid);
-        let author_did = meta
-            .and_then(|m| self.interner.lookup_str(m.author_id))
+        let meta = self.resolve_or_synthesize_post_meta(pid, clean_uri, BLUESKY_EPOCH_SECS);
+        let author_did = self
+            .interner
+            .lookup_str(meta.author_id)
             .unwrap_or_else(|| CompactString::new("unknown"));
-        let topic = classify_post(pid, clean_uri, Some(author_did.as_str()));
+        let topic = self.classify_post_with_graph(pid, clean_uri, Some(author_did.as_str()));
 
         let viewer_id = self.interner.lookup_id(clean_viewer);
         if let Some(vid) = viewer_id {
@@ -1582,14 +1662,13 @@ impl Recommender {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
-                    let Some(meta) = self.graph.get_post_meta(pid) else {
-                        continue;
-                    };
+                    let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                     let author_did = self
                         .interner
                         .lookup_str(meta.author_id)
                         .unwrap_or_else(|| CompactString::new("unknown"));
-                    let topic = classify_post(pid, uri.as_str(), Some(author_did.as_str()));
+                    let topic =
+                        self.classify_post_with_graph(pid, uri.as_str(), Some(author_did.as_str()));
                     let topic_boost = dials.topic_weights.get_weight(topic);
 
                     let fatigue_penalty = self
@@ -1686,14 +1765,13 @@ impl Recommender {
                     let Some(uri) = self.interner.lookup_str(pid) else {
                         continue;
                     };
-                    let Some(meta) = self.graph.get_post_meta(pid) else {
-                        continue;
-                    };
+                    let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                     let author_did = self
                         .interner
                         .lookup_str(meta.author_id)
                         .unwrap_or_else(|| CompactString::new("unknown"));
-                    let topic = classify_post(pid, uri.as_str(), Some(author_did.as_str()));
+                    let topic =
+                        self.classify_post_with_graph(pid, uri.as_str(), Some(author_did.as_str()));
                     let topic_boost = dials.topic_weights.get_weight(topic);
 
                     let fatigue_penalty = self
@@ -1748,15 +1826,13 @@ impl Recommender {
                 let Some(uri) = self.interner.lookup_str(pid) else {
                     continue;
                 };
-                let meta = self
-                    .graph
-                    .get_post_meta(pid)
-                    .unwrap_or_else(|| PostMeta::new(0, None, None, now_secs));
+                let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                 let author_did = self
                     .interner
                     .lookup_str(meta.author_id)
                     .unwrap_or_else(|| CompactString::new("unknown"));
-                let topic = classify_post(pid, uri.as_str(), Some(author_did.as_str()));
+                let topic =
+                    self.classify_post_with_graph(pid, uri.as_str(), Some(author_did.as_str()));
                 let topic_boost = dials.topic_weights.get_weight(topic);
 
                 let fatigue_penalty = viewer_id.map_or(1.0, |uid| {
@@ -2017,9 +2093,10 @@ impl Recommender {
             .into_iter()
             .filter_map(|(pid, (curator_count, total_affinity))| {
                 let uri = self.interner.lookup_str(pid)?;
-                let meta = self.graph.get_post_meta(pid)?;
+                let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                 let author_str = self.interner.lookup_str(meta.author_id);
-                let category = classify_post(pid, uri.as_str(), author_str.as_deref());
+                let category =
+                    self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
                 let topic_boost = dials.topic_weights.get_weight(category);
                 let consensus_boost = calculate_consensus_boost(curator_count);
                 let social_proof =
@@ -2082,9 +2159,10 @@ impl Recommender {
             .into_iter()
             .filter_map(|(pid, raw_score)| {
                 let uri = self.interner.lookup_str(pid)?;
-                let meta = self.graph.get_post_meta(pid)?;
+                let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                 let author_str = self.interner.lookup_str(meta.author_id);
-                let category = classify_post(pid, uri.as_str(), author_str.as_deref());
+                let category =
+                    self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
                 let topic_boost = dials.topic_weights.get_weight(category);
                 let score = raw_score * topic_boost;
                 Some(ScoredPost {
@@ -2107,11 +2185,60 @@ impl Recommender {
         scored
     }
 
-    /// Classifies a post into its [`TopicCategory`] using creator seeds, URI keywords, or deterministic hash fallback.
+    /// Classifies a post into its [`TopicCategory`], consulting the graph's ingest-time
+    /// content classification (`post_topics`) first before falling back to creator seeds,
+    /// URI keywords, or deterministic hash partitioning.
+    #[must_use]
+    pub fn classify_post_with_graph(
+        &self,
+        post_id: u32,
+        uri: &str,
+        author_str: Option<&str>,
+    ) -> TopicCategory {
+        if let Some(topic) = self.graph.get_post_topic(post_id) {
+            return topic;
+        }
+        classify_post(post_id, uri, author_str)
+    }
+
+    /// Classifies a post into its [`TopicCategory`] using ingest-time graph topic, creator seeds,
+    /// URI keywords, or deterministic hash fallback.
     #[must_use]
     pub fn classify_post_by_id(&self, post_id: u32, uri: &str, author_id: u32) -> TopicCategory {
+        if let Some(topic) = self.graph.get_post_topic(post_id) {
+            return topic;
+        }
         let author_str = self.interner.lookup_str(author_id);
         classify_post(post_id, uri, author_str.as_deref())
+    }
+
+    /// Resolves `PostMeta` from the graph, or synthesizes a valid `PostMeta` from the post AT-URI
+    /// (`at://<author_did>/app.bsky.feed.post/<rkey>`) when interaction events arrived before or
+    /// without the corresponding post creation event.
+    ///
+    /// Never uses `author_id = 0` as a fallback sentinel (which would collide with the first
+    /// interned entity in shard 0); if the URI does not contain an `at://` authority, uses a
+    /// unique per-post high-bit sentinel `u32::MAX ^ pid`.
+    #[must_use]
+    pub fn resolve_or_synthesize_post_meta(
+        &self,
+        pid: u32,
+        uri: &str,
+        fallback_now_secs: u64,
+    ) -> PostMeta {
+        if let Some(meta) = self.graph.get_post_meta(pid) {
+            return meta;
+        }
+        if let Some((author_did, rkey)) = crate::ingest::parse_at_post_uri(uri) {
+            let author_id = self.interner.intern(author_did);
+            let created_at =
+                crate::ingest::decode_tid_timestamp_secs(rkey).unwrap_or(fallback_now_secs);
+            PostMeta::new(author_id, None, None, created_at)
+        } else {
+            // Distinct high-bit sentinel per post ID so synthetic test URIs never collide with
+            // shard-0 interned ID 0 or with each other under the 2-posts-per-author cap.
+            PostMeta::new(u32::MAX ^ pid, None, None, fallback_now_secs)
+        }
     }
 
     /// Retrieves candidates from the Tier 3 global 6-hour high-velocity sliding pool
@@ -2129,21 +2256,18 @@ impl Recommender {
                     continue;
                 }
             }
-            let meta = self
-                .graph
-                .get_post_meta(pid)
-                .unwrap_or_else(|| PostMeta::new(0, None, None, now_secs));
+            let Some(uri) = self.interner.lookup_str(pid) else {
+                continue;
+            };
+            let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
             if !dials.include_replies && meta.is_reply() {
                 continue;
             }
             if dials.no_nsfw && meta.is_nsfw() {
                 continue;
             }
-            let Some(uri) = self.interner.lookup_str(pid) else {
-                continue;
-            };
             let author_str = self.interner.lookup_str(meta.author_id);
-            let category = classify_post(pid, uri.as_str(), author_str.as_deref());
+            let category = self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
 
             let topic_boost = dials.topic_weights.get_weight(category);
             let score = (100.0 / (idx as f32 + 1.0)) * topic_boost;

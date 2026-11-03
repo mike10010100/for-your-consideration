@@ -69,15 +69,35 @@ pub const DID_KEY_CACHE_SHARDS: usize = 64;
 /// Default PLC directory endpoint used for `did:plc` resolution.
 pub const DEFAULT_PLC_DIRECTORY_URL: &str = "https://plc.directory";
 
-/// Multikey varint prefix for secp256k1 compressed public keys (`0xe7` encodes
-/// key type 103).
+/// Multikey 2-byte unsigned varint prefix for secp256k1 compressed public keys (`0xe7` = `[0xe7, 0x01]`, `zQ3sh...`).
+pub const MULTIKEY_SECP256K1_VARINT: [u8; 2] = [0xe7, 0x01];
+
+/// Legacy 1-byte prefix for secp256k1 compressed public keys (`0xe7`).
 const MULTIKEY_SECP256K1_PREFIX: u8 = 0xe7;
 
-/// Length in bytes of a compressed secp256k1 public key.
+/// Multikey 2-byte unsigned varint prefix for NIST P-256 compressed public keys (`0x1200` = `[0x80, 0x24]`, `zDna...`).
+pub const MULTIKEY_P256_VARINT: [u8; 2] = [0x80, 0x24];
+
+/// Length in bytes of a compressed SEC1 elliptic-curve public key (secp256k1 or P-256).
 const COMPRESSED_SECP256K1_KEY_LEN: usize = 33;
 
-/// JOSE `alg` value required for `ATProto` Service Auth JWTs.
+/// Primary JOSE `alg` value used for `ATProto` Service Auth JWTs (`secp256k1`).
 pub const REQUIRED_SERVICE_AUTH_ALG: &str = "ES256K";
+
+/// Secondary JOSE `alg` value permitted by the `ATProto` Cryptography Specification (`P-256`).
+pub const P256_SERVICE_AUTH_ALG: &str = "ES256";
+
+/// Maximum entries per shard in [`DidKeyCache`] before expired-first / FIFO eviction.
+pub const MAX_DID_KEY_CACHE_PER_SHARD: usize = 512;
+
+/// Verified `ATProto` signing key extracted from a DID document's `#atproto` verification method.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AtprotoVerifyingKey {
+    /// secp256k1 verifying key (`ES256K`, multicodec `0xe7` / varint `[0xe7, 0x01]`).
+    Secp256k1(VerifyingKey),
+    /// NIST P-256 verifying key (`ES256`, multicodec `0x1200` / varint `[0x80, 0x24]`).
+    P256(p256::ecdsa::VerifyingKey),
+}
 
 /// Raw JOSE header fields of a Service Auth JWT.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -92,8 +112,10 @@ pub struct ServiceJwtHeader {
 /// A cached, validated issuer signing key with its resolution timestamp.
 #[derive(Clone, Debug)]
 pub struct CachedSigningKey {
-    /// The verified secp256k1 verifying key extracted from the DID document.
-    pub verifying_key: Arc<VerifyingKey>,
+    /// The verified secp256k1 verifying key extracted from the DID document (when curve is secp256k1).
+    pub verifying_key: Option<Arc<VerifyingKey>>,
+    /// The curve-typed `ATProto` verifying key (`Secp256k1` or `P256`).
+    pub atproto_key: Arc<AtprotoVerifyingKey>,
     /// Unix timestamp (seconds) when this key was resolved and cached.
     pub resolved_at_secs: u64,
 }
@@ -128,7 +150,7 @@ impl DidKeyCache {
         (crc32fast::hash(did.as_bytes()) as usize) & (DID_KEY_CACHE_SHARDS - 1)
     }
 
-    /// Returns the cached verifying key for `did` if present and unexpired.
+    /// Returns the cached secp256k1 verifying key for `did` if present and unexpired.
     #[must_use]
     pub fn get(&self, did: &str, now_secs: u64) -> Option<Arc<VerifyingKey>> {
         let shard = &self.shards[Self::shard_idx(did)];
@@ -137,17 +159,52 @@ impl DidKeyCache {
         if now_secs.saturating_sub(entry.resolved_at_secs) >= self.ttl_secs {
             return None;
         }
-        Some(Arc::clone(&entry.verifying_key))
+        entry.verifying_key.as_ref().map(Arc::clone)
     }
 
-    /// Inserts a resolved verifying key for `did`.
+    /// Returns the cached curve-typed `ATProto` verifying key (`Secp256k1` or `P256`) for `did` if present and unexpired.
+    #[must_use]
+    pub fn get_atproto_key(&self, did: &str, now_secs: u64) -> Option<Arc<AtprotoVerifyingKey>> {
+        let shard = &self.shards[Self::shard_idx(did)];
+        let guard = shard.read();
+        let entry = guard.get(did)?;
+        if now_secs.saturating_sub(entry.resolved_at_secs) >= self.ttl_secs {
+            return None;
+        }
+        Some(Arc::clone(&entry.atproto_key))
+    }
+
+    /// Inserts a resolved secp256k1 verifying key for `did`.
     pub fn insert(&self, did: &str, key: VerifyingKey, now_secs: u64) {
+        self.insert_atproto_key(did, AtprotoVerifyingKey::Secp256k1(key), now_secs);
+    }
+
+    /// Inserts a resolved curve-typed `ATProto` verifying key for `did`, bounding shard growth.
+    pub fn insert_atproto_key(&self, did: &str, key: AtprotoVerifyingKey, now_secs: u64) {
         let shard = &self.shards[Self::shard_idx(did)];
         let mut guard = shard.write();
+        if guard.len() >= MAX_DID_KEY_CACHE_PER_SHARD && !guard.contains_key(did) {
+            let ttl = self.ttl_secs;
+            guard.retain(|_, v| now_secs.saturating_sub(v.resolved_at_secs) < ttl);
+            if guard.len() >= MAX_DID_KEY_CACHE_PER_SHARD {
+                if let Some(oldest_did) = guard
+                    .iter()
+                    .min_by_key(|(_, v)| v.resolved_at_secs)
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.remove(&oldest_did);
+                }
+            }
+        }
+        let verifying_key = match &key {
+            AtprotoVerifyingKey::Secp256k1(k) => Some(Arc::new(*k)),
+            AtprotoVerifyingKey::P256(_) => None,
+        };
         guard.insert(
             CompactString::new(did),
             CachedSigningKey {
-                verifying_key: Arc::new(key),
+                verifying_key,
+                atproto_key: Arc::new(key),
                 resolved_at_secs: now_secs,
             },
         );
@@ -189,7 +246,7 @@ pub struct ServiceAuthVerifier {
     /// Exact-match test DIDs registered for offline use. Compile-gated to debug
     /// builds only; release binaries never consult this table.
     #[cfg(debug_assertions)]
-    test_keys: Arc<RwLock<ahash::AHashMap<CompactString, VerifyingKey>>>,
+    test_keys: Arc<RwLock<ahash::AHashMap<CompactString, AtprotoVerifyingKey>>>,
 }
 
 impl std::fmt::Debug for ServiceAuthVerifier {
@@ -224,11 +281,40 @@ impl ServiceAuthVerifier {
         }
     }
 
-    /// Registers an exact-match test DID with a signing key for offline
+    /// Creates a verifier pointing at a custom PLC directory URL, optionally permitting
+    /// insecure `http://127.0.0.1` local test servers.
+    #[must_use]
+    pub fn with_plc_url(plc_url: impl Into<String>, allow_insecure_localhost: bool) -> Self {
+        let resolver = skyauth::identity::IdentityResolverBuilder::new()
+            .allow_insecure_localhost(allow_insecure_localhost)
+            .plc_directory_url(plc_url)
+            .build();
+        Self::with_resolver(Arc::new(resolver))
+    }
+
+    /// Registers an exact-match test DID with a secp256k1 signing key for offline
     /// verification. Only exists in debug builds; release binaries cannot
     /// bypass signature verification through this path.
     #[cfg(debug_assertions)]
     pub fn register_test_key(&self, did: &str, key: VerifyingKey) {
+        self.test_keys
+            .write()
+            .insert(CompactString::new(did), AtprotoVerifyingKey::Secp256k1(key));
+    }
+
+    /// Registers an exact-match test DID with a NIST P-256 signing key for offline
+    /// `ES256` verification. Only exists in debug builds.
+    #[cfg(debug_assertions)]
+    pub fn register_test_p256_key(&self, did: &str, key: p256::ecdsa::VerifyingKey) {
+        self.test_keys
+            .write()
+            .insert(CompactString::new(did), AtprotoVerifyingKey::P256(key));
+    }
+
+    /// Registers an exact-match test DID with an [`AtprotoVerifyingKey`] for offline
+    /// verification. Only exists in debug builds.
+    #[cfg(debug_assertions)]
+    pub fn register_test_atproto_key(&self, did: &str, key: AtprotoVerifyingKey) {
         self.test_keys.write().insert(CompactString::new(did), key);
     }
 
@@ -240,9 +326,8 @@ impl ServiceAuthVerifier {
 
     /// Extracts the secp256k1 verifying key from an `ATProto` DID document.
     ///
-    /// Accepts the standard `Multikey` encoding (`0xe7 || compressed key`) and
-    /// rejects any other key type/prefix so an attacker cannot substitute a
-    /// P-256 or RSA key into a document and force algorithm confusion.
+    /// Accepts the standard 2-byte unsigned varint `Multikey` encoding (`[0xe7, 0x01] || 33-byte SEC1 key`,
+    /// 35 bytes total, `zQ3sh...`) as well as the legacy 1-byte `[0xe7] || 33-byte SEC1 key` (34 bytes).
     ///
     /// # Errors
     ///
@@ -250,6 +335,22 @@ impl ServiceAuthVerifier {
     /// verification method, the multibase payload is malformed, or the key is
     /// not a secp256k1 compressed key.
     pub fn extract_signing_key_from_document(doc: &DidDocument) -> Result<VerifyingKey> {
+        match Self::extract_atproto_key_from_document(doc)? {
+            AtprotoVerifyingKey::Secp256k1(key) => Ok(key),
+            AtprotoVerifyingKey::P256(_) => Err(FeedError::Auth(format!(
+                "Verification method in '{}' is a P-256 Multikey, not a secp256k1 Multikey",
+                doc.id
+            ))),
+        }
+    }
+
+    /// Extracts either a `secp256k1` (`[0xe7, 0x01]` / `[0xe7]`) or `P-256` (`[0x80, 0x24]`)
+    /// compressed public key from an `ATProto` DID document's `#atproto` verification method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FeedError::Auth`] when `#atproto` is missing, malformed, or uses an unsupported curve.
+    pub fn extract_atproto_key_from_document(doc: &DidDocument) -> Result<AtprotoVerifyingKey> {
         let method = doc.extract_signing_key().ok_or_else(|| {
             FeedError::Auth(format!(
                 "DID document '{}' has no #atproto verification method",
@@ -266,45 +367,84 @@ impl ServiceAuthVerifier {
 
         let key_bytes = decode_multikey(raw)?;
 
-        if key_bytes.first().copied() != Some(MULTIKEY_SECP256K1_PREFIX)
-            || key_bytes.len() != 1 + COMPRESSED_SECP256K1_KEY_LEN
+        // 1. Standard 2-byte unsigned varint secp256k1-pub ([0xe7, 0x01] + 33-byte SEC1 key = 35 bytes)
+        if key_bytes.starts_with(&MULTIKEY_SECP256K1_VARINT)
+            && key_bytes.len() == MULTIKEY_SECP256K1_VARINT.len() + COMPRESSED_SECP256K1_KEY_LEN
         {
-            return Err(FeedError::Auth(format!(
-                "Verification method '{}' is not a secp256k1 Multikey (len {}, prefix {:?})",
-                method.id,
-                key_bytes.len(),
-                key_bytes.first().copied()
-            )));
+            let key = VerifyingKey::from_sec1_bytes(&key_bytes[2..]).map_err(|e| {
+                FeedError::Auth(format!(
+                    "Invalid secp256k1 public key in '{}': {e}",
+                    method.id
+                ))
+            })?;
+            return Ok(AtprotoVerifyingKey::Secp256k1(key));
         }
 
-        VerifyingKey::from_sec1_bytes(&key_bytes[1..]).map_err(|e| {
-            FeedError::Auth(format!(
-                "Invalid secp256k1 public key in '{}': {e}",
-                method.id
-            ))
-        })
+        // 2. Legacy 1-byte [0xe7] + 33-byte SEC1 key = 34 bytes
+        if key_bytes.first().copied() == Some(MULTIKEY_SECP256K1_PREFIX)
+            && key_bytes.len() == 1 + COMPRESSED_SECP256K1_KEY_LEN
+        {
+            let key = VerifyingKey::from_sec1_bytes(&key_bytes[1..]).map_err(|e| {
+                FeedError::Auth(format!(
+                    "Invalid secp256k1 public key in '{}': {e}",
+                    method.id
+                ))
+            })?;
+            return Ok(AtprotoVerifyingKey::Secp256k1(key));
+        }
+
+        // 3. Standard 2-byte unsigned varint p256-pub ([0x80, 0x24] + 33-byte SEC1 key = 35 bytes)
+        if key_bytes.starts_with(&MULTIKEY_P256_VARINT)
+            && key_bytes.len() == MULTIKEY_P256_VARINT.len() + COMPRESSED_SECP256K1_KEY_LEN
+        {
+            let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key_bytes[2..]).map_err(|e| {
+                FeedError::Auth(format!("Invalid P-256 public key in '{}': {e}", method.id))
+            })?;
+            return Ok(AtprotoVerifyingKey::P256(key));
+        }
+
+        Err(FeedError::Auth(format!(
+            "Verification method '{}' is not a secp256k1 or P-256 Multikey (len {}, prefix {:?})",
+            method.id,
+            key_bytes.len(),
+            key_bytes.get(..2).unwrap_or(&key_bytes)
+        )))
     }
 
-    /// Resolves (with cache) the signing key for the issuer DID.
+    /// Resolves (with cache) the secp256k1 signing key for the issuer DID.
     ///
     /// # Errors
     ///
     /// Returns [`FeedError::Auth`] if the DID is invalid, unresolvable, or its
-    /// document lacks a usable signing key.
+    /// document lacks a usable secp256k1 signing key.
     pub async fn resolve_signing_key(&self, did: &str, now_secs: u64) -> Result<Arc<VerifyingKey>> {
+        match &*self.resolve_atproto_key(did, now_secs).await? {
+            AtprotoVerifyingKey::Secp256k1(key) => Ok(Arc::new(*key)),
+            AtprotoVerifyingKey::P256(_) => Err(FeedError::Auth(format!(
+                "DID '{did}' uses a P-256 signing key, not secp256k1"
+            ))),
+        }
+    }
+
+    /// Resolves (with cache) the curve-typed `ATProto` signing key (`Secp256k1` or `P256`) for `did`.
+    pub async fn resolve_atproto_key(
+        &self,
+        did: &str,
+        now_secs: u64,
+    ) -> Result<Arc<AtprotoVerifyingKey>> {
         if !is_valid_did(did) {
             return Err(FeedError::Auth(format!("Invalid issuer DID: '{did}'")));
         }
 
-        // 1. Cache fast path (no lock across the await: get() clones the Arc).
-        if let Some(key) = self.key_cache.get(did, now_secs) {
+        // 1. Cache fast path (no lock across the await: get_atproto_key() clones the Arc).
+        if let Some(key) = self.key_cache.get_atproto_key(did, now_secs) {
             return Ok(key);
         }
 
         // 2. Debug-only exact-match test table (never compiled into release).
         #[cfg(debug_assertions)]
         if let Some(key) = self.test_keys.read().get(did) {
-            return Ok(Arc::new(*key));
+            return Ok(Arc::new(key.clone()));
         }
 
         // 3. Live resolution (PLC directory / did:web), SSRF-filtered.
@@ -314,8 +454,9 @@ impl ServiceAuthVerifier {
             .await
             .map_err(|e| FeedError::Auth(format!("DID resolution failed for '{did}': {e}")))?;
 
-        let key = Self::extract_signing_key_from_document(&doc)?;
-        self.key_cache.insert(did, key, now_secs);
+        let key = Self::extract_atproto_key_from_document(&doc)?;
+        self.key_cache
+            .insert_atproto_key(did, key.clone(), now_secs);
         Ok(Arc::new(key))
     }
 
@@ -323,7 +464,7 @@ impl ServiceAuthVerifier {
     ///
     /// Checks, in order:
     /// 1. Bearer prefix and 3-segment JWT shape.
-    /// 2. `alg = ES256K` (algorithm-confusion defense).
+    /// 2. `alg = ES256K` or `alg = ES256` (strict curve-bound algorithm-confusion defense).
     /// 3. Signature over `header.payload` against the issuer's DID-document key.
     /// 4. Expiration with RFC 7519 §4.1.4 leeway.
     /// 5. Audience match (when `expected_audience` is provided).
@@ -368,15 +509,15 @@ impl ServiceAuthVerifier {
             return Err(FeedError::Auth("Too many segments in JWT".to_string()));
         }
 
-        // Algorithm pinning: reject anything but ES256K before touching the payload.
+        // Algorithm pinning: reject anything except ES256K or ES256 before touching the payload.
         let header_bytes = URL_SAFE_NO_PAD
             .decode(header_b64)
             .map_err(|e| FeedError::Auth(format!("JWT header base64 decode error: {e}")))?;
         let header: ServiceJwtHeader = serde_json::from_slice(&header_bytes)
             .map_err(|e| FeedError::Auth(format!("JWT header parse error: {e}")))?;
-        if header.alg != REQUIRED_SERVICE_AUTH_ALG {
+        if header.alg != REQUIRED_SERVICE_AUTH_ALG && header.alg != P256_SERVICE_AUTH_ALG {
             return Err(FeedError::Auth(format!(
-                "Unsupported JWT algorithm '{}': ATProto Service Auth requires {REQUIRED_SERVICE_AUTH_ALG}",
+                "Unsupported JWT algorithm '{}': ATProto Service Auth requires {REQUIRED_SERVICE_AUTH_ALG} or {P256_SERVICE_AUTH_ALG}",
                 header.alg
             )));
         }
@@ -394,10 +535,7 @@ impl ServiceAuthVerifier {
             })?
             .to_string();
 
-        let signing_key = match self.resolve_signing_key(&issuer, now_secs).await {
-            Ok(key) => key,
-            Err(err) => return Err(err),
-        };
+        let signing_key = self.resolve_atproto_key(&issuer, now_secs).await?;
 
         // Signature over the ASCII `header.payload` signing input.
         let signing_input = format!("{header_b64}.{payload_b64}");
@@ -405,13 +543,34 @@ impl ServiceAuthVerifier {
         let signature_bytes = URL_SAFE_NO_PAD
             .decode(signature_b64)
             .map_err(|e| FeedError::Auth(format!("JWT signature base64 decode error: {e}")))?;
-        let signature = Signature::from_slice(&signature_bytes)
-            .map_err(|_| FeedError::Auth("Malformed ECDSA signature encoding".to_string()))?;
 
-        if signing_key
-            .verify(signing_input.as_bytes(), &signature)
-            .is_err()
-        {
+        let sig_ok = match (&*signing_key, header.alg.as_str()) {
+            (AtprotoVerifyingKey::Secp256k1(vk), REQUIRED_SERVICE_AUTH_ALG) => {
+                let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
+                    FeedError::Auth("Malformed ECDSA signature encoding".to_string())
+                })?;
+                vk.verify(signing_input.as_bytes(), &signature).is_ok()
+            }
+            (AtprotoVerifyingKey::P256(vk), P256_SERVICE_AUTH_ALG) => {
+                let signature =
+                    p256::ecdsa::Signature::from_slice(&signature_bytes).map_err(|_| {
+                        FeedError::Auth("Malformed P-256 ECDSA signature encoding".to_string())
+                    })?;
+                vk.verify(signing_input.as_bytes(), &signature).is_ok()
+            }
+            (AtprotoVerifyingKey::Secp256k1(_), other_alg) => {
+                return Err(FeedError::Auth(format!(
+                    "Unsupported JWT algorithm '{other_alg}' for secp256k1 DID key: requires {REQUIRED_SERVICE_AUTH_ALG}"
+                )));
+            }
+            (AtprotoVerifyingKey::P256(_), other_alg) => {
+                return Err(FeedError::Auth(format!(
+                    "Unsupported JWT algorithm '{other_alg}' for P-256 DID key: requires {P256_SERVICE_AUTH_ALG}"
+                )));
+            }
+        };
+
+        if !sig_ok {
             // A failed signature against a cached key may mean the DID document was
             // rotated: drop the cache entry so the next request re-resolves.
             self.key_cache.invalidate(&issuer);
@@ -640,32 +799,125 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_signing_key_from_document() {
+    fn test_extract_signing_key_from_document_2byte_varint_and_legacy() {
         let signing = SigningKey::from_bytes(&[9u8; 32].into()).unwrap();
         let verifying = signing.verifying_key();
         let compressed_bytes = verifying.to_sec1_point(true);
         let compressed = compressed_bytes.as_bytes();
-        let multikey_bytes = [vec![MULTIKEY_SECP256K1_PREFIX], compressed.to_vec()].concat();
-        let multibase = format!("z{}", test_bs58_encode(&multikey_bytes));
 
-        let doc_json = serde_json::json!({
+        // 1. Real-world ATProto 2-byte multicodec varint [0xe7, 0x01] + 33-byte SEC1 (35 bytes total, zQ3sh...)
+        let multikey_2byte = [MULTIKEY_SECP256K1_VARINT.to_vec(), compressed.to_vec()].concat();
+        assert_eq!(multikey_2byte.len(), 35);
+        let multibase_2byte = format!("z{}", test_bs58_encode(&multikey_2byte));
+        assert!(
+            multibase_2byte.starts_with("zQ3sh"),
+            "35-byte secp256k1 multikey should start with zQ3sh, got {multibase_2byte}"
+        );
+
+        let doc_2byte: DidDocument = serde_json::from_value(serde_json::json!({
+            "id": "did:plc:example_real",
+            "verificationMethod": [{
+                "id": "did:plc:example_real#atproto",
+                "type": "Multikey",
+                "controller": "did:plc:example_real",
+                "publicKeyMultibase": multibase_2byte
+            }],
+            "service": []
+        }))
+        .unwrap();
+
+        let extracted_2byte =
+            ServiceAuthVerifier::extract_signing_key_from_document(&doc_2byte).unwrap();
+        assert_eq!(
+            extracted_2byte.to_sec1_point(true).as_bytes(),
+            compressed,
+            "2-byte varint [0xe7, 0x01] secp256k1 key must round-trip"
+        );
+
+        // 2. Legacy 1-byte [0xe7] + 33-byte SEC1 (34 bytes total)
+        let multikey_legacy = [vec![MULTIKEY_SECP256K1_PREFIX], compressed.to_vec()].concat();
+        let multibase_legacy = format!("z{}", test_bs58_encode(&multikey_legacy));
+        let doc_legacy: DidDocument = serde_json::from_value(serde_json::json!({
             "id": "did:plc:example",
             "verificationMethod": [{
                 "id": "#atproto",
                 "type": "Multikey",
                 "controller": "did:plc:example",
-                "publicKeyMultibase": multibase
+                "publicKeyMultibase": multibase_legacy
             }],
             "service": []
-        });
-        let doc: DidDocument = serde_json::from_value(doc_json).unwrap();
+        }))
+        .unwrap();
 
-        let extracted = ServiceAuthVerifier::extract_signing_key_from_document(&doc).unwrap();
+        let extracted =
+            ServiceAuthVerifier::extract_signing_key_from_document(&doc_legacy).unwrap();
         assert_eq!(
             extracted.to_sec1_point(true).as_bytes(),
             compressed,
             "round-tripped key must match"
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn test_p256_es256_multikey_extract_and_verify() {
+        let p256_signing = p256::ecdsa::SigningKey::from_bytes(&[11u8; 32].into()).unwrap();
+        let p256_verifying = p256_signing.verifying_key();
+        let compressed_point = p256_verifying.to_sec1_point(true);
+        let compressed = compressed_point.as_bytes();
+        let multikey_bytes = [MULTIKEY_P256_VARINT.to_vec(), compressed.to_vec()].concat();
+        assert_eq!(multikey_bytes.len(), 35);
+        let multibase = format!("z{}", test_bs58_encode(&multikey_bytes));
+        assert!(
+            multibase.starts_with("zDna"),
+            "35-byte P-256 multikey should start with zDna, got {multibase}"
+        );
+
+        let doc: DidDocument = serde_json::from_value(serde_json::json!({
+            "id": "did:plc:p256_actor",
+            "verificationMethod": [{
+                "id": "did:plc:p256_actor#atproto",
+                "type": "Multikey",
+                "controller": "did:plc:p256_actor",
+                "publicKeyMultibase": multibase
+            }],
+            "service": []
+        }))
+        .unwrap();
+
+        let extracted = ServiceAuthVerifier::extract_atproto_key_from_document(&doc).unwrap();
+        assert_eq!(extracted, AtprotoVerifyingKey::P256(*p256_verifying));
+
+        let verifier = ServiceAuthVerifier::new();
+        let did = "did:plc:p256_actor";
+        verifier.register_test_atproto_key(did, extracted);
+
+        let now = now_secs().cast_signed();
+        let header = encode_segment(&serde_json::json!({"alg": "ES256", "typ": "JWT"}));
+        let payload = encode_segment(&serde_json::json!({
+            "iss": did,
+            "sub": did,
+            "aud": "did:web:feed.example.com",
+            "exp": now + 3600,
+            "iat": now,
+            "lxm": "app.bsky.feed.getFeedSkeleton"
+        }));
+        let signing_input = format!("{header}.{payload}");
+        let sig: p256::ecdsa::Signature = p256_signing.sign(signing_input.as_bytes());
+        let jwt = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(sig.to_bytes().as_slice())
+        );
+
+        let verified = verifier
+            .verify_service_jwt(
+                &format!("Bearer {jwt}"),
+                Some("did:web:feed.example.com"),
+                now_secs(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verified.as_str(), did);
     }
 
     // Relies on the `#[cfg(debug_assertions)]`-only `register_test_key` fast path, so this
@@ -706,11 +958,11 @@ mod tests {
 
     #[test]
     fn test_algorithm_confusion_rejected() {
-        // HS256 / none / ES256 headers must be rejected before signature work.
+        // HS256 / none / RS256 headers must be rejected before signature work.
         let verifier = ServiceAuthVerifier::new();
         let now = now_secs();
 
-        for alg in ["HS256", "none", "ES256", "RS256"] {
+        for alg in ["HS256", "none", "RS256", "EdDSA"] {
             let header = encode_segment(&serde_json::json!({"alg": alg, "typ": "JWT"}));
             let payload = encode_segment(&serde_json::json!({
                 "iss": "did:plc:alg_confusion",
@@ -725,6 +977,39 @@ mod tests {
             assert!(
                 msg.contains("ES256K") || msg.contains("Unsupported JWT algorithm"),
                 "alg {alg} rejection must name the algorithm, got: {msg}"
+            );
+        }
+
+        // Cross-curve confusion (ES256 header against secp256k1 key, or ES256K header against P-256 key)
+        // must also be rejected strictly.
+        #[cfg(debug_assertions)]
+        {
+            let k256_signing = SigningKey::from_bytes(&[77u8; 32].into()).unwrap();
+            let k256_did = "did:plc:k256_actor";
+            verifier.register_test_key(k256_did, *k256_signing.verifying_key());
+
+            let es256_header = encode_segment(&serde_json::json!({"alg": "ES256", "typ": "JWT"}));
+            let k256_payload = encode_segment(&serde_json::json!({
+                "iss": k256_did,
+                "exp": now + 3600
+            }));
+            let sig: Signature =
+                k256_signing.sign(format!("{es256_header}.{k256_payload}").as_bytes());
+            let confused_jwt = format!(
+                "{es256_header}.{k256_payload}.{}",
+                URL_SAFE_NO_PAD.encode(sig.to_bytes().as_slice())
+            );
+            let res =
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(verifier.verify_service_jwt(
+                        &format!("Bearer {confused_jwt}"),
+                        None,
+                        now,
+                    ));
+            assert!(
+                res.is_err(),
+                "ES256 header with secp256k1 key must be rejected"
             );
         }
     }

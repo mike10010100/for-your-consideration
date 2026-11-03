@@ -370,6 +370,7 @@ async fn main() -> Result<()> {
         let boot_interner = Arc::clone(&interner);
         let boot_graph = Arc::clone(&graph);
         let boot_preferences = Arc::clone(&preferences_store);
+        let boot_impressions = Arc::clone(&recommender.impression_store);
         let boot_snapshot_path = snapshot_config.path.clone();
         let boot_snapshot_tracker = Arc::clone(&snapshot_tracker);
         let boot_hydration_completed = Arc::clone(&hydration_completed);
@@ -487,15 +488,17 @@ async fn main() -> Result<()> {
                 let compact_interner = Arc::clone(&boot_interner);
                 let compact_graph = Arc::clone(&boot_graph);
                 let compact_preferences = Arc::clone(&boot_preferences);
+                let compact_impressions = Arc::clone(&boot_impressions);
                 let compact_slot = Arc::clone(&boot_save_slot);
                 let compact_baseline = Arc::clone(&boot_baseline_strings);
                 tokio::spawn(async move {
                     let compact_res = tokio::task::spawn_blocking(move || {
                         let _guard = compact_slot.blocking_lock();
-                        for_your_consideration::snapshot::compact_memory_stores(
+                        for_your_consideration::snapshot::compact_memory_stores_with_impressions(
                             &compact_interner,
                             &compact_graph,
                             &compact_preferences,
+                            &compact_impressions,
                         )
                     })
                     .await;
@@ -640,10 +643,11 @@ async fn main() -> Result<()> {
                             && current_strings > growth_threshold
                         {
                             let compact_stats =
-                                for_your_consideration::snapshot::compact_memory_stores(
+                                for_your_consideration::snapshot::compact_memory_stores_with_impressions(
                                     &p_interner,
                                     &p_graph,
                                     &p_preferences,
+                                    &p_impressions,
                                 );
                             info!(
                                 strings_before = compact_stats.strings_before,
