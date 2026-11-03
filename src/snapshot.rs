@@ -778,6 +778,7 @@ pub fn load_snapshot_with_preferences(
     // Section 6: Post Metadata
     let meta_count = stream.read_u32()? as usize;
     let mut post_metadata = Vec::with_capacity(stream.bound_count(meta_count, 27));
+    let mut post_topics = Vec::new();
 
     for _ in 0..meta_count {
         let pid = stream.read_u32()?;
@@ -792,11 +793,18 @@ pub fn load_snapshot_with_preferences(
         let parent_id = if has_parent { Some(parent_val) } else { None };
 
         let created_at = stream.read_u64()?;
-        let is_nsfw = if version >= 5 {
-            stream.read_u8()? != 0
+        let (is_nsfw, topic_opt) = if version >= 5 {
+            let raw_flags = stream.read_u8()?;
+            (
+                (raw_flags & 1) != 0,
+                crate::graph::decode_topic_flag(raw_flags),
+            )
         } else {
-            false
+            (false, None)
         };
+        if let Some(topic) = topic_opt {
+            post_topics.push((pid, topic));
+        }
 
         post_metadata.push((
             pid,
@@ -896,6 +904,9 @@ pub fn load_snapshot_with_preferences(
         post_metadata,
         active_recent_posts,
     });
+    for (pid, topic) in post_topics {
+        graph.record_post_topic(pid, topic);
+    }
 
     let load_duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
     info!(
@@ -958,6 +969,44 @@ pub fn compact_memory_stores(
 
     // 4. Compact user preferences with remapped IDs
     preferences.remap(&id_map);
+
+    let strings_after = interner.len();
+
+    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+    CompactionStats {
+        strings_before,
+        strings_after,
+        duration_ms,
+    }
+}
+
+/// Compacts and garbage-collects all in-memory stores including [`crate::recommender::ImpressionStore`],
+/// remapping viewer and post IDs across impressions so compaction never corrupts impression history.
+pub fn compact_memory_stores_with_impressions(
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
+    impression_store: &crate::recommender::ImpressionStore,
+) -> CompactionStats {
+    let start = Instant::now();
+    let strings_before = interner.len();
+
+    // 1. Collect all referenced string IDs across graph, preferences, and impressions
+    let mut referenced = graph.collect_referenced_ids();
+    preferences.collect_referenced_ids(&mut referenced);
+    referenced |= impression_store.collect_referenced_ids();
+
+    // 2. Compact StringInterner in-place shard-by-shard, dropping dead strings and maps immediately
+    let id_map = interner.compact_referenced(&referenced);
+
+    // 3. Compact graph data structures with remapped IDs shard-by-shard
+    graph.compact(&id_map);
+
+    // 4. Compact user preferences with remapped IDs
+    preferences.remap(&id_map);
+
+    // 5. Compact impression store with remapped viewer & post IDs
+    impression_store.compact(&id_map);
 
     let strings_after = interner.len();
 

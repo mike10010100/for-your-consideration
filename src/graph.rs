@@ -6,7 +6,37 @@ use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FeedError, Result};
-use crate::types::{CompactEdge, PostMeta, SignalType};
+use crate::types::{CompactEdge, PostMeta, SignalType, TopicCategory};
+
+/// Encodes an optional [`TopicCategory`] into bits `1..=3` of the snapshot metadata flags byte.
+#[inline]
+#[must_use]
+pub(crate) const fn encode_topic_flag(topic: Option<TopicCategory>) -> u8 {
+    match topic {
+        None => 0,
+        Some(TopicCategory::Art) => 1 << 1,
+        Some(TopicCategory::Tech) => 2 << 1,
+        Some(TopicCategory::Science) => 3 << 1,
+        Some(TopicCategory::News) => 4 << 1,
+        Some(TopicCategory::Culture) => 5 << 1,
+        Some(TopicCategory::General) => 6 << 1,
+    }
+}
+
+/// Decodes an optional [`TopicCategory`] from bits `1..=3` of the snapshot metadata flags byte.
+#[inline]
+#[must_use]
+pub(crate) const fn decode_topic_flag(flags: u8) -> Option<TopicCategory> {
+    match (flags >> 1) & 0x07 {
+        1 => Some(TopicCategory::Art),
+        2 => Some(TopicCategory::Tech),
+        3 => Some(TopicCategory::Science),
+        4 => Some(TopicCategory::News),
+        5 => Some(TopicCategory::Culture),
+        6 => Some(TopicCategory::General),
+        _ => None,
+    }
+}
 
 /// Default TTL duration in seconds for velocity pool candidate caching (10 seconds).
 pub const VELOCITY_CACHE_TTL_SECS: u64 = 10;
@@ -75,6 +105,54 @@ impl RecentActiveRingBuffer {
                 out.insert(pid);
             }
         }
+    }
+
+    fn remap(&mut self, id_map: &AHashMap<u32, u32>) {
+        if self.count == 0 {
+            return;
+        }
+        let mut write_idx = 0;
+        for i in 0..self.count {
+            let (ts, old_pid) = self.buffer[i];
+            if let Some(&new_pid) = id_map.get(&old_pid) {
+                self.buffer[write_idx] = (ts, new_pid);
+                write_idx += 1;
+            }
+        }
+        self.count = write_idx;
+        self.head = write_idx % RING_BUFFER_CAPACITY;
+    }
+
+    fn prune_older_than(&mut self, cutoff_secs: u64) {
+        if self.count == 0 {
+            return;
+        }
+        let mut write_idx = 0;
+        for i in 0..self.count {
+            let (ts, pid) = self.buffer[i];
+            if ts >= cutoff_secs {
+                self.buffer[write_idx] = (ts, pid);
+                write_idx += 1;
+            }
+        }
+        self.count = write_idx;
+        self.head = write_idx % RING_BUFFER_CAPACITY;
+    }
+
+    fn remove_post(&mut self, target_pid: u32) {
+        if self.count == 0 {
+            return;
+        }
+        let mut write_idx = 0;
+        for i in 0..self.count {
+            let (ts, pid) = self.buffer[i];
+            if pid != target_pid {
+                self.buffer[write_idx] = (ts, pid);
+                write_idx += 1;
+            }
+        }
+        self.count = write_idx;
+        self.head = write_idx % RING_BUFFER_CAPACITY;
     }
 }
 
@@ -267,6 +345,8 @@ pub struct GraphStore {
     follows: [RwLock<AHashMap<u32, Vec<u32>>>; NUM_SHARDS],
     /// Post metadata: `post_id -> PostMeta`
     post_metadata: [RwLock<AHashMap<u32, PostMeta>>; NUM_SHARDS],
+    /// Post topic classification recorded at ingest time: `post_id -> TopicCategory`
+    post_topics: [RwLock<AHashMap<u32, TopicCategory>>; NUM_SHARDS],
     /// Author posts: `author_id -> Vec<u32>`
     author_posts: [RwLock<AHashMap<u32, Vec<u32>>>; NUM_SHARDS],
     /// Active recent posts tracker for the 6-hour sliding pool: `post_id -> latest_timestamp`
@@ -298,6 +378,7 @@ impl GraphStore {
             user_likes_bitmaps: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             follows: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             post_metadata: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
+            post_topics: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             author_posts: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             active_recent_posts: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             mutation_counter: AtomicU64::new(0),
@@ -457,10 +538,23 @@ impl GraphStore {
         let meta = PostMeta::with_nsfw(author_id, root_id, parent_id, created_at, is_nsfw);
 
         // 1. Post metadata
-        {
+        let previous_author = {
             let p_shard = shard_idx(post_id);
             let mut guard = self.post_metadata[p_shard].write();
-            guard.insert(post_id, meta);
+            guard.insert(post_id, meta).map(|old| old.author_id)
+        };
+
+        if let Some(old_author) = previous_author {
+            if old_author != author_id {
+                let old_shard = shard_idx(old_author);
+                let mut guard = self.author_posts[old_shard].write();
+                if let Some(posts) = guard.get_mut(&old_author) {
+                    posts.retain(|&pid| pid != post_id);
+                    if posts.is_empty() {
+                        guard.remove(&old_author);
+                    }
+                }
+            }
         }
 
         // 2. Author posts
@@ -473,6 +567,92 @@ impl GraphStore {
             }
         }
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records the content-classified [`TopicCategory`] for a post.
+    pub fn record_post_topic(&self, post_id: u32, topic: TopicCategory) {
+        let p_shard = shard_idx(post_id);
+        self.post_topics[p_shard].write().insert(post_id, topic);
+        self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Retrieves the content-classified [`TopicCategory`] for a post, if recorded.
+    #[must_use]
+    pub fn get_post_topic(&self, post_id: u32) -> Option<TopicCategory> {
+        let p_shard = shard_idx(post_id);
+        self.post_topics[p_shard].read().get(&post_id).copied()
+    }
+
+    /// Removes a deleted post and all of its interaction edges, metadata, author links,
+    /// velocity tracking, and bitmaps from the graph.
+    ///
+    /// Returns `true` if any graph state for `post_id` was present and removed.
+    pub fn remove_post(&self, post_id: u32) -> bool {
+        let p_shard = shard_idx(post_id);
+        let reverse_edges = self.post_interactions[p_shard].write().remove(&post_id);
+        let mut removed_any = reverse_edges.is_some();
+
+        if let Some(edges) = reverse_edges {
+            for edge in edges {
+                let uid = edge.target;
+                let u_shard = shard_idx(uid);
+                let mut u_empty = false;
+                {
+                    let mut u_guard = self.user_interactions[u_shard].write();
+                    if let Some(u_edges) = u_guard.get_mut(&uid) {
+                        u_edges.retain(|e| e.target != post_id);
+                        if u_edges.is_empty() {
+                            u_guard.remove(&uid);
+                            u_empty = true;
+                        }
+                    }
+                }
+                {
+                    let mut bm_guard = self.user_likes_bitmaps[u_shard].write();
+                    if u_empty {
+                        bm_guard.remove(&uid);
+                    } else if let Some(bm) = bm_guard.get_mut(&uid) {
+                        bm.remove(post_id);
+                        if bm.is_empty() {
+                            bm_guard.remove(&uid);
+                        }
+                    }
+                }
+            }
+        }
+
+        let removed_meta = self.post_metadata[p_shard].write().remove(&post_id);
+        if let Some(meta) = removed_meta {
+            removed_any = true;
+            let a_shard = shard_idx(meta.author_id);
+            let mut a_guard = self.author_posts[a_shard].write();
+            if let Some(posts) = a_guard.get_mut(&meta.author_id) {
+                posts.retain(|&pid| pid != post_id);
+                if posts.is_empty() {
+                    a_guard.remove(&meta.author_id);
+                }
+            }
+        }
+
+        if self.post_topics[p_shard].write().remove(&post_id).is_some() {
+            removed_any = true;
+        }
+
+        if self.active_recent_posts[p_shard]
+            .write()
+            .remove(&post_id)
+            .is_some()
+        {
+            removed_any = true;
+        }
+
+        if removed_any {
+            self.recent_active_log.write().remove_post(post_id);
+            self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+            *self.velocity_cache.write() = None;
+        }
+
+        removed_any
     }
 
     /// Retrieves a cloned [`RoaringBitmap`] of all post IDs interacted with by the user.
@@ -993,16 +1173,41 @@ impl GraphStore {
             std::thread::yield_now();
         }
 
-        // Prune user_likes_bitmaps: retain only users with remaining forward interactions
-        for shard in &self.user_likes_bitmaps {
+        // Prune post_topics: retain topics for posts still in post_metadata or post_interactions
+        for (s, shard) in self.post_topics.iter().enumerate() {
             {
+                let p_guard = self.post_interactions[s].read();
                 let mut guard = shard.write();
-                guard.retain(|uid, _| valid_users.contains(*uid));
+                guard.retain(|pid, _| valid_posts.contains(*pid) || p_guard.contains_key(pid));
                 shrink_map_if_sparse(&mut guard);
             }
             std::thread::yield_now();
         }
 
+        // Rebuild user_likes_bitmaps from remaining forward interactions so expired post IDs are purged
+        for (s, shard) in self.user_interactions.iter().enumerate() {
+            let mut new_bitmaps = {
+                let u_guard = shard.read();
+                let mut bms = AHashMap::with_capacity(u_guard.len());
+                for (&uid, edges) in u_guard.iter() {
+                    let mut bm = RoaringBitmap::new();
+                    for edge in edges {
+                        bm.insert(edge.target);
+                    }
+                    if !bm.is_empty() {
+                        bms.insert(uid, bm);
+                    }
+                }
+                bms
+            };
+            shrink_map_if_sparse(&mut new_bitmaps);
+            *self.user_likes_bitmaps[s].write() = new_bitmaps;
+            std::thread::yield_now();
+        }
+
+        self.recent_active_log
+            .write()
+            .prune_older_than(cutoff_timestamp_secs);
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
         *self.velocity_cache.write() = None;
     }
@@ -1056,6 +1261,13 @@ impl GraphStore {
             }
         }
 
+        for shard in &self.post_topics {
+            let guard = shard.read();
+            for &pid in guard.keys() {
+                ids.insert(pid);
+            }
+        }
+
         for shard in &self.active_recent_posts {
             let guard = shard.read();
             for &pid in guard.keys() {
@@ -1102,6 +1314,7 @@ impl GraphStore {
         }
 
         // 2. Rebuild user_likes_bitmaps shard-by-shard directly from compacted user_interactions
+        //    preserving all positive interaction signals (Like, Repost, Quote).
         for (s, shard) in self.user_interactions.iter().enumerate() {
             let mut new_bitmaps = {
                 let u_guard = shard.read();
@@ -1109,9 +1322,7 @@ impl GraphStore {
                 for (&uid, edges) in u_guard.iter() {
                     let mut bm = RoaringBitmap::new();
                     for edge in edges {
-                        if edge.signal() == SignalType::Like {
-                            bm.insert(edge.target);
-                        }
+                        bm.insert(edge.target);
                     }
                     if !bm.is_empty() {
                         bms.insert(uid, bm);
@@ -1231,7 +1442,25 @@ impl GraphStore {
             std::thread::yield_now();
         }
 
-        // 7. Remap active_recent_posts shard-by-shard
+        // 7. Remap post_topics shard-by-shard
+        for (s, shard) in self.post_topics.iter().enumerate() {
+            {
+                let mut guard = shard.write();
+                let old_map = std::mem::take(&mut *guard);
+                let mut new_map = AHashMap::with_capacity(old_map.len());
+                for (old_pid, topic) in old_map {
+                    if let Some(&new_pid) = id_map.get(&old_pid) {
+                        debug_assert_eq!(shard_idx(new_pid), s);
+                        new_map.insert(new_pid, topic);
+                    }
+                }
+                new_map.shrink_to_fit();
+                *guard = new_map;
+            }
+            std::thread::yield_now();
+        }
+
+        // 8. Remap active_recent_posts shard-by-shard
         for (s, shard) in self.active_recent_posts.iter().enumerate() {
             {
                 let mut guard = shard.write();
@@ -1249,10 +1478,10 @@ impl GraphStore {
             std::thread::yield_now();
         }
 
-        // 8. Invalidate velocity cache and mutation counter
+        // 9. Remap recent_active_log in-place and invalidate velocity cache & mutation counter
+        self.recent_active_log.write().remap(id_map);
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
         *self.velocity_cache.write() = None;
-        self.recent_active_log.write().clear();
     }
 
     /// Returns aggregated statistics for the graph store.
@@ -1354,6 +1583,9 @@ impl GraphStore {
             let m_guard = self.post_metadata[shard].read();
             total += m_guard.capacity() * (32 + std::mem::size_of::<PostMeta>());
 
+            let t_guard = self.post_topics[shard].read();
+            total += t_guard.capacity() * (32 + std::mem::size_of::<TopicCategory>());
+
             let a_guard = self.author_posts[shard].read();
             total += a_guard.capacity() * 32;
             for posts in a_guard.values() {
@@ -1381,6 +1613,9 @@ impl GraphStore {
             shard.write().clear();
         }
         for shard in &self.post_metadata {
+            shard.write().clear();
+        }
+        for shard in &self.post_topics {
             shard.write().clear();
         }
         for shard in &self.author_posts {
@@ -1834,7 +2069,9 @@ impl GraphStore {
                     write_chunk(&0u32.to_le_bytes())?;
                 }
                 write_chunk(&meta.created_at.to_le_bytes())?;
-                write_chunk(&[u8::from(meta.is_nsfw)])?;
+                let topic = self.post_topics[shard_idx(pid)].read().get(&pid).copied();
+                let flags = u8::from(meta.is_nsfw) | encode_topic_flag(topic);
+                write_chunk(&[flags])?;
             }
         }
         Ok(num_post_metadata)
@@ -2314,5 +2551,66 @@ mod tests {
         assert_eq!(restored.get_user_follows(1), vec![2]);
         assert_eq!(restored.get_author_posts(10).len(), 2);
         assert_eq!(restored.get_post_meta(200).unwrap().root_id, Some(100));
+    }
+
+    #[test]
+    fn test_compact_preserves_quote_repost_bitmaps_and_recent_active_log() {
+        let graph = GraphStore::new();
+        let ts = BLUESKY_EPOCH_SECS + 5_000;
+
+        // User 1 has a Repost on 100 and a Quote on 200 (no Likes).
+        graph.record_interaction(1, 100, SignalType::Repost, ts);
+        graph.record_interaction(1, 200, SignalType::Quote, ts + 10);
+        graph.record_post_topic(100, TopicCategory::Tech);
+        graph.record_post_topic(200, TopicCategory::Science);
+
+        let mut id_map = AHashMap::new();
+        id_map.insert(1, 1);
+        id_map.insert(100, 100);
+        id_map.insert(200, 200);
+
+        graph.compact(&id_map);
+
+        // Repost and Quote targets must remain in user_likes_bitmaps after compaction!
+        let bm = graph.get_user_likes_bitmap(1).unwrap();
+        assert!(bm.contains(100));
+        assert!(bm.contains(200));
+
+        // Topics must remain mapped after compaction!
+        assert_eq!(graph.get_post_topic(100), Some(TopicCategory::Tech));
+        assert_eq!(graph.get_post_topic(200), Some(TopicCategory::Science));
+
+        // Adding a single new post interaction after compaction must NOT cause velocity pool
+        // 1-item blindness (posts 100 and 200 must still be returned alongside post 300).
+        graph.record_interaction(2, 300, SignalType::Like, ts + 20);
+        let candidates = graph.get_velocity_pool_candidates_at(ts + 20, 10);
+        assert!(candidates.contains(&100));
+        assert!(candidates.contains(&200));
+        assert!(candidates.contains(&300));
+    }
+
+    #[test]
+    fn test_remove_post_cleans_all_graph_indexes() {
+        let graph = GraphStore::new();
+        let ts = BLUESKY_EPOCH_SECS + 1_000;
+
+        graph.record_post_meta(100, 10, None, None, ts);
+        graph.record_post_topic(100, TopicCategory::Art);
+        graph.record_interaction(1, 100, SignalType::Like, ts);
+        graph.record_interaction(2, 100, SignalType::Repost, ts + 5);
+
+        assert!(graph.remove_post(100));
+        assert!(!graph.remove_post(100));
+
+        assert!(graph.get_post_meta(100).is_none());
+        assert!(graph.get_post_topic(100).is_none());
+        assert_eq!(graph.get_author_posts(10), [] as [u32; 0]);
+        assert_eq!(graph.get_post_interactions(100), [] as [CompactEdge; 0]);
+        assert_eq!(graph.get_user_interactions(1), [] as [CompactEdge; 0]);
+        assert!(graph.get_user_likes_bitmap(1).is_none());
+        assert_eq!(
+            graph.get_velocity_pool_candidates_at(ts + 10, 10),
+            [] as [u32; 0]
+        );
     }
 }

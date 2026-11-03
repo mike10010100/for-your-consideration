@@ -87,14 +87,15 @@ pub mod prelude {
         SOCIAL_PROOF_PLATEAU_THRESHOLD, VELOCITY_CACHE_TTL_SECS,
     };
     pub use crate::ingest::{
-        apply_event_to_graph, build_jetstream_url, build_subscription_url,
-        is_event_matching_collections, normalize_jetstream_endpoint, parse_jetstream_frame,
-        parse_jetstream_json, run_reader_reconnect_loop, run_slice_reader_reconnect_loop,
-        BackoffManager, BackoffPolicy, CursorTracker, IngestEvent, IngesterConfig, IngestionStats,
-        IngestionStatsSnapshot, IngestionTracker, JetstreamClient, JetstreamConfig, JetstreamEvent,
-        JetstreamIngester, DEFAULT_CHANNEL_CAPACITY, DEFAULT_INACTIVITY_TIMEOUT_SECS,
-        DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_JETSTREAM_ENDPOINTS, DEFAULT_JETSTREAM_URL,
-        DEFAULT_MAX_BACKOFF_SECS, DEFAULT_PING_INTERVAL_SECS, MAX_STREAM_SLICES,
+        apply_event_to_graph, build_jetstream_url, build_subscription_url, classify_post_record,
+        decode_tid_timestamp_secs, is_event_matching_collections, normalize_jetstream_endpoint,
+        parse_at_post_uri, parse_jetstream_frame, parse_jetstream_json, run_reader_reconnect_loop,
+        run_slice_reader_reconnect_loop, BackoffManager, BackoffPolicy, CursorTracker, IngestEvent,
+        IngesterConfig, IngestionStats, IngestionStatsSnapshot, IngestionTracker, JetstreamClient,
+        JetstreamConfig, JetstreamEvent, JetstreamIngester, DEFAULT_CHANNEL_CAPACITY,
+        DEFAULT_INACTIVITY_TIMEOUT_SECS, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_JETSTREAM_ENDPOINTS,
+        DEFAULT_JETSTREAM_URL, DEFAULT_MAX_BACKOFF_SECS, DEFAULT_PING_INTERVAL_SECS,
+        MAX_STREAM_SLICES,
     };
     pub use crate::interner::StringInterner;
     pub use crate::preferences::{shard_idx, UserPreferencesStore, PREFERENCE_SHARDS};
@@ -115,16 +116,17 @@ pub mod prelude {
         ACTIVE_USERS_SHARDS, DEFAULT_FEED_RKEY,
     };
     pub use crate::service_auth::{
-        CachedSigningKey, DidKeyCache, ServiceAuthVerifier, ServiceJwtHeader,
+        AtprotoVerifyingKey, CachedSigningKey, DidKeyCache, ServiceAuthVerifier, ServiceJwtHeader,
         DEFAULT_PLC_DIRECTORY_URL, DID_KEY_CACHE_SHARDS, DID_KEY_CACHE_TTL_SECS,
-        REQUIRED_SERVICE_AUTH_ALG,
+        MAX_DID_KEY_CACHE_PER_SHARD, MULTIKEY_P256_VARINT, MULTIKEY_SECP256K1_VARINT,
+        P256_SERVICE_AUTH_ALG, REQUIRED_SERVICE_AUTH_ALG,
     };
     pub use crate::snapshot::{
-        compact_memory_stores, load_snapshot, load_snapshot_with_preferences, save_snapshot,
-        save_snapshot_with_preferences, CompactionStats, LoadedSnapshot, SnapshotConfig,
-        SnapshotHeader, SnapshotStatusTracker, HEADER_SIZE, SNAPSHOT_FORMAT_VERSION,
-        SNAPSHOT_FORMAT_VERSION_V1, SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3,
-        SNAPSHOT_MAGIC,
+        compact_memory_stores, compact_memory_stores_with_impressions, load_snapshot,
+        load_snapshot_with_preferences, save_snapshot, save_snapshot_with_preferences,
+        CompactionStats, LoadedSnapshot, SnapshotConfig, SnapshotHeader, SnapshotStatusTracker,
+        HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1,
+        SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3, SNAPSHOT_MAGIC,
     };
     pub use crate::types::{
         ActiveUsersTelemetryInfo, ApiErrorResponse, CompactEdge, DeletePreferencesResponse,

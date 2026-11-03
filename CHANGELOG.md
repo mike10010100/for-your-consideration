@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-11-03
+
+### Fixed
+
+- **ATProto 2-Byte Multicodec Varint & P-256 (`ES256`) Service Auth Verification** (`src/service_auth.rs`, `src/lib.rs`):
+  - Added support for standard 2-byte unsigned varint `[0xe7, 0x01]` (`secp256k1-pub`, 35 bytes total, `zQ3sh...`) and `[0x80, 0x24]` (`p256-pub`, 35 bytes total, `zDna...`) Multikey payloads alongside legacy 34-byte `[0xe7]` keys in `ServiceAuthVerifier::extract_atproto_key_from_document`.
+  - Added `AtprotoVerifyingKey` (`Secp256k1` | `P256`) with strict curve-to-JOSE-alg binding (`ES256K` strictly bound to `secp256k1`, `ES256` strictly bound to `P-256`), eliminating cross-curve algorithm confusion.
+  - Bounded `DidKeyCache` per-shard capacity (`MAX_DID_KEY_CACHE_PER_SHARD = 512`) with TTL-based and oldest-entry eviction, and added `ServiceAuthVerifier::with_plc_url` for flexible test harness resolution.
+
+- **ImpressionStore Compaction Remapping, Multi-Signal Bitmap Preservation & Velocity Ring Buffer Remapping** (`src/graph.rs`, `src/recommender.rs`, `src/snapshot.rs`, `src/main.rs`):
+  - Added `ViewerImpressionHistory::compact`, `ImpressionStore::collect_referenced_ids`, and `ImpressionStore::compact` to remap viewer and post IDs during memory compaction, preventing memory compaction from scrambling viewer impression histories into cross-user/cross-post ghost impressions.
+  - Added `compact_memory_stores_with_impressions` and wired it into both startup compaction and the 15-minute periodic pruning loop in `src/main.rs`.
+  - Fixed `GraphStore::compact` discarding non-like interactions (`SignalType::Quote` and `SignalType::Repost`) when rebuilding `user_likes_bitmaps`, ensuring quote/repost edges continue driving taste-similarity calculations after compaction.
+  - Added `RecentActiveRingBuffer::remap` and `RecentActiveRingBuffer::prune_older_than`, replacing `recent_active_log.write().clear()` on compaction with in-place ID remapping to eliminate 1-item velocity pool candidate blindness post-compaction.
+  - Rebuilt active users' `user_likes_bitmaps` from retained interaction edges during `GraphStore::prune_older_than` to purge expired post IDs.
+
+- **Content-Based Ingest Topic Classification & Section 6 Snapshot Persistence** (`src/ingest.rs`, `src/graph.rs`, `src/snapshot.rs`, `src/recommender.rs`):
+  - Added `classify_post_record` to classify `app.bsky.feed.post` commits at ingest time by inspecting post body `text`, `#tag` and `#link` `facets`, explicit record `tags`, and external embed metadata (`uri`, `title`, `description`).
+  - Added sharded `post_topics` storage in `GraphStore`, persisting the classified `TopicCategory` into bits 1..=3 of the Section 6 post metadata flags byte in `snapshot.bin` (preserving backward compatibility with v5 `is_nsfw` in bit 0).
+  - Updated `Recommender::classify_post_with_graph` across all recommendation and explanation paths to consult `self.graph.get_post_topic(pid)` before falling back to URI keyword heuristics or deterministic partitioning.
+
+- **PostMeta AT-URI Synthesis & Post Deletion Lifecycle** (`src/ingest.rs`, `src/graph.rs`, `src/recommender.rs`):
+  - Added `parse_at_post_uri` and `decode_tid_timestamp_secs` to synthesize missing `PostMeta` from AT-URIs (`at://<author_did>/app.bsky.feed.post/<rkey>`) for interaction-only posts, preventing interaction-only posts from being silently dropped in Tier 1 and Tier 2 candidate evaluation.
+  - Eliminated the fallback `author_id = 0` sentinel in `Recommender::resolve_or_synthesize_post_meta` (using `u32::MAX ^ pid` when URI authority is missing), avoiding collisions with interned user ID 0 (shard 0, local 0).
+  - Added `GraphStore::remove_post` and wired `app.bsky.feed.post` commit deletion operations in `apply_event_to_graph` to clean up forward and reverse edges, bitmaps, metadata, author index, topic classification, and velocity cache on post deletion.
+
+---
+
 ## [0.6.10] - 2026-11-02
 
 ### Changed
