@@ -555,3 +555,165 @@ fn test_high_concurrency_stress_across_64_shards() {
 
     assert!(rec.impression_store().total_viewers() > 0);
 }
+
+// ---------------------------------------------------------------------------
+// 9. Viral Post Unseen-First Ceiling & Repeated-Impression Compounding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_viral_post_does_not_stay_pinned_at_top_across_refreshes_without_liking() {
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+
+    let viewer_did = "did:plc:viral_refresh_viewer";
+    let viewer = interner.intern(viewer_did);
+
+    // 12 seed posts liked by the viewer so Tier 1 (likes >= 10) activates
+    let mut seed_posts = Vec::new();
+    for s in 0..12 {
+        let seed_author = interner.intern(&format!("did:plc:seed_author_{s}"));
+        let seed_post = interner.intern(&format!(
+            "at://did:plc:seed_author_{s}/app.bsky.feed.post/{s}"
+        ));
+        graph.record_post_meta(seed_post, seed_author, None, None, TEST_EPOCH - 3_000);
+        graph.record_interaction(viewer, seed_post, SignalType::Like, TEST_EPOCH - 2_500);
+        seed_posts.push(seed_post);
+    }
+
+    // 25 taste twins who share all 12 seed posts with the viewer
+    let mut twins = Vec::new();
+    for t in 0..25 {
+        let twin = interner.intern(&format!("did:plc:twin_{t}"));
+        for &sp in &seed_posts {
+            graph.record_interaction(twin, sp, SignalType::Like, TEST_EPOCH - 2_000);
+        }
+        twins.push(twin);
+    }
+
+    // One mega-viral post endorsed by ALL 25 taste twins + 30 extra users
+    // Its raw base_score is >15x higher than a single-twin unseen post, so
+    // raw base_score * FATIGUE_MIN_FLOOR (0.15) would still exceed normal unseen posts.
+    let viral_author = interner.intern("did:plc:viral_author");
+    let viral_uri = "at://did:plc:viral_author/app.bsky.feed.post/mega_viral";
+    let viral_post = interner.intern(viral_uri);
+    graph.record_post_meta(viral_post, viral_author, None, None, TEST_EPOCH - 300);
+    for &twin in &twins {
+        graph.record_interaction(twin, viral_post, SignalType::Like, TEST_EPOCH - 200);
+    }
+    for extra in 0..30 {
+        let u = interner.intern(&format!("did:plc:extra_liker_{extra}"));
+        graph.record_interaction(u, viral_post, SignalType::Like, TEST_EPOCH - 200);
+    }
+
+    // 10 normal fresh posts, each endorsed by a single taste twin
+    let mut normal_posts = Vec::new();
+    for (i, &twin) in twins.iter().enumerate().take(10) {
+        let author = interner.intern(&format!("did:plc:normal_author_{i}"));
+        let uri = format!("at://did:plc:normal_author_{i}/app.bsky.feed.post/normal_{i}");
+        let pid = interner.intern(&uri);
+        graph.record_post_meta(pid, author, None, None, TEST_EPOCH - 400 - (i as u64 * 10));
+        graph.record_interaction(
+            twin,
+            pid,
+            SignalType::Like,
+            TEST_EPOCH - 300 - (i as u64 * 10),
+        );
+        normal_posts.push(pid);
+    }
+
+    let rec = Recommender::new(interner, graph);
+    let dials = RecommendationDials {
+        limit: 5,
+        min_likes: 1,
+        explore_ratio: 0.0,
+        ..Default::default()
+    };
+
+    // Load 1: Viral post is unseen, so it takes the #1 spot
+    let page1 = rec.recommend(Some(viewer_did), &dials, TEST_EPOCH).unwrap();
+    assert_eq!(page1.posts.len(), 5);
+    assert_eq!(page1.posts[0].post_id, viral_post);
+
+    // Record impressions for the 5 served posts on Load 1 (viewer does NOT like viral_post)
+    let served_load1: Vec<u32> = page1.posts.iter().map(|p| p.post_id).collect();
+    rec.record_impressions_by_did(Some(viewer_did), &served_load1, TEST_EPOCH);
+
+    // Refresh 2 (10 seconds later): Unseen normal posts MUST take all 5 top spots;
+    // viral_post must NOT remain stuck at #1!
+    let page2 = rec
+        .recommend(Some(viewer_did), &dials, TEST_EPOCH + 10)
+        .unwrap();
+    assert_eq!(page2.posts.len(), 5);
+    for p in &page2.posts {
+        assert_ne!(
+            p.post_id, viral_post,
+            "Already-served viral post must not stay pinned on page 1 when unseen posts exist"
+        );
+        assert!(
+            !served_load1.contains(&p.post_id),
+            "Refresh must serve unseen posts ahead of already-served posts"
+        );
+    }
+
+    // Verify recommend_preview_at also ranks the unseen posts ahead of viral_post
+    // while preserving the exact ScoreBreakdown mathematical identity.
+    let preview_dials = RecommendationDials {
+        limit: 11,
+        min_likes: 1,
+        explain: true,
+        ..Default::default()
+    };
+    let preview = rec
+        .recommend_preview_at(Some(viewer_did), &preview_dials, TEST_EPOCH + 10)
+        .unwrap();
+    assert_eq!(preview.items.len(), 11);
+    // First 6 items are the 6 remaining unseen posts (fatigue_penalty == 1.0)
+    for item in &preview.items[0..6] {
+        assert_ne!(item.uri.as_str(), viral_uri);
+        assert_eq!(item.score_breakdown.fatigue_penalty, 1.0);
+    }
+    // Viral post is at index 6 (top of the fatigued tier, strictly below all 6 unseen posts)
+    assert_eq!(preview.items[6].uri.as_str(), viral_uri);
+    assert!(
+        preview.items[5].score_breakdown.final_score > preview.items[6].score_breakdown.final_score
+    );
+    for item in &preview.items {
+        let b = &item.score_breakdown;
+        let expected = b.taste_similarity * b.time_decay * b.topic_boost * b.fatigue_penalty;
+        assert!((b.final_score - expected).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn test_compounded_repeated_impression_fatigue_demotes_viral_post_in_exhausted_pool() {
+    let store = ImpressionStore::new(100);
+    let viewer = 42;
+    let viral_post = 9001;
+
+    // 1st impression: compounded penalty equals single-impression floor (0.15)
+    store.record_impressions(viewer, &[viral_post], TEST_EPOCH);
+    let c1 = store
+        .evaluate_compounded_fatigue_penalty(viewer, viral_post, TEST_EPOCH)
+        .unwrap();
+    assert!((c1 - FATIGUE_MIN_FLOOR).abs() < 1e-6);
+
+    // 2nd impression within fatigue window: compounded penalty is 0.15^2 = 0.0225
+    store.record_impressions(viewer, &[viral_post], TEST_EPOCH + 30);
+    let c2 = store
+        .evaluate_compounded_fatigue_penalty(viewer, viral_post, TEST_EPOCH + 30)
+        .unwrap();
+    assert!((c2 - FATIGUE_MIN_FLOOR.powi(2)).abs() < 1e-6);
+
+    // 3rd impression within fatigue window: compounded penalty is 0.15^3 = 0.003375
+    store.record_impressions(viewer, &[viral_post], TEST_EPOCH + 60);
+    let c3 = store
+        .evaluate_compounded_fatigue_penalty(viewer, viral_post, TEST_EPOCH + 60)
+        .unwrap();
+    assert!((c3 - FATIGUE_MIN_FLOOR.powi(3)).abs() < 1e-6);
+
+    // Single-impression evaluate_fatigue_penalty remains at FATIGUE_MIN_FLOOR
+    assert_eq!(
+        store.evaluate_fatigue_penalty(viewer, viral_post, TEST_EPOCH + 60),
+        Some(FATIGUE_MIN_FLOOR)
+    );
+}
