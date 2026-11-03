@@ -503,7 +503,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "for-your-consideration"
-version = "0.6.11"
+version = "0.7.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -529,6 +529,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skyauth",
+ "skybase",
  "thiserror",
  "tikv-jemallocator",
  "tokio",
@@ -566,6 +567,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
 name = "futures-macro"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -595,9 +602,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
+ "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1376,6 +1385,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1401,6 +1422,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -1421,12 +1443,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -1742,9 +1766,9 @@ dependencies = [
 
 [[package]]
 name = "skyauth"
-version = "0.3.8"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54873b8d2e7875b26085f1921294b462daa4432ecf0af54394620927e563a099"
+checksum = "adcf4813e72c6d537a3e12cbd6eed8598f48c5356470b38783229bd97033ca69"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -1752,6 +1776,7 @@ dependencies = [
  "base64 0.23.1",
  "hmac",
  "http",
+ "k256",
  "p256",
  "parking_lot",
  "rand 0.10.2",
@@ -1769,6 +1794,29 @@ dependencies = [
  "url",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "skybase"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ac5c34f8de930bbd5031b8dffd179ddb39f05910c37545946da698b74cbf9fb"
+dependencies = [
+ "futures-util",
+ "parking_lot",
+ "regex",
+ "reqwest",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "skyauth",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2330,6 +2378,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

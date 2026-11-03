@@ -74,25 +74,7 @@ impl ServiceJwtPayload {
 /// Validates whether a string is a syntactically valid AT Protocol DID (`did:plc:...` or `did:web:...`).
 #[must_use]
 pub fn is_valid_did(did: &str) -> bool {
-    if let Some(id) = did.strip_prefix("did:plc:") {
-        return !id.is_empty()
-            && id.len() <= 64
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    }
-    if let Some(host) = did.strip_prefix("did:web:") {
-        return !host.is_empty()
-            && host.len() <= 253
-            && host.split('.').all(|l| {
-                !l.is_empty()
-                    && l.len() <= 63
-                    && !l.starts_with('-')
-                    && !l.ends_with('-')
-                    && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            });
-    }
-    false
+    skyauth::service_auth::is_valid_service_did(did)
 }
 
 /// Extracts viewer DID from Axum HTTP request headers.
@@ -869,6 +851,9 @@ pub const OAUTH_STATE_SHARDS: usize = 64;
 /// Default time-to-live for OAuth PKCE state tokens (10 minutes = 600s).
 pub const DEFAULT_OAUTH_STATE_TTL_SECS: u64 = 600;
 
+/// Maximum pending OAuth PKCE state entries per shard before expired-first / oldest-entry eviction.
+pub const MAX_OAUTH_STATES_PER_SHARD: usize = 1024;
+
 /// 64-shard partitioned in-memory store for ongoing OAuth authorization sessions.
 pub struct OAuthStateStore {
     shards: [parking_lot::RwLock<AHashMap<String, OAuthSessionState>>; OAUTH_STATE_SHARDS],
@@ -888,10 +873,26 @@ impl OAuthStateStore {
         (crc32fast::hash(state.as_bytes()) as usize) % OAUTH_STATE_SHARDS
     }
 
-    /// Inserts a new OAuth session state into the store.
+    /// Inserts a new OAuth session state into the store, bounding shard capacity.
     pub fn insert(&self, state: String, session: OAuthSessionState) {
         let idx = Self::shard_idx(&state);
-        self.shards[idx].write().insert(state, session);
+        let mut guard = self.shards[idx].write();
+        if guard.len() >= MAX_OAUTH_STATES_PER_SHARD && !guard.contains_key(&state) {
+            let now = session.created_at_secs;
+            guard.retain(|_, s| {
+                now.saturating_sub(s.created_at_secs) <= DEFAULT_OAUTH_STATE_TTL_SECS
+            });
+            if guard.len() >= MAX_OAUTH_STATES_PER_SHARD {
+                if let Some(oldest_key) = guard
+                    .iter()
+                    .min_by_key(|(_, s)| s.created_at_secs)
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.remove(&oldest_key);
+                }
+            }
+        }
+        guard.insert(state, session);
     }
 
     /// Atomically retrieves and removes the session state for single-use replay defense.
@@ -1031,6 +1032,9 @@ impl UserOAuthSession {
     }
 }
 
+/// Maximum active authenticated user OAuth sessions per shard before expired-first / oldest-entry eviction.
+pub const MAX_USER_SESSIONS_PER_SHARD: usize = 1024;
+
 /// 64-shard partitioned in-memory store for active authenticated user OAuth sessions.
 pub struct OAuthUserSessionStore {
     shards: [parking_lot::RwLock<AHashMap<CompactString, UserOAuthSession>>; OAUTH_STATE_SHARDS],
@@ -1050,11 +1054,28 @@ impl OAuthUserSessionStore {
         (crc32fast::hash(did.as_bytes()) as usize) % OAUTH_STATE_SHARDS
     }
 
-    /// Inserts or updates an active user OAuth session.
+    /// Inserts or updates an active user OAuth session, bounding shard capacity.
     pub fn insert(&self, did: impl Into<CompactString>, session: UserOAuthSession) {
         let did = did.into();
         let idx = Self::shard_idx(did.as_str());
-        self.shards[idx].write().insert(did, session);
+        let mut guard = self.shards[idx].write();
+        if guard.len() >= MAX_USER_SESSIONS_PER_SHARD && !guard.contains_key(did.as_str()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            guard.retain(|_, s| s.expires_at_secs > now);
+            if guard.len() >= MAX_USER_SESSIONS_PER_SHARD {
+                if let Some(oldest_key) = guard
+                    .iter()
+                    .min_by_key(|(_, s)| s.expires_at_secs)
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.remove(&oldest_key);
+                }
+            }
+        }
+        guard.insert(did, session);
     }
 
     /// Retrieves a cloned copy of the user's active OAuth session.
@@ -1376,6 +1397,17 @@ pub async fn resolve_identity_pds(identifier: &str) -> Result<ResolvedPdsIdentit
                         }
                     }
                 }
+            } else if let Some(aka_arr) = json["alsoKnownAs"].as_array().filter(|a| !a.is_empty()) {
+                let handle_matches = aka_arr.iter().any(|aka| {
+                    aka.as_str()
+                        .and_then(|s| s.strip_prefix("at://"))
+                        .is_some_and(|h| h.trim().eq_ignore_ascii_case(&handle))
+                });
+                if !handle_matches {
+                    return Err(FeedError::Auth(format!(
+                        "Bidirectional handle verification failed: DID document for '{did}' does not claim handle 'at://{handle}'"
+                    )));
+                }
             }
             let mut found_endpoint = None;
             if let Some(services) = json["service"].as_array() {
@@ -1610,9 +1642,20 @@ pub async fn exchange_oauth_code_with_secret(
             .await
             .map_err(|e| FeedError::Auth(format!("Failed to parse token endpoint JSON: {e}")))?;
 
-        let did = json["sub"]
-            .as_str()
-            .or_else(|| json["did"].as_str())
+        let sub_claim = json["sub"].as_str().or_else(|| json["did"].as_str());
+        if let (Some(expected_did), Some(actual_sub)) = (
+            session_state.did.as_deref().filter(|d| !d.is_empty()),
+            sub_claim.filter(|s| !s.is_empty()),
+        ) {
+            if actual_sub != expected_did {
+                return Err(FeedError::Auth(format!(
+                    "OAuth subject mismatch: expected DID '{expected_did}', token endpoint returned '{actual_sub}'"
+                )));
+            }
+        }
+
+        let did = sub_claim
+            .or(session_state.did.as_deref())
             .unwrap_or(&session_state.handle)
             .to_string();
 
@@ -1664,24 +1707,7 @@ pub async fn exchange_oauth_code_with_secret(
 /// Formats a UNIX timestamp (seconds) into an ISO 8601 / RFC 3339 UTC timestamp string.
 #[must_use]
 pub fn format_rfc3339_timestamp(secs: u64) -> String {
-    let mut days = secs / 86400;
-    let day_secs = secs % 86400;
-    let hours = day_secs / 3600;
-    let mins = (day_secs % 3600) / 60;
-    let seconds = day_secs % 60;
-
-    days += 719_468;
-    let era = days / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!("{y:04}-{m:02}-{d:02}T{hours:02}:{mins:02}:{seconds:02}Z")
+    skybase::lexicon::format_unix_secs_iso8601(secs)
 }
 
 /// Publishes or updates an `app.bsky.feed.generator` record in the authenticated user's repository via XRPC `com.atproto.repo.putRecord`.
@@ -2838,5 +2864,71 @@ mod tests {
         assert_eq!(removed.unwrap(), session1);
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_exchange_oauth_code_rejects_subject_mismatch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/oauth/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "tok_xyz",
+                    "token_type": "DPoP",
+                    "expires_in": 3600,
+                    "sub": "did:plc:attacker_wrong_subject"
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let session_state = OAuthSessionState {
+            code_verifier: "verifier_12345678901234567890123456789012345".to_string(),
+            handle: "alice.bsky.social".to_string(),
+            did: Some("did:plc:alice_expected".to_string()),
+            pds_url: format!("http://{addr}"),
+            token_endpoint: format!("http://{addr}/oauth/token"),
+            redirect_uri: "https://fyc.bsky.app/oauth/callback".to_string(),
+            created_at_secs: 1_700_000_000,
+            dpop_private_key: None,
+        };
+
+        let res = exchange_oauth_code(
+            "real_auth_code_999",
+            &session_state,
+            "https://fyc.bsky.app/oauth/client-metadata.json",
+        )
+        .await;
+        assert!(res.is_err(), "mismatched sub claim must be rejected");
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("OAuth subject mismatch"));
+    }
+
+    #[test]
+    fn test_oauth_stores_bounded_shard_eviction() {
+        let state_store = OAuthStateStore::new();
+        for i in 0..1_200 {
+            let key = format!("state_{i}");
+            if OAuthStateStore::shard_idx(&key) == 0 {
+                state_store.insert(
+                    key,
+                    OAuthSessionState::new(
+                        "v",
+                        "alice.bsky.social",
+                        Some("did:plc:alice".to_string()),
+                        "https://bsky.social",
+                        "https://bsky.social/oauth/token",
+                        "https://fyc.bsky.app/oauth/callback",
+                        1_700_000_000 + (i as u64),
+                    ),
+                );
+            }
+        }
+        assert!(state_store.shards[0].read().len() <= MAX_OAUTH_STATES_PER_SHARD);
     }
 }
