@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-03
+
+### Changed
+
+- **Ecosystem Ontological Consolidation onto `skyauth 0.3.10` & `skybase 0.1.7` (`default-features = false`)** (`Cargo.toml`, `src/service_auth.rs`, `src/ingest.rs`, `src/auth.rs`):
+  - Upgraded `skyauth` to `0.3.10` and added `skybase 0.1.7` with `default-features = false` (storage-free mode, zero `rusqlite` dependency).
+  - Delegated `DidKeyCache`, `AtprotoVerifyingKey`, `ServiceJwtHeader`, `CachedSigningKey`, `decode_multikey`, `MULTIKEY_*` constants, `extract_atproto_key_from_document`, `extract_signing_key_from_document`, and `is_valid_did` to `skyauth::service_auth`.
+  - Delegated `BackoffManager`, `NSFW_SELF_LABEL_VALUES`, `has_nsfw_self_label`, `parse_at_post_uri`, `decode_tid_timestamp_secs`, and `format_rfc3339_timestamp` to `skybase`.
+
+### Fixed
+
+- **OAuth Subject Verification, Bidirectional Handle Linkage & Bounded Session Shard Capacities** (`src/auth.rs`):
+  - Enforced strict OAuth subject verification (`sub == session_state.did`) during `exchange_oauth_code_with_secret` when `session_state.did` is populated, failing closed if the token endpoint returns a mismatched subject DID.
+  - Enforced bidirectional handle linkage (`alsoKnownAs` contains `at://{handle}`) during `resolve_identity_pds` when resolving a user handle whose DID document declares `alsoKnownAs` entries.
+  - Bounded `OAuthStateStore` (`MAX_OAUTH_STATES_PER_SHARD = 1024`) and `OAuthUserSessionStore` (`MAX_USER_SESSIONS_PER_SHARD = 1024`) per-shard capacities with expired-first and oldest-entry eviction to prevent memory exhaustion from uncompleted OAuth login flows.
+- **Tier 1 Preview Walk Early Seen-Bitmap Deduplication** (`src/recommender.rs`):
+  - Skipped candidate posts already present in the viewer's `seen_bitmap` during co-interactor edge collection in `Recommender::recommend_preview_at`, preventing already-seen posts from crowding out `MAX_CANDIDATE_EVALS` or incurring unnecessary metadata/topic classification overhead (~10x faster `p50` preview latency on 5,000-like viewers).
+
+---
+
 ## [0.6.11] - 2026-11-03
 
 ### Fixed

@@ -594,79 +594,10 @@ impl IngestionTracker {
     }
 }
 
-/// Manages exponential backoff delays with random jitter for reconnect attempts.
-#[derive(Debug, Clone)]
-pub struct BackoffManager {
-    initial_delay: Duration,
-    max_delay: Duration,
-    current_delay: Duration,
-    consecutive_failures: u32,
-    jitter_fraction: f64,
-}
+pub use skybase::ingest::BackoffManager;
 
 /// Alias for [`BackoffManager`].
 pub type BackoffPolicy = BackoffManager;
-
-impl BackoffManager {
-    /// Creates a new [`BackoffManager`].
-    #[must_use]
-    pub fn new(initial_delay: Duration, max_delay: Duration) -> Self {
-        let safe_initial = initial_delay.max(Duration::from_millis(100));
-        let safe_max = max_delay.max(safe_initial);
-        Self {
-            initial_delay: safe_initial,
-            max_delay: safe_max,
-            current_delay: safe_initial,
-            consecutive_failures: 0,
-            jitter_fraction: 0.20,
-        }
-    }
-
-    /// Computes the next backoff duration with exponential doubling and jitter.
-    pub fn next_backoff(&mut self) -> Duration {
-        let base = self.current_delay;
-        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-
-        // Exponential doubling
-        let next_ms = (self.current_delay.as_millis() as u64).saturating_mul(2);
-        self.current_delay = Duration::from_millis(next_ms).min(self.max_delay);
-
-        // Pseudo-random jitter in [-20%, +20%] using high-resolution timestamp
-        let base_ms = base.as_millis() as u64;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(123_456_789, |d| u64::from(d.subsec_nanos()));
-
-        let pseudo_rand = (nanos
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(u64::from(self.consecutive_failures))
-            >> 32) as u32;
-
-        let jitter_range_pct = (self.jitter_fraction * 100.0) as i64;
-        let modulo = (jitter_range_pct * 2 + 1) as u32;
-        let jitter_offset_pct = i64::from(pseudo_rand % modulo) - jitter_range_pct;
-
-        let jittered_ms = if jitter_offset_pct >= 0 {
-            base_ms.saturating_add(base_ms * (jitter_offset_pct as u64) / 100)
-        } else {
-            base_ms.saturating_sub(base_ms * ((-jitter_offset_pct) as u64) / 100)
-        };
-
-        Duration::from_millis(jittered_ms.max(50))
-    }
-
-    /// Resets the backoff state to the initial delay.
-    pub const fn reset(&mut self) {
-        self.current_delay = self.initial_delay;
-        self.consecutive_failures = 0;
-    }
-
-    /// Returns the number of consecutive failed attempts.
-    #[must_use]
-    pub const fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures
-    }
-}
 
 /// Lock-free monotonic cursor tracker with support for multi-stream slice low-watermarks.
 #[derive(Debug)]
@@ -918,47 +849,8 @@ pub struct RawJetstreamCommit {
     pub record: Option<serde_json::Value>,
 }
 
-/// Self-label values that classify a post as adult / NSFW content.
-///
-/// Mirrors the content-warning vocabulary used by `ATProto` clients for
-/// `com.atproto.label.defs#selfLabels` (e.g. `porn`, `sexual`, `nudity`).
-pub const NSFW_SELF_LABEL_VALUES: [&str; 8] = [
-    "porn",
-    "sexual",
-    "nudity",
-    "graphic-media",
-    "graphic",
-    "adult",
-    "nsfw",
-    "suggestive",
-];
-
-/// Returns `true` if a post record carries an adult / NSFW author self-label.
-///
-/// Reads the `labels` object (`com.atproto.label.defs#selfLabels`) and inspects
-/// its `values` array. Entries may be either `{ "val": "..." }` objects or bare
-/// strings; comparison is case-insensitive.
-#[must_use]
-pub fn has_nsfw_self_label(record: &serde_json::Value) -> bool {
-    let Some(values) = record
-        .get("labels")
-        .and_then(|labels| labels.get("values"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-
-    values.iter().any(|entry| {
-        let raw = entry
-            .get("val")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| entry.as_str());
-        raw.is_some_and(|val| {
-            let normalized = val.trim().to_ascii_lowercase();
-            NSFW_SELF_LABEL_VALUES.contains(&normalized.as_str())
-        })
-    })
-}
+pub use skybase::lexicon::{has_nsfw_self_label, NSFW_SELF_LABEL_VALUES};
+pub use skybase::repo::{decode_tid_timestamp_secs, parse_at_post_uri};
 
 const STAGED_TOPIC_SHARDS: usize = 64;
 const MAX_STAGED_TOPICS_PER_SHARD: usize = 2_048;
@@ -992,52 +884,6 @@ fn stage_post_topic(post_uri: &str, topic: TopicCategory) {
 fn take_staged_post_topic(post_uri: &str) -> Option<TopicCategory> {
     let idx = staged_topic_shard_idx(post_uri);
     STAGED_POST_TOPICS[idx].lock().remove(post_uri)
-}
-
-/// Parses an AT Protocol post URI (`at://<author_did>/<collection>/<rkey>`) into `(author_did, rkey)`.
-#[must_use]
-pub fn parse_at_post_uri(uri: &str) -> Option<(&str, &str)> {
-    let rest = uri.strip_prefix("at://")?;
-    let (author_did, after_author) = rest.split_once('/')?;
-    if author_did.is_empty() {
-        return None;
-    }
-    let (_collection, rkey) = after_author.split_once('/')?;
-    let rkey = rkey.split('/').next().unwrap_or(rkey);
-    if rkey.is_empty() {
-        return None;
-    }
-    Some((author_did, rkey))
-}
-
-/// Decodes an AT Protocol 13-character base32-sortable TID into a Unix timestamp in seconds.
-///
-/// Returns `None` if `rkey` is not a valid TID (`234567abcdefghijklmnopqrstuvwxyz`) within a
-/// plausible timestamp range.
-#[must_use]
-pub fn decode_tid_timestamp_secs(rkey: &str) -> Option<u64> {
-    if rkey.len() != 13 {
-        return None;
-    }
-    let mut val: u64 = 0;
-    for b in rkey.bytes() {
-        let digit: u64 = match b {
-            b'2'..=b'7' => u64::from(b - b'2'),
-            b'a'..=b'z' => u64::from(b - b'a') + 6,
-            _ => return None,
-        };
-        val = (val << 5) | digit;
-    }
-    if (val >> 63) != 0 {
-        return None;
-    }
-    let timestamp_us = val >> 10;
-    let timestamp_secs = timestamp_us / 1_000_000;
-    if (BLUESKY_EPOCH_SECS..=4_102_444_800).contains(&timestamp_secs) {
-        Some(timestamp_secs)
-    } else {
-        None
-    }
 }
 
 fn accumulate_topic_tokens(text: &str, weight: u32, scores: &mut [u32; 5]) {

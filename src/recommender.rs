@@ -1608,6 +1608,12 @@ impl Recommender {
                         .with_user_interactions(co_user, |co_interactions| {
                             for c_edge in tail_bounded(co_interactions, MAX_CO_INTERACTOR_EDGES) {
                                 let cand_pid = c_edge.target();
+                                if seen_bitmap
+                                    .as_ref()
+                                    .is_some_and(|seen| seen.contains(cand_pid))
+                                {
+                                    continue;
+                                }
                                 let decay = calculate_time_decay(
                                     c_edge.signal(),
                                     c_edge.timestamp_secs(),

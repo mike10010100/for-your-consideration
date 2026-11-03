@@ -52,191 +52,25 @@ use base64::Engine;
 use compact_str::CompactString;
 use k256::ecdsa::signature::Verifier;
 use k256::ecdsa::{Signature, VerifyingKey};
+#[cfg(debug_assertions)]
 use parking_lot::RwLock;
-use serde::Deserialize;
 
 use crate::auth::{is_valid_did, parse_jwt_payload_unverified, JWT_CLOCK_SKEW_LEEWAY_SECS};
 use crate::error::{FeedError, Result};
 use skyauth::identity::{DidDocument, IdentityResolver};
+pub use skyauth::service_auth::{
+    AtprotoVerifyingKey, CachedSigningKey, DidKeyCache, ServiceJwtHeader, DID_KEY_CACHE_SHARDS,
+    DID_KEY_CACHE_TTL_SECS, ES256K_SERVICE_AUTH_ALG as REQUIRED_SERVICE_AUTH_ALG,
+    ES256_SERVICE_AUTH_ALG as P256_SERVICE_AUTH_ALG, MAX_DID_KEY_CACHE_PER_SHARD,
+    MULTIKEY_P256_VARINT, MULTIKEY_SECP256K1_VARINT,
+};
 use skyauth::ssrf::SsrfFilter;
-
-/// Cache TTL for resolved DID-document signing keys (15 minutes).
-pub const DID_KEY_CACHE_TTL_SECS: u64 = 15 * 60;
-
-/// Number of shards in the DID signing-key cache (matches the repo-wide 64-shard convention).
-pub const DID_KEY_CACHE_SHARDS: usize = 64;
 
 /// Default PLC directory endpoint used for `did:plc` resolution.
 pub const DEFAULT_PLC_DIRECTORY_URL: &str = "https://plc.directory";
 
-/// Multikey 2-byte unsigned varint prefix for secp256k1 compressed public keys (`0xe7` = `[0xe7, 0x01]`, `zQ3sh...`).
-pub const MULTIKEY_SECP256K1_VARINT: [u8; 2] = [0xe7, 0x01];
-
-/// Legacy 1-byte prefix for secp256k1 compressed public keys (`0xe7`).
+#[cfg(test)]
 const MULTIKEY_SECP256K1_PREFIX: u8 = 0xe7;
-
-/// Multikey 2-byte unsigned varint prefix for NIST P-256 compressed public keys (`0x1200` = `[0x80, 0x24]`, `zDna...`).
-pub const MULTIKEY_P256_VARINT: [u8; 2] = [0x80, 0x24];
-
-/// Length in bytes of a compressed SEC1 elliptic-curve public key (secp256k1 or P-256).
-const COMPRESSED_SECP256K1_KEY_LEN: usize = 33;
-
-/// Primary JOSE `alg` value used for `ATProto` Service Auth JWTs (`secp256k1`).
-pub const REQUIRED_SERVICE_AUTH_ALG: &str = "ES256K";
-
-/// Secondary JOSE `alg` value permitted by the `ATProto` Cryptography Specification (`P-256`).
-pub const P256_SERVICE_AUTH_ALG: &str = "ES256";
-
-/// Maximum entries per shard in [`DidKeyCache`] before expired-first / FIFO eviction.
-pub const MAX_DID_KEY_CACHE_PER_SHARD: usize = 512;
-
-/// Verified `ATProto` signing key extracted from a DID document's `#atproto` verification method.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AtprotoVerifyingKey {
-    /// secp256k1 verifying key (`ES256K`, multicodec `0xe7` / varint `[0xe7, 0x01]`).
-    Secp256k1(VerifyingKey),
-    /// NIST P-256 verifying key (`ES256`, multicodec `0x1200` / varint `[0x80, 0x24]`).
-    P256(p256::ecdsa::VerifyingKey),
-}
-
-/// Raw JOSE header fields of a Service Auth JWT.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ServiceJwtHeader {
-    /// Signature algorithm (must be `ES256K`).
-    pub alg: String,
-    /// Token type (typically `JWT`).
-    #[serde(default)]
-    pub typ: Option<String>,
-}
-
-/// A cached, validated issuer signing key with its resolution timestamp.
-#[derive(Clone, Debug)]
-pub struct CachedSigningKey {
-    /// The verified secp256k1 verifying key extracted from the DID document (when curve is secp256k1).
-    pub verifying_key: Option<Arc<VerifyingKey>>,
-    /// The curve-typed `ATProto` verifying key (`Secp256k1` or `P256`).
-    pub atproto_key: Arc<AtprotoVerifyingKey>,
-    /// Unix timestamp (seconds) when this key was resolved and cached.
-    pub resolved_at_secs: u64,
-}
-
-/// 64-shard TTL cache of resolved DID-document signing keys.
-///
-/// Sharding follows the repository-wide 64-shard convention to keep the
-/// per-request read path contention-free under concurrent feed traffic.
-#[derive(Debug)]
-pub struct DidKeyCache {
-    shards: [RwLock<ahash::AHashMap<CompactString, CachedSigningKey>>; DID_KEY_CACHE_SHARDS],
-    ttl_secs: u64,
-}
-
-impl Default for DidKeyCache {
-    fn default() -> Self {
-        Self::new(DID_KEY_CACHE_TTL_SECS)
-    }
-}
-
-impl DidKeyCache {
-    /// Creates a new cache with the specified entry TTL.
-    #[must_use]
-    pub fn new(ttl_secs: u64) -> Self {
-        Self {
-            shards: std::array::from_fn(|_| RwLock::new(ahash::AHashMap::new())),
-            ttl_secs,
-        }
-    }
-
-    fn shard_idx(did: &str) -> usize {
-        (crc32fast::hash(did.as_bytes()) as usize) & (DID_KEY_CACHE_SHARDS - 1)
-    }
-
-    /// Returns the cached secp256k1 verifying key for `did` if present and unexpired.
-    #[must_use]
-    pub fn get(&self, did: &str, now_secs: u64) -> Option<Arc<VerifyingKey>> {
-        let shard = &self.shards[Self::shard_idx(did)];
-        let guard = shard.read();
-        let entry = guard.get(did)?;
-        if now_secs.saturating_sub(entry.resolved_at_secs) >= self.ttl_secs {
-            return None;
-        }
-        entry.verifying_key.as_ref().map(Arc::clone)
-    }
-
-    /// Returns the cached curve-typed `ATProto` verifying key (`Secp256k1` or `P256`) for `did` if present and unexpired.
-    #[must_use]
-    pub fn get_atproto_key(&self, did: &str, now_secs: u64) -> Option<Arc<AtprotoVerifyingKey>> {
-        let shard = &self.shards[Self::shard_idx(did)];
-        let guard = shard.read();
-        let entry = guard.get(did)?;
-        if now_secs.saturating_sub(entry.resolved_at_secs) >= self.ttl_secs {
-            return None;
-        }
-        Some(Arc::clone(&entry.atproto_key))
-    }
-
-    /// Inserts a resolved secp256k1 verifying key for `did`.
-    pub fn insert(&self, did: &str, key: VerifyingKey, now_secs: u64) {
-        self.insert_atproto_key(did, AtprotoVerifyingKey::Secp256k1(key), now_secs);
-    }
-
-    /// Inserts a resolved curve-typed `ATProto` verifying key for `did`, bounding shard growth.
-    pub fn insert_atproto_key(&self, did: &str, key: AtprotoVerifyingKey, now_secs: u64) {
-        let shard = &self.shards[Self::shard_idx(did)];
-        let mut guard = shard.write();
-        if guard.len() >= MAX_DID_KEY_CACHE_PER_SHARD && !guard.contains_key(did) {
-            let ttl = self.ttl_secs;
-            guard.retain(|_, v| now_secs.saturating_sub(v.resolved_at_secs) < ttl);
-            if guard.len() >= MAX_DID_KEY_CACHE_PER_SHARD {
-                if let Some(oldest_did) = guard
-                    .iter()
-                    .min_by_key(|(_, v)| v.resolved_at_secs)
-                    .map(|(k, _)| k.clone())
-                {
-                    guard.remove(&oldest_did);
-                }
-            }
-        }
-        let verifying_key = match &key {
-            AtprotoVerifyingKey::Secp256k1(k) => Some(Arc::new(*k)),
-            AtprotoVerifyingKey::P256(_) => None,
-        };
-        guard.insert(
-            CompactString::new(did),
-            CachedSigningKey {
-                verifying_key,
-                atproto_key: Arc::new(key),
-                resolved_at_secs: now_secs,
-            },
-        );
-    }
-
-    /// Invalidates the cached key for `did` (e.g. after a signature failure, so a
-    /// rotated DID document is re-fetched on the next attempt).
-    pub fn invalidate(&self, did: &str) {
-        let shard = &self.shards[Self::shard_idx(did)];
-        let mut guard = shard.write();
-        guard.remove(did);
-    }
-
-    /// Returns the number of cached entries across all shards.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.read().len()).sum()
-    }
-
-    /// Returns `true` if no keys are cached.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Drops all cached entries.
-    pub fn clear(&self) {
-        for shard in &self.shards {
-            shard.write().clear();
-        }
-    }
-}
 
 /// Verifies `ATProto` Service Auth JWT signatures against issuer DID documents.
 #[derive(Clone)]
@@ -253,7 +87,7 @@ impl std::fmt::Debug for ServiceAuthVerifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut out = f.debug_struct("ServiceAuthVerifier");
         out.field("resolver", &"IdentityResolver")
-            .field("key_cache_ttl_secs", &self.key_cache.ttl_secs)
+            .field("key_cache_ttl_secs", &DID_KEY_CACHE_TTL_SECS)
             .field("cache_entries", &self.key_cache.len());
         #[cfg(debug_assertions)]
         out.field("registered_test_keys", &self.test_keys.read().len());
@@ -335,13 +169,8 @@ impl ServiceAuthVerifier {
     /// verification method, the multibase payload is malformed, or the key is
     /// not a secp256k1 compressed key.
     pub fn extract_signing_key_from_document(doc: &DidDocument) -> Result<VerifyingKey> {
-        match Self::extract_atproto_key_from_document(doc)? {
-            AtprotoVerifyingKey::Secp256k1(key) => Ok(key),
-            AtprotoVerifyingKey::P256(_) => Err(FeedError::Auth(format!(
-                "Verification method in '{}' is a P-256 Multikey, not a secp256k1 Multikey",
-                doc.id
-            ))),
-        }
+        skyauth::service_auth::ServiceAuthVerifier::extract_signing_key_from_document(doc)
+            .map_err(|e| FeedError::Auth(e.to_string()))
     }
 
     /// Extracts either a `secp256k1` (`[0xe7, 0x01]` / `[0xe7]`) or `P-256` (`[0x80, 0x24]`)
@@ -351,64 +180,8 @@ impl ServiceAuthVerifier {
     ///
     /// Returns [`FeedError::Auth`] when `#atproto` is missing, malformed, or uses an unsupported curve.
     pub fn extract_atproto_key_from_document(doc: &DidDocument) -> Result<AtprotoVerifyingKey> {
-        let method = doc.extract_signing_key().ok_or_else(|| {
-            FeedError::Auth(format!(
-                "DID document '{}' has no #atproto verification method",
-                doc.id
-            ))
-        })?;
-
-        let raw = method.public_key_multibase.as_deref().ok_or_else(|| {
-            FeedError::Auth(format!(
-                "Verification method '{}' carries no publicKeyMultibase",
-                method.id
-            ))
-        })?;
-
-        let key_bytes = decode_multikey(raw)?;
-
-        // 1. Standard 2-byte unsigned varint secp256k1-pub ([0xe7, 0x01] + 33-byte SEC1 key = 35 bytes)
-        if key_bytes.starts_with(&MULTIKEY_SECP256K1_VARINT)
-            && key_bytes.len() == MULTIKEY_SECP256K1_VARINT.len() + COMPRESSED_SECP256K1_KEY_LEN
-        {
-            let key = VerifyingKey::from_sec1_bytes(&key_bytes[2..]).map_err(|e| {
-                FeedError::Auth(format!(
-                    "Invalid secp256k1 public key in '{}': {e}",
-                    method.id
-                ))
-            })?;
-            return Ok(AtprotoVerifyingKey::Secp256k1(key));
-        }
-
-        // 2. Legacy 1-byte [0xe7] + 33-byte SEC1 key = 34 bytes
-        if key_bytes.first().copied() == Some(MULTIKEY_SECP256K1_PREFIX)
-            && key_bytes.len() == 1 + COMPRESSED_SECP256K1_KEY_LEN
-        {
-            let key = VerifyingKey::from_sec1_bytes(&key_bytes[1..]).map_err(|e| {
-                FeedError::Auth(format!(
-                    "Invalid secp256k1 public key in '{}': {e}",
-                    method.id
-                ))
-            })?;
-            return Ok(AtprotoVerifyingKey::Secp256k1(key));
-        }
-
-        // 3. Standard 2-byte unsigned varint p256-pub ([0x80, 0x24] + 33-byte SEC1 key = 35 bytes)
-        if key_bytes.starts_with(&MULTIKEY_P256_VARINT)
-            && key_bytes.len() == MULTIKEY_P256_VARINT.len() + COMPRESSED_SECP256K1_KEY_LEN
-        {
-            let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&key_bytes[2..]).map_err(|e| {
-                FeedError::Auth(format!("Invalid P-256 public key in '{}': {e}", method.id))
-            })?;
-            return Ok(AtprotoVerifyingKey::P256(key));
-        }
-
-        Err(FeedError::Auth(format!(
-            "Verification method '{}' is not a secp256k1 or P-256 Multikey (len {}, prefix {:?})",
-            method.id,
-            key_bytes.len(),
-            key_bytes.get(..2).unwrap_or(&key_bytes)
-        )))
+        skyauth::service_auth::ServiceAuthVerifier::extract_atproto_key_from_document(doc)
+            .map_err(|e| FeedError::Auth(e.to_string()))
     }
 
     /// Resolves (with cache) the secp256k1 signing key for the issuer DID.
@@ -627,91 +400,14 @@ impl Default for ServiceAuthVerifier {
     }
 }
 
-/// Decodes an `ATProto` Multikey (`publicKeyMultibase`) into raw key bytes.
-///
-/// `ATProto` Multikeys use base58btc multibase (prefix `z`) wrapping an
-/// identity-multibase (`0x00`) varint-prefixed key, e.g. `zQ3...`. Some
-/// `did:web` documents use base64url multibase (prefix `u`) instead.
+/// Decodes an `ATProto` Multikey (`publicKeyMultibase`) into raw key bytes via [`skyauth::service_auth::decode_multikey`].
 ///
 /// # Errors
 ///
 /// Returns [`FeedError::Auth`] on malformed multibase or base58 input.
+#[cfg(test)]
 fn decode_multikey(multibase: &str) -> Result<Vec<u8>> {
-    let bytes = multibase.as_bytes();
-    if bytes.len() < 2 {
-        return Err(FeedError::Auth(
-            "Malformed multibase key: too short".to_string(),
-        ));
-    }
-
-    let decoded = match bytes[0] {
-        // 'z' = base58btc (multibase table)
-        b'z' => bs58_decode(&multibase[1..])?,
-        // 'u' = base64url (no padding)
-        b'u' => URL_SAFE_NO_PAD
-            .decode(&multibase[1..])
-            .map_err(|e| FeedError::Auth(format!("Malformed base64url multibase: {e}")))?,
-        _ => {
-            return Err(FeedError::Auth(format!(
-                "Unsupported multibase prefix byte {:#04x}",
-                bytes[0]
-            )))
-        }
-    };
-
-    // Identity-multibase prefix (0x00) wraps the raw multikey bytes.
-    if decoded.first().copied() == Some(0x00) {
-        Ok(decoded[1..].to_vec())
-    } else {
-        Ok(decoded)
-    }
-}
-
-/// Minimal base58 (Bitcoin alphabet) decoder, sufficient for multibase `z`.
-///
-/// # Errors
-///
-/// Returns [`FeedError::Auth`] on non-alphabet characters or leading `0`.
-fn bs58_decode(input: &str) -> Result<Vec<u8>> {
-    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-    if input.is_empty() {
-        return Ok(Vec::new());
-    }
-    if input.starts_with('1') {
-        return Err(FeedError::Auth(
-            "Malformed base58 key: leading zero byte".to_string(),
-        ));
-    }
-
-    // The accumulated number is stored little-endian (`out[0]` is the least
-    // significant byte). For each base58 digit: multiply the whole number by
-    // 58, then add the digit.
-    let mut out: Vec<u8> = Vec::with_capacity(input.len());
-    for ch in input.bytes() {
-        let mut carry =
-            ALPHABET.iter().position(|&a| a == ch).ok_or_else(|| {
-                FeedError::Auth("Malformed base58 key: invalid character".to_string())
-            })? as u32;
-
-        for byte in &mut out {
-            let val = u32::from(*byte) * 58 + carry;
-            *byte = (val & 0xFF) as u8;
-            carry = val >> 8;
-        }
-        while carry > 0 {
-            out.push((carry & 0xFF) as u8);
-            carry >>= 8;
-        }
-    }
-
-    // Leading '1's encode leading zero bytes. Convert little-endian back to
-    // big-endian for the final key bytes.
-    let zeros = input.bytes().take_while(|&b| b == b'1').count();
-    let mut result = vec![0u8; zeros];
-    out.reverse();
-    result.extend_from_slice(&out);
-    Ok(result)
+    skyauth::service_auth::decode_multikey(multibase).map_err(|e| FeedError::Auth(e.to_string()))
 }
 
 #[cfg(test)]
@@ -1017,7 +713,7 @@ mod tests {
     #[test]
     fn test_bs58_known_vectors() {
         // Base58 (Bitcoin alphabet) round-trip sanity via known encoding of "hello"
-        let decoded = bs58_decode("StV1DL6CwTryKyV").unwrap();
+        let decoded = decode_multikey("zStV1DL6CwTryKyV").unwrap();
         assert_eq!(decoded, b"hello world");
     }
 
@@ -1097,7 +793,8 @@ mod tests {
         // Shard indexing stays in bounds for arbitrary DIDs.
         for i in 0..1000 {
             let did = format!("did:plc:shard_probe_{i}");
-            assert!(DidKeyCache::shard_idx(&did) < DID_KEY_CACHE_SHARDS);
+            cache.insert(&did, *key, 1_000);
+            assert!(cache.get(&did, 1_050).is_some());
         }
     }
 
