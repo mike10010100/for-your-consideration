@@ -123,10 +123,11 @@ pub mod prelude {
     };
     pub use crate::snapshot::{
         compact_memory_stores, compact_memory_stores_with_impressions, load_snapshot,
-        load_snapshot_with_preferences, save_snapshot, save_snapshot_with_preferences,
-        CompactionStats, LoadedSnapshot, SnapshotConfig, SnapshotHeader, SnapshotStatusTracker,
-        HEADER_SIZE, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1,
-        SNAPSHOT_FORMAT_VERSION_V2, SNAPSHOT_FORMAT_VERSION_V3, SNAPSHOT_MAGIC,
+        load_snapshot_with_impressions, load_snapshot_with_preferences, save_snapshot,
+        save_snapshot_with_impressions, save_snapshot_with_preferences, CompactionStats,
+        LoadedSnapshot, SnapshotConfig, SnapshotHeader, SnapshotStatusTracker, HEADER_SIZE,
+        SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION_V1, SNAPSHOT_FORMAT_VERSION_V2,
+        SNAPSHOT_FORMAT_VERSION_V3, SNAPSHOT_MAGIC,
     };
     pub use crate::types::{
         ActiveUsersTelemetryInfo, ApiErrorResponse, CompactEdge, DeletePreferencesResponse,

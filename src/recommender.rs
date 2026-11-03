@@ -270,11 +270,51 @@ impl ViewerImpressionHistory {
     }
 }
 
+/// TTL for cached per-viewer pagination sessions (5 minutes).
+pub const PAGINATION_SESSION_TTL_SECS: u64 = 300;
+
+/// Maximum number of cached pagination sessions retained per shard.
+pub const MAX_PAGINATION_SESSIONS_PER_SHARD: usize = 128;
+
+/// Computes a deterministic 64-bit fingerprint of [`RecommendationDials`] (excluding `cursor` and `limit`)
+/// so subsequent cursor pages with identical algorithmic dials slice from the same ranked session.
+#[must_use]
+fn dials_fingerprint(dials: &RecommendationDials) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = ahash::AHasher::default();
+    dials.half_life_secs.to_bits().hash(&mut hasher);
+    dials.explore_ratio.to_bits().hash(&mut hasher);
+    dials.explain.hash(&mut hasher);
+    dials.include_replies.hash(&mut hasher);
+    dials.no_nsfw.hash(&mut hasher);
+    dials.min_likes.hash(&mut hasher);
+    dials.topic_weights.art.to_bits().hash(&mut hasher);
+    dials.topic_weights.tech.to_bits().hash(&mut hasher);
+    dials.topic_weights.science.to_bits().hash(&mut hasher);
+    dials.topic_weights.news.to_bits().hash(&mut hasher);
+    dials.topic_weights.culture.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Cached first-page recommendation ranking for a viewer so subsequent cursor pages (`cursor = Some(...)`)
+/// do not skip posts after Page 1 impressions trigger the Unseen-First Ceiling.
+#[derive(Debug, Clone)]
+struct CachedFeedSession {
+    posts: Vec<ScoredPost>,
+    dials_hash: u64,
+    created_at_secs: u64,
+    has_page_impressions: bool,
+}
+
 /// Single lock shard storing impression histories for a subset of viewers.
 #[derive(Debug, Default)]
 struct ImpressionShard {
     viewers: AHashMap<u32, ViewerImpressionHistory>,
+    pagination_sessions: AHashMap<u32, CachedFeedSession>,
 }
+
+/// Snapshot serialization tuple format for [`ImpressionStore::restore_from_snapshot`].
+pub type ImpressionSnapshotRecords = Vec<(u32, Vec<(u32, u64, u32)>)>;
 
 /// 64-shard partitioned in-memory sliding LRU impression cache.
 #[derive(Debug)]
@@ -321,6 +361,58 @@ impl ImpressionStore {
         for &pid in post_ids {
             history.record_impression(pid, timestamp_secs);
         }
+        if let Some(session) = guard.pagination_sessions.get_mut(&viewer_id) {
+            session.has_page_impressions = true;
+        }
+    }
+
+    /// Caches the full ranked post list computed on Page 1 (`cursor = None`) for a viewer.
+    pub(crate) fn cache_pagination_session(
+        &self,
+        viewer_id: u32,
+        dials_hash: u64,
+        now_secs: u64,
+        posts: Vec<ScoredPost>,
+    ) {
+        let shard_idx = Self::shard_index(viewer_id);
+        let mut guard = self.shards[shard_idx].write();
+        if !guard.pagination_sessions.contains_key(&viewer_id)
+            && guard.pagination_sessions.len() >= MAX_PAGINATION_SESSIONS_PER_SHARD
+        {
+            if let Some(victim) = guard.pagination_sessions.keys().next().copied() {
+                guard.pagination_sessions.remove(&victim);
+            }
+        }
+        guard.pagination_sessions.insert(
+            viewer_id,
+            CachedFeedSession {
+                posts,
+                dials_hash,
+                created_at_secs: now_secs,
+                has_page_impressions: false,
+            },
+        );
+    }
+
+    /// Retrieves the cached ranked post list for a viewer's active pagination session if Page 1
+    /// impressions were recorded, the dial fingerprint matches, and the session is within TTL.
+    #[must_use]
+    pub(crate) fn get_cached_pagination_session(
+        &self,
+        viewer_id: u32,
+        dials_hash: u64,
+        now_secs: u64,
+    ) -> Option<Vec<ScoredPost>> {
+        let shard_idx = Self::shard_index(viewer_id);
+        let guard = self.shards[shard_idx].read();
+        let session = guard.pagination_sessions.get(&viewer_id)?;
+        if !session.has_page_impressions || session.dials_hash != dials_hash {
+            return None;
+        }
+        if now_secs.saturating_sub(session.created_at_secs) > PAGINATION_SESSION_TTL_SECS {
+            return None;
+        }
+        Some(session.posts.clone())
     }
 
     /// Evaluates the smooth continuous fatigue penalty for a candidate post for a specific viewer.
@@ -429,19 +521,25 @@ impl ImpressionStore {
     /// Prunes expired impressions older than 6 hours across all shards and clears empty viewers.
     pub fn prune_expired(&self, now_secs: u64) {
         let cutoff = now_secs.saturating_sub(FATIGUE_WINDOW_SECS);
+        let session_cutoff = now_secs.saturating_sub(PAGINATION_SESSION_TTL_SECS);
         for shard in &self.shards {
             let mut guard = shard.write();
             for history in guard.viewers.values_mut() {
                 history.prune_older_than(cutoff);
             }
             guard.viewers.retain(|_, history| !history.is_empty());
+            guard
+                .pagination_sessions
+                .retain(|_, s| s.created_at_secs >= session_cutoff);
         }
     }
 
     /// Clears all impression histories across all shards.
     pub fn clear(&self) {
         for shard in &self.shards {
-            shard.write().viewers.clear();
+            let mut guard = shard.write();
+            guard.viewers.clear();
+            guard.pagination_sessions.clear();
         }
     }
 
@@ -466,6 +564,7 @@ impl ImpressionStore {
         for (s, shard) in self.shards.iter().enumerate() {
             {
                 let mut guard = shard.write();
+                guard.pagination_sessions.clear();
                 let old_viewers = std::mem::take(&mut guard.viewers);
                 let mut new_viewers = AHashMap::with_capacity(old_viewers.len());
                 for (old_uid, mut history) in old_viewers {
@@ -481,6 +580,106 @@ impl ImpressionStore {
                 guard.viewers = new_viewers;
             }
             std::thread::yield_now();
+        }
+    }
+
+    /// Streams all non-empty viewer impression histories shard-by-shard to a writer callback.
+    ///
+    /// Wire layout (Section 9):
+    /// - `viewer_count: u32` (LE)
+    /// - For each viewer:
+    ///   - `viewer_id: u32` (LE)
+    ///   - `entry_count: u32` (LE)
+    ///   - `entry_count` entries of `(post_id: u32, served_at_secs: u64, count: u32)` (16 bytes LE each)
+    pub fn stream_impressions_to<F>(&self, write_chunk: &mut F) -> Result<u32>
+    where
+        F: FnMut(&[u8]) -> std::io::Result<()>,
+    {
+        let guards: [_; IMPRESSION_SHARDS] = std::array::from_fn(|i| self.shards[i].read());
+        let mut total_viewers: u32 = 0;
+        for guard in &guards {
+            for history in guard.viewers.values() {
+                if !history.is_empty() {
+                    total_viewers = total_viewers.checked_add(1).ok_or_else(|| {
+                        crate::error::FeedError::Snapshot(
+                            "Impression viewer count exceeds u32::MAX".to_string(),
+                        )
+                    })?;
+                }
+            }
+        }
+
+        write_chunk(&total_viewers.to_le_bytes())?;
+        let mut entry_buf = Vec::with_capacity(256 * 16);
+
+        for guard in &guards {
+            for (&viewer_id, history) in &guard.viewers {
+                if history.is_empty() {
+                    continue;
+                }
+                let mut entries: Vec<(u32, u64, u32)> = Vec::with_capacity(history.len());
+                for pid in &history.post_ids {
+                    if let Some(&ts) = history.timestamps.get(&pid) {
+                        let cnt = history.counts.get(&pid).copied().unwrap_or(1).clamp(1, 8);
+                        entries.push((pid, ts, cnt));
+                    }
+                }
+                entries.sort_by_key(|&(_, ts, _)| ts);
+
+                let entry_count = u32::try_from(entries.len()).map_err(|e| {
+                    crate::error::FeedError::Snapshot(format!(
+                        "Impression entry count exceeds u32: {e}"
+                    ))
+                })?;
+
+                let mut hdr = [0u8; 8];
+                hdr[0..4].copy_from_slice(&viewer_id.to_le_bytes());
+                hdr[4..8].copy_from_slice(&entry_count.to_le_bytes());
+                write_chunk(&hdr)?;
+
+                entry_buf.clear();
+                for (pid, ts, cnt) in entries {
+                    entry_buf.extend_from_slice(&pid.to_le_bytes());
+                    entry_buf.extend_from_slice(&ts.to_le_bytes());
+                    entry_buf.extend_from_slice(&cnt.to_le_bytes());
+                }
+                if !entry_buf.is_empty() {
+                    write_chunk(&entry_buf)?;
+                }
+            }
+        }
+
+        Ok(total_viewers)
+    }
+
+    /// Restores impression histories from snapshot records `(viewer_id, Vec<(post_id, served_at_secs, count)>)`.
+    pub fn restore_from_snapshot(&self, records: ImpressionSnapshotRecords) {
+        self.clear();
+        let max_cap = self.max_impressions_per_user;
+        for (viewer_id, mut entries) in records {
+            if entries.is_empty() {
+                continue;
+            }
+            entries.sort_by_key(|&(_, ts, _)| ts);
+            if entries.len() > max_cap {
+                let drop_count = entries.len() - max_cap;
+                entries.drain(0..drop_count);
+            }
+            let mut history = ViewerImpressionHistory::new(max_cap);
+            for (pid, ts, cnt) in entries {
+                history.post_ids.insert(pid);
+                history.timestamps.insert(pid, ts);
+                history.counts.insert(pid, cnt.clamp(1, 8));
+                history.queue.push_back(ImpressionEntry {
+                    post_id: pid,
+                    served_at_secs: ts,
+                });
+            }
+            let shard_idx = Self::shard_index(viewer_id);
+            self.shards[shard_idx]
+                .write()
+                .viewers
+                .insert(viewer_id, history);
         }
     }
 
@@ -655,6 +854,24 @@ impl Recommender {
         now_secs: u64,
     ) -> Result<FeedRecommendation> {
         let viewer_id = viewer_did.and_then(|did| self.interner.lookup_id(did));
+        let dials_hash = dials_fingerprint(dials);
+
+        if let (Some(uid), Some(ref cursor_str)) = (viewer_id, &dials.cursor) {
+            if !cursor_str.trim().is_empty() {
+                if let Some(cached_posts) = self
+                    .impression_store
+                    .get_cached_pagination_session(uid, dials_hash, now_secs)
+                {
+                    let (page_posts, next_cursor) =
+                        paginate_posts(&cached_posts, dials.limit, Some(cursor_str.as_str()));
+                    return Ok(FeedRecommendation {
+                        posts: page_posts,
+                        cursor: next_cursor,
+                    });
+                }
+            }
+        }
+
         let seen_bitmap = viewer_id.and_then(|uid| self.graph.get_user_likes_bitmap(uid));
 
         let filter_candidate_pool = |pool: &mut Vec<ScoredPost>| {
@@ -685,7 +902,7 @@ impl Recommender {
                     }
                 }
                 if let Some(uid) = viewer_id {
-                    if c.author_id == uid {
+                    if c.author_id == uid || self.graph.is_mutually_blocked(uid, c.author_id) {
                         return false;
                     }
                 }
@@ -847,6 +1064,17 @@ impl Recommender {
             diverse_posts
         };
 
+        if let Some(uid) = viewer_id {
+            if dials.cursor.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                self.impression_store.cache_pagination_session(
+                    uid,
+                    dials_hash,
+                    now_secs,
+                    final_posts.clone(),
+                );
+            }
+        }
+
         // Cursor pagination
         let (page_posts, next_cursor) =
             paginate_posts(&final_posts, dials.limit, dials.cursor.as_deref());
@@ -948,7 +1176,7 @@ impl Recommender {
                 let p_edges_slice = tail_bounded(p_edges, MAX_POST_EDGES);
                 for edge in p_edges_slice {
                     let co_uid = edge.target();
-                    if co_uid != viewer_id {
+                    if co_uid != viewer_id && !self.graph.is_mutually_blocked(viewer_id, co_uid) {
                         co_interactors.insert(co_uid);
                     }
                 }
@@ -1490,7 +1718,7 @@ impl Recommender {
                     }
                 }
                 if let Some(uid) = viewer_id {
-                    if c.author_id == uid {
+                    if c.author_id == uid || self.graph.is_mutually_blocked(uid, c.author_id) {
                         return false;
                     }
                 }
@@ -1547,7 +1775,10 @@ impl Recommender {
                                             break;
                                         }
                                         let co_user = p_edge.target();
-                                        if co_user != uid && seen_co_users.insert(co_user) {
+                                        if co_user != uid
+                                            && !self.graph.is_mutually_blocked(uid, co_user)
+                                            && seen_co_users.insert(co_user)
+                                        {
                                             if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
                                                 scan_capped = true;
                                                 break;
@@ -2029,7 +2260,10 @@ impl Recommender {
                         break;
                     }
                     let co_user = p_edge.target();
-                    if co_user != viewer_id && seen_co_users.insert(co_user) {
+                    if co_user != viewer_id
+                        && !self.graph.is_mutually_blocked(viewer_id, co_user)
+                        && seen_co_users.insert(co_user)
+                    {
                         if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
                             scan_capped = true;
                             break;
@@ -2100,6 +2334,9 @@ impl Recommender {
             .filter_map(|(pid, (curator_count, total_affinity))| {
                 let uri = self.interner.lookup_str(pid)?;
                 let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
+                if self.graph.is_mutually_blocked(viewer_id, meta.author_id) {
+                    return None;
+                }
                 let author_str = self.interner.lookup_str(meta.author_id);
                 let category =
                     self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
@@ -2141,6 +2378,9 @@ impl Recommender {
 
         self.graph.with_user_follows(viewer_id, |follows| {
             for &followed_id in follows {
+                if self.graph.is_mutually_blocked(viewer_id, followed_id) {
+                    continue;
+                }
                 self.graph
                     .with_user_interactions(followed_id, |followed_interactions| {
                         for edge in followed_interactions {
@@ -2166,6 +2406,9 @@ impl Recommender {
             .filter_map(|(pid, raw_score)| {
                 let uri = self.interner.lookup_str(pid)?;
                 let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
+                if self.graph.is_mutually_blocked(viewer_id, meta.author_id) {
+                    return None;
+                }
                 let author_str = self.interner.lookup_str(meta.author_id);
                 let category =
                     self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
@@ -3471,5 +3714,182 @@ mod tests {
         let expected_conf_2 = (2.0 / (4.0 * 2.0f32).sqrt()) * (2.0 / 5.0);
         assert!((resp.twins[1].similarity_score - expected_conf_2).abs() < 1e-4);
         assert_eq!(resp.twins[1].shared_posts_count, 2);
+    }
+
+    #[test]
+    fn test_pagination_with_live_impression_recording_no_skipped_or_duplicate_posts() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 50_000;
+
+        let viewer = interner.intern("did:plc:paginated_viewer");
+        let co_user = interner.intern("did:plc:paginated_co_user");
+        let author = interner.intern("did:plc:paginated_author");
+
+        let seed1 = interner.intern("at://did:plc:paginated_author/post/seed1");
+        let seed2 = interner.intern("at://did:plc:paginated_author/post/seed2");
+        graph.record_post_meta(seed1, author, None, None, now - 1000);
+        graph.record_post_meta(seed2, author, None, None, now - 1000);
+        graph.record_interaction(viewer, seed1, SignalType::Like, now - 900);
+        graph.record_interaction(viewer, seed2, SignalType::Like, now - 900);
+        graph.record_interaction(co_user, seed1, SignalType::Like, now - 800);
+        graph.record_interaction(co_user, seed2, SignalType::Like, now - 800);
+
+        for idx in 0..25 {
+            let post_author = interner.intern(&format!("did:plc:paginated_author_{idx:02}"));
+            let pid = interner.intern(&format!(
+                "at://did:plc:paginated_author_{idx:02}/post/cand_{idx:02}"
+            ));
+            graph.record_post_meta(pid, post_author, None, None, now - 500 + idx);
+            graph.record_interaction(co_user, pid, SignalType::Like, now - 400 + idx);
+            // Meet default min_likes = 3
+            for liker in 0..3 {
+                let lid = interner.intern(&format!("did:plc:liker_{idx}_{liker}"));
+                graph.record_interaction(lid, pid, SignalType::Like, now - 300);
+            }
+        }
+
+        let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+
+        // 1. Fetch full 20-post reference list before impressions
+        let full_dials = RecommendationDials {
+            limit: 20,
+            cursor: None,
+            ..RecommendationDials::default()
+        };
+        let full_baseline = rec
+            .recommend(Some("did:plc:paginated_viewer"), &full_dials, now)
+            .unwrap();
+        assert_eq!(full_baseline.posts.len(), 20);
+        let expected_uris: Vec<String> = full_baseline
+            .posts
+            .iter()
+            .map(|p| p.uri.to_string())
+            .collect();
+
+        // 2. Fetch Page 1 (limit = 10, cursor = None) and record impressions as the server does
+        let page1_dials = RecommendationDials {
+            limit: 10,
+            cursor: None,
+            ..RecommendationDials::default()
+        };
+        let page1 = rec
+            .recommend(Some("did:plc:paginated_viewer"), &page1_dials, now)
+            .unwrap();
+        assert_eq!(page1.posts.len(), 10);
+        assert_eq!(page1.cursor.as_deref(), Some("10"));
+        let page1_ids: Vec<u32> = page1.posts.iter().map(|p| p.post_id).collect();
+        rec.impression_store()
+            .record_impressions(viewer, &page1_ids, now);
+
+        // 3. Fetch Page 2 (limit = 10, cursor = Some("10")) AFTER Page 1 impressions were recorded
+        let page2_dials = RecommendationDials {
+            limit: 10,
+            cursor: page1.cursor.clone(),
+            ..RecommendationDials::default()
+        };
+        let page2 = rec
+            .recommend(Some("did:plc:paginated_viewer"), &page2_dials, now)
+            .unwrap();
+        assert_eq!(page2.posts.len(), 10);
+
+        let mut combined_uris: Vec<String> =
+            page1.posts.iter().map(|p| p.uri.to_string()).collect();
+        combined_uris.extend(page2.posts.iter().map(|p| p.uri.to_string()));
+
+        // Page 1 + Page 2 must match the contiguous 20-post sequence with zero skipped or duplicate posts
+        assert_eq!(combined_uris, expected_uris);
+    }
+
+    #[test]
+    fn test_block_event_filtering_across_recommendations_and_taste_twins() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 50_000;
+
+        let viewer = interner.intern("did:plc:block_viewer");
+        let blocked_twin = interner.intern("did:plc:blocked_twin");
+        let clean_twin = interner.intern("did:plc:clean_twin");
+        let blocked_author = interner.intern("did:plc:blocked_author");
+        let clean_author = interner.intern("did:plc:clean_author");
+
+        let seed1 = interner.intern("at://did:plc:clean_author/post/seed1");
+        let seed2 = interner.intern("at://did:plc:clean_author/post/seed2");
+        let cand_from_blocked_twin =
+            interner.intern("at://did:plc:clean_author/post/from_blocked_twin");
+        let cand_by_blocked_author =
+            interner.intern("at://did:plc:blocked_author/post/by_blocked_author");
+        let cand_clean = interner.intern("at://did:plc:clean_author/post/cand_clean");
+
+        graph.record_post_meta(seed1, clean_author, None, None, now - 1000);
+        graph.record_post_meta(seed2, clean_author, None, None, now - 1000);
+        graph.record_post_meta(cand_from_blocked_twin, clean_author, None, None, now - 500);
+        graph.record_post_meta(
+            cand_by_blocked_author,
+            blocked_author,
+            None,
+            None,
+            now - 500,
+        );
+        graph.record_post_meta(cand_clean, clean_author, None, None, now - 500);
+
+        // Shared likes
+        for &u in &[viewer, blocked_twin, clean_twin] {
+            graph.record_interaction(u, seed1, SignalType::Like, now - 800);
+            graph.record_interaction(u, seed2, SignalType::Like, now - 800);
+        }
+
+        // blocked_twin likes cand_from_blocked_twin
+        graph.record_interaction(
+            blocked_twin,
+            cand_from_blocked_twin,
+            SignalType::Like,
+            now - 400,
+        );
+        // clean_twin likes cand_by_blocked_author and cand_clean
+        graph.record_interaction(
+            clean_twin,
+            cand_by_blocked_author,
+            SignalType::Like,
+            now - 400,
+        );
+        graph.record_interaction(clean_twin, cand_clean, SignalType::Like, now - 400);
+
+        for &p in &[cand_from_blocked_twin, cand_by_blocked_author, cand_clean] {
+            for liker in 0..3 {
+                let lid = interner.intern(&format!("did:plc:extra_liker_{p}_{liker}"));
+                graph.record_interaction(lid, p, SignalType::Like, now - 300);
+            }
+        }
+
+        // Viewer blocks blocked_twin, and blocked_author blocks viewer (mutual block directions)
+        graph.record_block(viewer, blocked_twin);
+        graph.record_block(blocked_author, viewer);
+
+        let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+
+        // 1. Taste twins must exclude blocked_twin
+        let twins = rec.find_taste_twins("did:plc:block_viewer", 10).unwrap();
+        assert_eq!(twins.twins.len(), 1);
+        assert_eq!(twins.twins[0].user_did, "did:plc:clean_twin");
+
+        // 2. Tier 1 co-interactor walk must exclude cand_from_blocked_twin and cand_by_blocked_author
+        let dials = RecommendationDials {
+            min_likes: 1,
+            ..RecommendationDials::default()
+        };
+        let tier1_cands = rec.traverse_tier1(viewer, &dials, now);
+        let tier1_uris: Vec<&str> = tier1_cands.iter().map(|p| p.uri.as_str()).collect();
+        assert!(tier1_uris.contains(&"at://did:plc:clean_author/post/cand_clean"));
+        assert!(!tier1_uris.contains(&"at://did:plc:clean_author/post/from_blocked_twin"));
+        assert!(!tier1_uris.contains(&"at://did:plc:blocked_author/post/by_blocked_author"));
+
+        // 3. Full recommendations (including Tier 3 fallback) must exclude posts by blocked_author
+        let feed = rec
+            .recommend(Some("did:plc:block_viewer"), &dials, now)
+            .unwrap();
+        let uris: Vec<&str> = feed.posts.iter().map(|p| p.uri.as_str()).collect();
+        assert!(uris.contains(&"at://did:plc:clean_author/post/cand_clean"));
+        assert!(!uris.contains(&"at://did:plc:blocked_author/post/by_blocked_author"));
     }
 }

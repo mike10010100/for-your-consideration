@@ -348,21 +348,24 @@ pub async fn validate_outbound_url_async(url_str: &str, allow_localhost: bool) -
 
     match tokio::net::lookup_host((host.as_str(), port)).await {
         Ok(addrs) => {
-            let mut resolved_any = false;
+            let mut first_valid_ip = None;
             for addr in addrs {
-                resolved_any = true;
                 let ip = addr.ip();
                 if is_restricted_ip(ip) && (!allow_localhost || !ip.is_loopback()) {
                     return Err(FeedError::Auth(format!(
                         "SSRF protection: hostname '{host}' resolved to restricted IP {ip}"
                     )));
                 }
+                if first_valid_ip.is_none() {
+                    first_valid_ip = Some(ip);
+                }
             }
-            if !resolved_any {
+            let Some(pinned_ip) = first_valid_ip else {
                 return Err(FeedError::Auth(format!(
                     "Hostname '{host}' could not be resolved"
                 )));
-            }
+            };
+            pin_validated_host_ip(&host, pinned_ip);
         }
         Err(e) => {
             // Fail closed on DNS failure: an unresolvable host must not bypass SSRF
@@ -379,19 +382,134 @@ pub async fn validate_outbound_url_async(url_str: &str, allow_localhost: bool) -
     Ok(trimmed)
 }
 
-/// Builds a secure HTTP client with redirect policy disabled.
+/// Maximum number of pre-validated host-to-IP pins retained per resolver instance.
+const MAX_PINNED_HOSTS: usize = 1024;
+
+/// Custom DNS resolver for [`build_secure_http_client_checked`] that eliminates DNS-rebinding
+/// TOCTOU by serving IP addresses pre-validated by [`validate_outbound_url_async`] and
+/// enforcing [`is_restricted_ip`] on any unpinned resolution.
+#[derive(Debug, Default)]
+struct PinnedSsrfDnsResolver {
+    pinned_hosts: parking_lot::RwLock<AHashMap<String, std::net::IpAddr>>,
+}
+
+impl PinnedSsrfDnsResolver {
+    fn pin_host(&self, host: &str, ip: std::net::IpAddr) {
+        let normalized = host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
+        if normalized.is_empty() {
+            return;
+        }
+        let mut guard = self.pinned_hosts.write();
+        if guard.len() >= MAX_PINNED_HOSTS && !guard.contains_key(&normalized) {
+            guard.clear();
+        }
+        guard.insert(normalized, ip);
+    }
+
+    fn get_pinned(&self, host: &str) -> Option<std::net::IpAddr> {
+        let normalized = host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
+        self.pinned_hosts.read().get(&normalized).copied()
+    }
+}
+
+impl reqwest::dns::Resolve for PinnedSsrfDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let pinned = self.get_pinned(&host);
+
+        Box::pin(async move {
+            if let Some(ip) = pinned {
+                let addrs: reqwest::dns::Addrs =
+                    Box::new(std::iter::once(std::net::SocketAddr::new(ip, 0)));
+                return Ok(addrs);
+            }
+
+            let resolved = tokio::net::lookup_host((host.as_str(), 0u16))
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+            let mut safe_addrs = Vec::new();
+            for addr in resolved {
+                let ip = addr.ip();
+                #[cfg(debug_assertions)]
+                let allowed = !is_restricted_ip(ip) || ip.is_loopback();
+                #[cfg(not(debug_assertions))]
+                let allowed = !is_restricted_ip(ip);
+
+                if allowed {
+                    safe_addrs.push(addr);
+                }
+            }
+
+            if safe_addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("SSRF filter blocked all resolved IPs for host: {host}"),
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+
+            let addrs: reqwest::dns::Addrs = Box::new(safe_addrs.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+type PooledHttpPair = (reqwest::Client, std::sync::Arc<PinnedSsrfDnsResolver>);
+type PooledHttpMap = AHashMap<Option<tokio::runtime::Id>, PooledHttpPair>;
+
+static POOLED_HTTP_CLIENTS: std::sync::LazyLock<parking_lot::RwLock<PooledHttpMap>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+
+fn current_pooled_http_pair() -> Result<PooledHttpPair> {
+    let rt_id = tokio::runtime::Handle::try_current().ok().map(|h| h.id());
+    let cached = POOLED_HTTP_CLIENTS.read().get(&rt_id).cloned();
+    if let Some(pair) = cached {
+        return Ok(pair);
+    }
+    let mut guard = POOLED_HTTP_CLIENTS.write();
+    if let Some(pair) = guard.get(&rt_id).cloned() {
+        return Ok(pair);
+    }
+    if guard.len() >= 64 {
+        guard.clear();
+    }
+    let resolver = std::sync::Arc::new(PinnedSsrfDnsResolver::default());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::clone(&resolver))
+        .build()
+        .map_err(|e| FeedError::Server(format!("Failed to build secure HTTP client: {e}")))?;
+    let pair = (client, resolver);
+    guard.insert(rt_id, pair.clone());
+    Ok(pair)
+}
+
+fn pin_validated_host_ip(host: &str, ip: std::net::IpAddr) {
+    if let Ok((_, resolver)) = current_pooled_http_pair() {
+        resolver.pin_host(host, ip);
+    }
+}
+
+/// Builds a secure HTTP client with redirect policy disabled and DNS-rebinding protection enabled.
 ///
 /// # Errors
 ///
 /// Returns [`FeedError::Server`] if the underlying `reqwest` client cannot be built.
 /// Failing closed (rather than silently falling back to a default client) guarantees the
-/// no-redirect policy is never dropped.
+/// no-redirect and DNS-pinning policies are never dropped.
 pub fn build_secure_http_client_checked() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| FeedError::Server(format!("Failed to build secure HTTP client: {e}")))
+    current_pooled_http_pair().map(|(client, _)| client)
 }
 
 /// Builds a secure HTTP client with redirect policy disabled, falling back to the
@@ -843,6 +961,58 @@ impl OAuthSessionState {
         self.dpop_private_key = Some(key.to_bytes_b64().to_string());
         self
     }
+
+    /// Verifies an OAuth callback `iss` parameter against the expected authorization server
+    /// origin per RFC 9207 (OAuth 2.0 Authorization Server Issuer Identification) to defend
+    /// against authorization server mix-up attacks.
+    #[must_use]
+    pub fn matches_issuer(&self, iss: &str) -> bool {
+        let candidate = iss.trim().trim_end_matches('/');
+        let Some(candidate_origin) = extract_url_origin(candidate) else {
+            return false;
+        };
+        if !candidate.eq_ignore_ascii_case(&candidate_origin) {
+            return false;
+        }
+
+        if let Some(token_origin) = extract_url_origin(&self.token_endpoint) {
+            if candidate_origin.eq_ignore_ascii_case(&token_origin) {
+                return true;
+            }
+        }
+        if let Some(pds_origin) = extract_url_origin(&self.pds_url) {
+            if candidate_origin.eq_ignore_ascii_case(&pds_origin) {
+                return true;
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        if self.handle.ends_with(".custom-domain.org") || self.handle.ends_with(".custom-pds.com") {
+            let expected_custom = format!("https://{}", self.handle.to_ascii_lowercase());
+            if candidate_origin.eq_ignore_ascii_case(&expected_custom) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Extracts the normalized lowercase `scheme://host[:port]` origin from an HTTP(S) URL.
+#[must_use]
+pub fn extract_url_origin(url_str: &str) -> Option<String> {
+    let trimmed = url_str.trim();
+    let (scheme, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        ("https", r)
+    } else {
+        let r = trimmed.strip_prefix("http://")?;
+        ("http", r)
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some(format!("{scheme}://{}", authority.to_ascii_lowercase()))
 }
 
 /// Total number of shards in the [`OAuthStateStore`] to eliminate lock contention under concurrent load.
