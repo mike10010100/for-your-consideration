@@ -337,25 +337,28 @@ impl IngestionStats {
     #[must_use]
     pub fn new(initial_cursor: Option<u64>) -> Self {
         let stats = Self::default();
+        stats.set_initial_cursor(initial_cursor);
+        stats
+    }
+
+    /// Sets or updates the initial cursor and backfill timestamps before stream ingestion begins.
+    pub fn set_initial_cursor(&self, initial_cursor: Option<u64>) {
         let now_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
 
-        stats
-            .backfill_start_wall_time_us
+        self.backfill_start_wall_time_us
             .store(now_us, Ordering::Relaxed);
         if let Some(cur) = initial_cursor {
-            stats.latest_cursor_us.store(cur, Ordering::Relaxed);
-            stats.initial_cursor_us.store(cur, Ordering::Relaxed);
-            stats
-                .backfill_target_cursor_us
+            self.latest_cursor_us.store(cur, Ordering::Relaxed);
+            self.initial_cursor_us.store(cur, Ordering::Relaxed);
+            self.backfill_target_cursor_us
                 .store(now_us, Ordering::Relaxed);
-            for s in &stats.slice_cursors {
+            for s in &self.slice_cursors {
                 s.store(cur, Ordering::Relaxed);
             }
         }
-        stats
     }
 
     /// Sets the number of active parallel stream slices.
@@ -1205,6 +1208,16 @@ impl JetstreamIngester {
             graph,
             stats,
         }
+    }
+
+    /// Returns a cloned [`JetstreamIngester`] configured with an updated initial cursor,
+    /// sharing the same underlying [`IngestionStats`] instance.
+    #[must_use]
+    pub fn with_initial_cursor(&self, initial_cursor: Option<u64>) -> Self {
+        let mut cloned = self.clone();
+        cloned.config.initial_cursor = initial_cursor;
+        cloned.stats.set_initial_cursor(initial_cursor);
+        cloned
     }
 
     /// Returns a reference to the shared ingestion metrics.
