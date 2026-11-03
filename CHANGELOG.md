@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.10] - 2026-11-02
+
+### Changed
+
+- **Near-Zero-Downtime Shutdown, Immediate HTTP Bind & Parallel Snapshot Hydration** (`src/main.rs`, `src/interner.rs`, `src/snapshot.rs`, `src/graph.rs`, `src/ingest.rs`, `Dockerfile`, `docker-compose.yml`):
+  - **HTTP Server Alive During Shutdown Snapshot Save**: Separated the Axum HTTP listener cancellation token (`http_cancel_token`) from the background ingestion/maintenance token (`cancel_token`) in `src/main.rs` so the service continues answering live feed requests during the ~70s final shutdown snapshot write, closing the HTTP listener only after `rename()` completes.
+  - **Immediate HTTP Bind & Background Snapshot Hydration**: Bound the TCP listener and spawned `serve_xrpc` immediately on boot (`< 0.5s`) while running snapshot hydration (`load_snapshot_with_preferences`), startup retention pruning (`prune_older_than`), and Jetstream firehose catch-up in a background task. Guarded periodic and shutdown snapshot saves with `hydration_completed` so an early `SIGTERM` during background hydration never overwrites `/data/snapshot.bin` with an unhydrated store.
+  - **Asynchronous Hysteresis-Gated Startup Compaction**: Removed the unconditional synchronous `compact_memory_stores` call that blocked startup and Jetstream ingestion for ~200s on boot; startup compaction now runs asynchronously in the background (serialized via `snapshot_save_slot`) only when interned strings exceed the `active_nodes * 2` hysteresis threshold.
+  - **Parallel Sharded Snapshot Hydration**: Added `StringInterner::hydrate_sharded_buckets` (`src/interner.rs`) and updated Section 1 of `load_snapshot_with_preferences` (`src/snapshot.rs`) to partition strings into 64 pre-sized shard buckets during streaming read and populate the 64 shard `AHashMap`s in parallel across 8 threads without lock contention or map resizing. Parallelized the 5 shard-table rebuilds in `GraphStore::restore_from_snapshot` (`src/graph.rs`) using `std::thread::scope` with pre-sized `AHashMap::with_capacity` and replaced the $O(N)$ `posts.contains(&pid)` linear scan when building `author_posts` with an $O(1)$ `meta_shards[p_shard].insert(pid, meta).is_none()` check.
+  - **Docker Dependency Layer Cache Preservation & Fast Healthcheck**: Added a `manifest-prep` stage in `Dockerfile` that normalizes the workspace package version in `Cargo.toml` and `Cargo.lock` before pre-building dependencies so version bumps no longer invalidate the 185-crate compiled dependency cache layer, and tightened the container `HEALTHCHECK` interval from `30s` to `5s` in `Dockerfile` and `docker-compose.yml`.
+
+---
+
 ## [0.6.9] - 2026-11-02
 
 ### Fixed

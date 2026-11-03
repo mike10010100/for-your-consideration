@@ -16,6 +16,7 @@
 //! and Axum XRPC server with graceful shutdown and structured logging.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -129,145 +130,17 @@ async fn main() -> Result<()> {
     let recommender = Arc::new(Recommender::new(Arc::clone(&interner), Arc::clone(&graph)));
     let snapshot_tracker = Arc::new(SnapshotStatusTracker::new(&snapshot_config));
 
-    // Hydrate snapshot on boot if it exists
-    let restored_cursor = if snapshot_config.path.exists() {
-        match load_snapshot_with_preferences(
-            &snapshot_config.path,
-            &interner,
-            &graph,
-            &preferences_store,
-        ) {
-            Ok(Some(loaded)) => {
-                info!(
-                    duration_ms = loaded.load_duration_ms,
-                    strings = loaded.header.num_strings,
-                    users = loaded.header.num_users,
-                    edges = loaded.header.total_forward_edges,
-                    preferences = loaded.header.num_preferences,
-                    cursor = loaded.header.jetstream_cursor_us,
-                    "Hydrated snapshot successfully from '{}'",
-                    snapshot_config.path.display()
-                );
-                snapshot_tracker.record_load(loaded.load_duration_ms);
-                if loaded.header.jetstream_cursor_us > 0 {
-                    Some(loaded.header.jetstream_cursor_us)
-                } else {
-                    None
-                }
-            }
-            Ok(None) => {
-                info!(
-                    "Snapshot file '{}' does not exist; starting with clean state",
-                    snapshot_config.path.display()
-                );
-                None
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "Failed to load snapshot from '{}'; starting with clean state",
-                    snapshot_config.path.display()
-                );
-                None
-            }
-        }
-    } else {
-        info!(
-            "No snapshot found at '{}'; starting with clean state",
-            snapshot_config.path.display()
-        );
-        None
-    };
-
     let retention_days: u64 = std::env::var("RETENTION_DAYS")
         .ok()
         .and_then(|d| d.parse::<u64>().ok())
         .unwrap_or(DEFAULT_RETENTION_DAYS);
 
-    let now_epoch_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Prune stale interaction edges from hydrated snapshot before ingesting firehose
-    if restored_cursor.is_some() {
-        let prune_cutoff = now_epoch_secs.saturating_sub(retention_days.saturating_mul(86400));
-        let prune_start = std::time::Instant::now();
-        graph.prune_older_than(prune_cutoff);
-        let prune_stats = graph.stats();
-        let prune_duration_ms = prune_start.elapsed().as_secs_f64() * 1000.0;
-        info!(
-            retention_days = retention_days,
-            prune_cutoff = prune_cutoff,
-            edges_retained = prune_stats.total_interactions,
-            users_retained = prune_stats.total_users,
-            duration_ms = prune_duration_ms,
-            "Startup graph retention prune completed successfully before Jetstream ingestion"
-        );
-
-        // Compact memory stores: garbage-collect dead strings and tightly re-pack graph shards
-        let compact_stats = for_your_consideration::snapshot::compact_memory_stores(
-            &interner,
-            &graph,
-            &preferences_store,
-        );
-        info!(
-            strings_before = compact_stats.strings_before,
-            strings_after = compact_stats.strings_after,
-            duration_ms = compact_stats.duration_ms,
-            "Startup memory store compaction completed successfully before Jetstream ingestion"
-        );
-    }
-
-    // 4. Initialize Jetstream Ingester & Ingestion Tracker with Historical Replay
+    // 4. Initialize Jetstream Ingester & Ingestion Tracker (cursor updated once snapshot hydration completes)
     let backfill_hours: u64 = std::env::var("REPLAY_HOURS")
         .or_else(|_| std::env::var("BACKFILL_HOURS"))
         .ok()
         .and_then(|h| h.parse::<u64>().ok())
         .unwrap_or(12);
-
-    // Default backfill start: now - backfill_hours
-    let backfill_start_us = now_epoch_secs
-        .saturating_sub(backfill_hours.saturating_mul(3600))
-        .saturating_mul(1_000_000);
-
-    // Oldest safe cursor clamped to the requested replay/backfill window
-    let oldest_safe_cursor_us = backfill_start_us;
-
-    let effective_cursor = match restored_cursor {
-        Some(cursor) if cursor > 0 => {
-            let safe_cursor = cursor.max(oldest_safe_cursor_us);
-            if safe_cursor > cursor {
-                info!(
-                    snapshot_cursor = cursor,
-                    clamped_cursor = safe_cursor,
-                    backfill_hours = backfill_hours,
-                    "Snapshot cursor was older than requested {backfill_hours}h replay window; clamped to {backfill_hours}h ago"
-                );
-            } else {
-                let downtime_secs = now_epoch_secs.saturating_sub(cursor / 1_000_000);
-                info!(
-                    cursor_us = cursor,
-                    downtime_secs = downtime_secs,
-                    "Resuming Jetstream ingestion from snapshot cursor (replaying {downtime_secs}s of downtime gap)"
-                );
-            }
-            Some(safe_cursor)
-        }
-        _ => {
-            if backfill_hours > 0 {
-                info!(
-                    backfill_hours = backfill_hours,
-                    cursor_us = backfill_start_us,
-                    "Initiating {backfill_hours}-hour historical replay backfill from Jetstream"
-                );
-                Some(backfill_start_us)
-            } else {
-                info!("Starting Jetstream ingestion from live stream head");
-                None
-            }
-        }
-    };
 
     let parallel_slicing = std::env::var("PARALLEL_SLICING")
         .or_else(|_| std::env::var("PARALLEL_STREAMS"))
@@ -297,7 +170,7 @@ async fn main() -> Result<()> {
         jetstream_url: CompactString::new(&jetstream_url),
         jetstream_endpoints,
         parallel_slicing,
-        initial_cursor: effective_cursor,
+        initial_cursor: None,
         ..IngesterConfig::default()
     };
 
@@ -468,35 +341,228 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(bind_addr).await.map_err(FeedError::Io)?;
     info!("XRPC HTTP server bound to http://{bind_addr}");
 
-    // 6. Setup cancellation tokens and JoinSet for task lifecycle management
+    // 6. Setup cancellation tokens and JoinSet for task lifecycle management.
+    // The HTTP listener uses a dedicated cancellation token so it stays online and continues
+    // serving live feed traffic while the final shutdown snapshot is written to disk.
     let cancel_token = CancellationToken::new();
+    let http_cancel_token = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
-    // Spawn XRPC Server task
-    let server_token = cancel_token.clone();
-    tasks.spawn(async move {
+    // Spawn XRPC Server task immediately so `/healthz` and feed endpoints are available within < 0.5s
+    let server_token = http_cancel_token.clone();
+    let http_server_handle = tokio::spawn(async move {
         if let Err(e) = serve_xrpc(listener, router, server_token).await {
             error!("XRPC server error: {e}");
         }
     });
 
-    // Spawn Jetstream Ingestion task
-    if enable_ingestion {
-        let ingest_token = cancel_token.clone();
-        let ingester_task = ingester.clone();
+    // Serializes background startup hydration, periodic prune/compaction, periodic snapshot,
+    // and shutdown snapshot writes so maintenance tasks never contend on graph locks simultaneously
+    // or race the `.tmp` path.
+    let snapshot_save_slot: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
+    let hydration_completed = Arc::new(AtomicBool::new(!snapshot_config.path.exists()));
+    let baseline_compacted_strings = Arc::new(AtomicUsize::new(0));
+
+    // Spawn Background Snapshot Hydration, Firehose Ingestion, and Conditional Startup Compaction
+    {
+        let boot_cancel = cancel_token.clone();
+        let boot_save_slot = Arc::clone(&snapshot_save_slot);
+        let boot_interner = Arc::clone(&interner);
+        let boot_graph = Arc::clone(&graph);
+        let boot_preferences = Arc::clone(&preferences_store);
+        let boot_snapshot_path = snapshot_config.path.clone();
+        let boot_snapshot_tracker = Arc::clone(&snapshot_tracker);
+        let boot_hydration_completed = Arc::clone(&hydration_completed);
+        let boot_baseline_strings = Arc::clone(&baseline_compacted_strings);
+        let boot_ingester = ingester.clone();
+
         tasks.spawn(async move {
-            info!("Starting Jetstream real-time firehose consumer...");
-            if let Err(e) = ingester_task.run(ingest_token).await {
-                error!("Jetstream ingester error: {e}");
-            } else {
-                info!("Jetstream ingester shut down cleanly.");
+            // Step A: Hydrate snapshot from disk and prune expired edges in background
+            let hydrate_interner = Arc::clone(&boot_interner);
+            let hydrate_graph = Arc::clone(&boot_graph);
+            let hydrate_preferences = Arc::clone(&boot_preferences);
+            let hydrate_path = boot_snapshot_path.clone();
+            let hydrate_tracker = Arc::clone(&boot_snapshot_tracker);
+            let hydrate_slot = Arc::clone(&boot_save_slot);
+
+            let hydrate_res = tokio::task::spawn_blocking(move || {
+                let _guard = hydrate_slot.blocking_lock();
+                let restored_cursor = if hydrate_path.exists() {
+                    match load_snapshot_with_preferences(
+                        &hydrate_path,
+                        &hydrate_interner,
+                        &hydrate_graph,
+                        &hydrate_preferences,
+                    ) {
+                        Ok(Some(loaded)) => {
+                            info!(
+                                duration_ms = loaded.load_duration_ms,
+                                strings = loaded.header.num_strings,
+                                users = loaded.header.num_users,
+                                edges = loaded.header.total_forward_edges,
+                                preferences = loaded.header.num_preferences,
+                                cursor = loaded.header.jetstream_cursor_us,
+                                "Hydrated snapshot successfully from '{}'",
+                                hydrate_path.display()
+                            );
+                            hydrate_tracker.record_load(loaded.load_duration_ms);
+                            if loaded.header.jetstream_cursor_us > 0 {
+                                Some(loaded.header.jetstream_cursor_us)
+                            } else {
+                                None
+                            }
+                        }
+                        Ok(None) => {
+                            info!(
+                                "Snapshot file '{}' does not exist; starting with clean state",
+                                hydrate_path.display()
+                            );
+                            None
+                        }
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                "Failed to load snapshot from '{}'; starting with clean state",
+                                hydrate_path.display()
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    info!(
+                        "No snapshot found at '{}'; starting with clean state",
+                        hydrate_path.display()
+                    );
+                    None
+                };
+
+                let now_epoch_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                if restored_cursor.is_some() {
+                    let prune_cutoff =
+                        now_epoch_secs.saturating_sub(retention_days.saturating_mul(86400));
+                    let prune_start = std::time::Instant::now();
+                    hydrate_graph.prune_older_than(prune_cutoff);
+                    let prune_stats = hydrate_graph.stats();
+                    let prune_duration_ms = prune_start.elapsed().as_secs_f64() * 1000.0;
+                    info!(
+                        retention_days = retention_days,
+                        prune_cutoff = prune_cutoff,
+                        edges_retained = prune_stats.total_interactions,
+                        users_retained = prune_stats.total_users,
+                        duration_ms = prune_duration_ms,
+                        "Startup graph retention prune completed successfully before Jetstream ingestion"
+                    );
+                }
+
+                (restored_cursor, now_epoch_secs)
+            })
+            .await;
+
+            let (restored_cursor, now_epoch_secs) = match hydrate_res {
+                Ok(pair) => pair,
+                Err(join_err) => {
+                    error!(error = %join_err, "Startup snapshot hydration spawn_blocking join error");
+                    return;
+                }
+            };
+
+            boot_baseline_strings.store(boot_interner.len(), Ordering::Release);
+            boot_hydration_completed.store(true, Ordering::Release);
+
+            if boot_cancel.is_cancelled() {
+                return;
+            }
+
+            // Step B: Spawn conditional background memory compaction ONLY if dead strings exceed
+            // hysteresis threshold, without blocking Jetstream firehose catch-up.
+            let active_nodes = boot_graph.total_nodes();
+            let current_strings = boot_interner.len();
+            if restored_cursor.is_some()
+                && current_strings > active_nodes.saturating_mul(2).max(100_000)
+            {
+                let compact_interner = Arc::clone(&boot_interner);
+                let compact_graph = Arc::clone(&boot_graph);
+                let compact_preferences = Arc::clone(&boot_preferences);
+                let compact_slot = Arc::clone(&boot_save_slot);
+                let compact_baseline = Arc::clone(&boot_baseline_strings);
+                tokio::spawn(async move {
+                    let compact_res = tokio::task::spawn_blocking(move || {
+                        let _guard = compact_slot.blocking_lock();
+                        for_your_consideration::snapshot::compact_memory_stores(
+                            &compact_interner,
+                            &compact_graph,
+                            &compact_preferences,
+                        )
+                    })
+                    .await;
+                    if let Ok(compact_stats) = compact_res {
+                        compact_baseline.store(compact_stats.strings_after, Ordering::Release);
+                        info!(
+                            strings_before = compact_stats.strings_before,
+                            strings_after = compact_stats.strings_after,
+                            duration_ms = compact_stats.duration_ms,
+                            "Asynchronous startup memory store compaction completed"
+                        );
+                    }
+                });
+            }
+
+            // Step C: Start Jetstream Ingestion immediately
+            if enable_ingestion {
+                let backfill_start_us = now_epoch_secs
+                    .saturating_sub(backfill_hours.saturating_mul(3600))
+                    .saturating_mul(1_000_000);
+                let oldest_safe_cursor_us = backfill_start_us;
+
+                let effective_cursor = match restored_cursor {
+                    Some(cursor) if cursor > 0 => {
+                        let safe_cursor = cursor.max(oldest_safe_cursor_us);
+                        if safe_cursor > cursor {
+                            info!(
+                                snapshot_cursor = cursor,
+                                clamped_cursor = safe_cursor,
+                                backfill_hours = backfill_hours,
+                                "Snapshot cursor was older than requested {backfill_hours}h replay window; clamped to {backfill_hours}h ago"
+                            );
+                        } else {
+                            let downtime_secs = now_epoch_secs.saturating_sub(cursor / 1_000_000);
+                            info!(
+                                cursor_us = cursor,
+                                downtime_secs = downtime_secs,
+                                "Resuming Jetstream ingestion from snapshot cursor (replaying {downtime_secs}s of downtime gap)"
+                            );
+                        }
+                        Some(safe_cursor)
+                    }
+                    _ => {
+                        if backfill_hours > 0 {
+                            info!(
+                                backfill_hours = backfill_hours,
+                                cursor_us = backfill_start_us,
+                                "Initiating {backfill_hours}-hour historical replay backfill from Jetstream"
+                            );
+                            Some(backfill_start_us)
+                        } else {
+                            info!("Starting Jetstream ingestion from live stream head");
+                            None
+                        }
+                    }
+                };
+
+                let ingester_task = boot_ingester.with_initial_cursor(effective_cursor);
+                info!("Starting Jetstream real-time firehose consumer...");
+                if let Err(e) = ingester_task.run(boot_cancel).await {
+                    error!("Jetstream ingester error: {e}");
+                } else {
+                    info!("Jetstream ingester shut down cleanly.");
+                }
             }
         });
     }
-
-    // Serializes periodic prune/compaction, periodic snapshot, and shutdown snapshot writes
-    // so maintenance tasks never contend on graph locks simultaneously or race the `.tmp` path.
-    let snapshot_save_slot: Arc<AsyncMutex<()>> = Arc::new(AsyncMutex::new(()));
 
     // Spawn Periodic Store Pruning task (SEC-06 memory bounding)
     let prune_interner = Arc::clone(&interner);
@@ -505,6 +571,8 @@ async fn main() -> Result<()> {
     let prune_impression_store = Arc::clone(&recommender.impression_store);
     let prune_cancel = cancel_token.clone();
     let prune_save_slot = Arc::clone(&snapshot_save_slot);
+    let prune_hydration_done = Arc::clone(&hydration_completed);
+    let prune_baseline_strings = Arc::clone(&baseline_compacted_strings);
     let prune_interval_secs = std::env::var("PRUNE_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -514,7 +582,6 @@ async fn main() -> Result<()> {
     tasks.spawn(async move {
         let mut interval = tokio::time::interval(prune_interval);
         interval.tick().await; // Consume initial immediate tick (startup prune already ran)
-        let mut last_compacted_strings = prune_interner.len();
         loop {
             tokio::select! {
                 () = prune_cancel.cancelled() => {
@@ -522,6 +589,9 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
+                    if !prune_hydration_done.load(Ordering::Acquire) {
+                        continue;
+                    }
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -540,7 +610,7 @@ async fn main() -> Result<()> {
                     let p_sessions = Arc::clone(&prune_user_oauth_sessions);
                     let p_active = Arc::clone(&prune_active_users);
                     let p_slot = Arc::clone(&prune_save_slot);
-                    let baseline_strings = last_compacted_strings;
+                    let baseline_strings = prune_baseline_strings.load(Ordering::Acquire);
 
                     let prune_res = tokio::task::spawn_blocking(move || {
                         let _guard = p_slot.blocking_lock();
@@ -590,7 +660,7 @@ async fn main() -> Result<()> {
 
                     match prune_res {
                         Ok(Some(new_baseline)) => {
-                            last_compacted_strings = new_baseline;
+                            prune_baseline_strings.store(new_baseline, Ordering::Release);
                         }
                         Ok(None) => {}
                         Err(join_err) => {
@@ -613,6 +683,7 @@ async fn main() -> Result<()> {
     let snapshot_ingester_stats = Arc::clone(ingester.stats());
     let periodic_snapshot_tracker = Arc::clone(&snapshot_tracker);
     let periodic_save_slot = Arc::clone(&snapshot_save_slot);
+    let snapshot_hydration_done = Arc::clone(&hydration_completed);
 
     tasks.spawn(async move {
         let mut interval = tokio::time::interval(snapshot_interval);
@@ -624,6 +695,9 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
+                    if !snapshot_hydration_done.load(Ordering::Acquire) {
+                        continue;
+                    }
                     // Periodic memory bounding: Prune stores (SEC-06) inside spawn_blocking
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -703,12 +777,12 @@ async fn main() -> Result<()> {
 
     // 7. Wait for shutdown signal (SIGINT / SIGTERM)
     wait_for_shutdown_signal().await;
-    info!("Shutdown signal received. Initiating graceful drain...");
+    info!("Shutdown signal received. Stopping firehose ingestion while keeping HTTP server online for final snapshot write...");
 
-    // 8. Trigger cooperative cancellation across all tasks
+    // 8. Trigger cooperative cancellation across background ingestion/maintenance tasks
     cancel_token.cancel();
 
-    // 9. Await task completion with timeout safety
+    // 9. Await background task completion with timeout safety
     let shutdown_timeout = Duration::from_secs(SHUTDOWN_TIMEOUT_SECS);
     let drain_result = tokio::time::timeout(shutdown_timeout, async {
         while let Some(res) = tasks.join_next().await {
@@ -721,72 +795,78 @@ async fn main() -> Result<()> {
 
     if drain_result.is_err() {
         warn!(
-            "Graceful shutdown timed out after {SHUTDOWN_TIMEOUT_SECS}s; aborting remaining tasks."
+            "Graceful shutdown timed out after {SHUTDOWN_TIMEOUT_SECS}s; aborting remaining background tasks."
         );
         tasks.abort_all();
     } else {
-        info!("All background tasks shut down cleanly.");
+        info!("All background ingestion and maintenance tasks shut down cleanly.");
     }
 
-    // 10. Persist final snapshot on graceful shutdown.
+    // 10. Persist final snapshot on graceful shutdown while the HTTP server remains online.
     //
-    // NOTE: The final save intentionally does NOT run `compact_memory_stores` first. Compaction is
-    // an O(data) rebuild that took ~210s on a 36M-string production store, which blows far past
-    // Docker's `stop_grace_period` and caused SIGKILL *before* the save could even begin (losing
-    // the checkpoint). Compaction is not required for a correct save — the serializer streams
-    // whatever is currently interned — and dead-string reclamation is handled by the periodic
-    // prune task on the next run. A dedicated save timeout keeps the critical path bounded.
-    let final_cursor = ingester.latest_cursor();
-    info!("Persisting final snapshot on graceful shutdown...");
-    let start_final = std::time::Instant::now();
-    let snap_path = snapshot_config.path.clone();
-    let snap_interner = Arc::clone(&interner);
-    let snap_graph = Arc::clone(&graph);
-    let snap_preferences = Arc::clone(&preferences_store);
-    let save_slot = Arc::clone(&snapshot_save_slot);
+    // Guarded by `hydration_completed` so an early SIGTERM during initial snapshot hydration never
+    // overwrites an existing `/data/snapshot.bin` with an unhydrated store.
+    if hydration_completed.load(Ordering::Acquire) {
+        let final_cursor = ingester.latest_cursor();
+        info!("Persisting final snapshot on graceful shutdown (HTTP server still serving live traffic)...");
+        let start_final = std::time::Instant::now();
+        let snap_path = snapshot_config.path.clone();
+        let snap_interner = Arc::clone(&interner);
+        let snap_graph = Arc::clone(&graph);
+        let snap_preferences = Arc::clone(&preferences_store);
+        let save_slot = Arc::clone(&snapshot_save_slot);
 
-    let save_res = tokio::time::timeout(
-        Duration::from_secs(shutdown_save_timeout_secs),
-        tokio::task::spawn_blocking(move || {
-            // Serialize against any in-flight periodic save so the two never race the `.tmp` path.
-            let _guard = save_slot.blocking_lock();
-            save_snapshot_with_preferences(
-                &snap_path,
-                &snap_interner,
-                &snap_graph,
-                &snap_preferences,
-                final_cursor,
-            )
-        }),
-    )
-    .await;
+        let save_res = tokio::time::timeout(
+            Duration::from_secs(shutdown_save_timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                // Serialize against any in-flight periodic save so the two never race the `.tmp` path.
+                let _guard = save_slot.blocking_lock();
+                save_snapshot_with_preferences(
+                    &snap_path,
+                    &snap_interner,
+                    &snap_graph,
+                    &snap_preferences,
+                    final_cursor,
+                )
+            }),
+        )
+        .await;
 
-    match save_res {
-        Ok(Ok(Ok(_))) => {
-            let duration_ms = start_final.elapsed().as_secs_f64() * 1000.0;
-            let file_size = snapshot_config.path.metadata().map_or(0, |m| m.len());
-            snapshot_tracker.record_save(duration_ms, file_size);
-            info!(
-                "Final shutdown snapshot saved successfully to '{}' in {duration_ms:.2} ms",
-                snapshot_config.path.display()
-            );
+        match save_res {
+            Ok(Ok(Ok(_))) => {
+                let duration_ms = start_final.elapsed().as_secs_f64() * 1000.0;
+                let file_size = snapshot_config.path.metadata().map_or(0, |m| m.len());
+                snapshot_tracker.record_save(duration_ms, file_size);
+                info!(
+                    "Final shutdown snapshot saved successfully to '{}' in {duration_ms:.2} ms",
+                    snapshot_config.path.display()
+                );
+            }
+            Ok(Ok(Err(e))) => {
+                snapshot_tracker.record_save_failure(&e.to_string());
+                error!(error = %e, "Final shutdown snapshot save failed");
+            }
+            Ok(Err(join_err)) => {
+                snapshot_tracker.record_save_failure(&join_err.to_string());
+                error!(error = %join_err, "Final shutdown snapshot spawn_blocking join error");
+            }
+            Err(_) => {
+                let msg = format!(
+                    "Final shutdown snapshot save exceeded {shutdown_save_timeout_secs}s timeout"
+                );
+                snapshot_tracker.record_save_failure(&msg);
+                error!("{msg}");
+            }
         }
-        Ok(Ok(Err(e))) => {
-            snapshot_tracker.record_save_failure(&e.to_string());
-            error!(error = %e, "Final shutdown snapshot save failed");
-        }
-        Ok(Err(join_err)) => {
-            snapshot_tracker.record_save_failure(&join_err.to_string());
-            error!(error = %join_err, "Final shutdown snapshot spawn_blocking join error");
-        }
-        Err(_) => {
-            let msg = format!(
-                "Final shutdown snapshot save exceeded {shutdown_save_timeout_secs}s timeout"
-            );
-            snapshot_tracker.record_save_failure(&msg);
-            error!("{msg}");
-        }
+    } else {
+        warn!(
+            "Shutdown signal arrived before initial snapshot hydration completed; skipping final snapshot save to preserve existing snapshot file."
+        );
     }
+
+    // 11. Now that the snapshot is safely persisted, shut down the HTTP listener.
+    http_cancel_token.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), http_server_handle).await;
 
     info!("for-your-consideration shutdown complete. Goodbye!");
 

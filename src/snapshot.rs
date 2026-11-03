@@ -35,13 +35,14 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use compact_str::CompactString;
 use crc32fast::Hasher;
 use roaring::RoaringBitmap;
 use tracing::info;
 
 use crate::error::{FeedError, Result};
 use crate::graph::{GraphSnapshotData, GraphStore};
-use crate::interner::StringInterner;
+use crate::interner::{string_shard_idx, StringInterner, NUM_INTERNER_SHARDS};
 use crate::preferences::UserPreferencesStore;
 use crate::types::{
     CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
@@ -710,7 +711,10 @@ pub fn load_snapshot_with_preferences(
 
     // Section 1: Strings
     let string_count = stream.read_u32()? as usize;
-    interner.clear();
+    let bounded_strings = stream.bound_count(string_count, 4);
+    let per_shard_cap = (bounded_strings / NUM_INTERNER_SHARDS).saturating_add(4);
+    let mut shard_buckets: [Vec<CompactString>; NUM_INTERNER_SHARDS] =
+        std::array::from_fn(|_| Vec::with_capacity(per_shard_cap));
     let mut str_buf = Vec::with_capacity(128);
 
     for _ in 0..string_count {
@@ -719,8 +723,10 @@ pub fn load_snapshot_with_preferences(
         let s = std::str::from_utf8(&str_buf).map_err(|e| {
             FeedError::Snapshot(format!("Invalid UTF-8 in string interner snapshot: {e}"))
         })?;
-        interner.get_or_intern(s);
+        let shard_idx = string_shard_idx(s);
+        shard_buckets[shard_idx].push(CompactString::new(s));
     }
+    interner.hydrate_sharded_buckets(shard_buckets);
 
     // Section 2: User Interactions
     let user_count = stream.read_u32()? as usize;

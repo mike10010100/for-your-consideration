@@ -10,7 +10,8 @@ pub const NUM_INTERNER_SHARDS: usize = 64;
 
 /// Computes a deterministic shard index from a string slice using FNV-1a.
 #[inline]
-fn string_shard_idx(s: &str) -> usize {
+#[must_use]
+pub(crate) fn string_shard_idx(s: &str) -> usize {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in s.as_bytes() {
         hash ^= u64::from(*byte);
@@ -279,10 +280,51 @@ impl StringInterner {
 
     /// Replaces the internal state with the provided ordered list of strings.
     pub fn hydrate_from(&self, strings: Vec<CompactString>) {
-        self.clear();
+        let per_shard = (strings.len() / NUM_INTERNER_SHARDS).saturating_add(4);
+        let mut shard_buckets: [Vec<CompactString>; NUM_INTERNER_SHARDS] =
+            std::array::from_fn(|_| Vec::with_capacity(per_shard));
         for s in strings {
-            self.get_or_intern(&s);
+            let shard_idx = string_shard_idx(&s);
+            shard_buckets[shard_idx].push(s);
         }
+        self.hydrate_sharded_buckets(shard_buckets);
+    }
+
+    /// Replaces the internal state from pre-partitioned shard string buckets in parallel.
+    ///
+    /// Preserves exact `(shard_idx, local_idx)` ID assignments for each shard while building
+    /// the reverse lookup maps across multiple threads without lock contention or map resizing.
+    pub fn hydrate_sharded_buckets(
+        &self,
+        shard_buckets: [Vec<CompactString>; NUM_INTERNER_SHARDS],
+    ) {
+        let mut indexed_buckets: Vec<(usize, Vec<CompactString>)> =
+            shard_buckets.into_iter().enumerate().collect();
+        std::thread::scope(|s| {
+            for chunk in indexed_buckets.chunks_mut(8) {
+                s.spawn(move || {
+                    for (shard_idx, bucket) in chunk {
+                        let shard_idx = *shard_idx;
+                        let cap = bucket.len();
+                        let mut to_str = Vec::with_capacity(cap);
+                        let mut to_id = AHashMap::with_capacity(cap);
+                        for compact in std::mem::take(bucket) {
+                            if let std::collections::hash_map::Entry::Vacant(vacant) =
+                                to_id.entry(compact.clone())
+                            {
+                                let local_idx = to_str.len();
+                                let id = local_to_id(shard_idx, local_idx);
+                                vacant.insert(id);
+                                to_str.push(compact);
+                            }
+                        }
+                        let mut guard = self.shards[shard_idx].write();
+                        guard.to_str = to_str;
+                        guard.to_id = to_id;
+                    }
+                });
+            }
+        });
     }
 }
 

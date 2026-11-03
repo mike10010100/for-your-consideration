@@ -2,13 +2,21 @@
 # Multi-Stage Production Dockerfile for "For Your Consideration" Feed Engine
 # ==============================================================================
 
+# Stage 0: Normalize workspace version in manifests so version bumps (e.g. 0.6.9 -> 0.6.10)
+# produce identical manifest checksums and preserve the compiled dependency layer cache.
+FROM debian:bookworm-slim AS manifest-prep
+WORKDIR /manifests
+COPY Cargo.toml Cargo.lock ./
+RUN sed -i '0,/^version = ".*"/s//version = "0.0.1"/' Cargo.toml && \
+    sed -i '/^name = "for-your-consideration"$/{n;s/^version = ".*"/version = "0.0.1"/;}' Cargo.lock
+
 # Stage 1: Build Release Binary
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 
-# Copy dependency manifests
-COPY Cargo.toml Cargo.lock ./
+# Copy version-normalized dependency manifests
+COPY --from=manifest-prep /manifests/Cargo.toml /manifests/Cargo.lock ./
 
 # Create dummy source to pre-build dependencies for caching
 RUN mkdir src benches && \
@@ -19,7 +27,8 @@ RUN mkdir src benches && \
     cargo build --release --locked || true && \
     rm -rf src benches
 
-# Copy real source code and assets
+# Copy real manifests, source code, and assets
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
 COPY assets ./assets
@@ -73,7 +82,7 @@ ENV HOST=0.0.0.0 \
 EXPOSE 3000
 
 # Container healthcheck
-HEALTHCHECK --interval=30s --timeout=30s --start-period=360s --retries=5 \
+HEALTHCHECK --interval=5s --timeout=10s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:3000/healthz || exit 1
 
 # Start feed engine

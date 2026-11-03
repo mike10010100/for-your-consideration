@@ -1467,77 +1467,101 @@ impl GraphStore {
 
     /// Restores graph state from raw snapshot data, resetting existing state.
     pub fn restore_from_snapshot(&self, data: GraphSnapshotData) {
-        // 1. User interactions
-        let mut user_shards: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (uid, edges) in data.user_interactions {
-            let s = shard_idx(uid);
-            user_shards[s].insert(uid, edges);
-        }
-        for (s, map) in user_shards.into_iter().enumerate() {
-            *self.user_interactions[s].write() = map;
-        }
+        let GraphSnapshotData {
+            user_interactions,
+            post_interactions,
+            user_likes_bitmaps,
+            follows,
+            post_metadata,
+            active_recent_posts,
+        } = data;
 
-        // 2. Post interactions
-        let mut post_shards: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (pid, edges) in data.post_interactions {
-            let s = shard_idx(pid);
-            post_shards[s].insert(pid, edges);
-        }
-        for (s, map) in post_shards.into_iter().enumerate() {
-            *self.post_interactions[s].write() = map;
-        }
+        std::thread::scope(|s| {
+            // 1. User interactions
+            s.spawn(|| {
+                let cap = (user_interactions.len() / NUM_SHARDS).saturating_add(4);
+                let mut user_shards: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                for (uid, edges) in user_interactions {
+                    user_shards[shard_idx(uid)].insert(uid, edges);
+                }
+                for (idx, map) in user_shards.into_iter().enumerate() {
+                    *self.user_interactions[idx].write() = map;
+                }
+            });
 
-        // 3. User likes bitmaps
-        let mut bm_shards: [AHashMap<u32, RoaringBitmap>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (uid, bm) in data.user_likes_bitmaps {
-            let s = shard_idx(uid);
-            bm_shards[s].insert(uid, bm);
-        }
-        for (s, map) in bm_shards.into_iter().enumerate() {
-            *self.user_likes_bitmaps[s].write() = map;
-        }
+            // 2. Post interactions
+            s.spawn(|| {
+                let cap = (post_interactions.len() / NUM_SHARDS).saturating_add(4);
+                let mut post_shards: [AHashMap<u32, Vec<CompactEdge>>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                for (pid, edges) in post_interactions {
+                    post_shards[shard_idx(pid)].insert(pid, edges);
+                }
+                for (idx, map) in post_shards.into_iter().enumerate() {
+                    *self.post_interactions[idx].write() = map;
+                }
+            });
 
-        // 4. Follows
-        let mut follow_shards: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (fid, list) in data.follows {
-            let s = shard_idx(fid);
-            follow_shards[s].insert(fid, list);
-        }
-        for (s, map) in follow_shards.into_iter().enumerate() {
-            *self.follows[s].write() = map;
-        }
+            // 3. User likes bitmaps
+            s.spawn(|| {
+                let cap = (user_likes_bitmaps.len() / NUM_SHARDS).saturating_add(4);
+                let mut bm_shards: [AHashMap<u32, RoaringBitmap>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                for (uid, bm) in user_likes_bitmaps {
+                    bm_shards[shard_idx(uid)].insert(uid, bm);
+                }
+                for (idx, map) in bm_shards.into_iter().enumerate() {
+                    *self.user_likes_bitmaps[idx].write() = map;
+                }
+            });
 
-        // 5. Post metadata & Author posts
-        let mut meta_shards: [AHashMap<u32, PostMeta>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        let mut author_shards: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (pid, meta) in data.post_metadata {
-            let author_id = meta.author_id;
-            let a_shard = shard_idx(author_id);
-            let posts = author_shards[a_shard].entry(author_id).or_default();
-            if !posts.contains(&pid) {
-                posts.push(pid);
-            }
+            // 4. Follows
+            s.spawn(|| {
+                let cap = (follows.len() / NUM_SHARDS).saturating_add(4);
+                let mut follow_shards: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(cap));
+                for (fid, list) in follows {
+                    follow_shards[shard_idx(fid)].insert(fid, list);
+                }
+                for (idx, map) in follow_shards.into_iter().enumerate() {
+                    *self.follows[idx].write() = map;
+                }
+            });
 
-            let p_shard = shard_idx(pid);
-            meta_shards[p_shard].insert(pid, meta);
-        }
-        for (s, map) in meta_shards.into_iter().enumerate() {
-            *self.post_metadata[s].write() = map;
-        }
-        for (s, map) in author_shards.into_iter().enumerate() {
-            *self.author_posts[s].write() = map;
-        }
+            // 5. Post metadata & Author posts
+            s.spawn(|| {
+                let meta_cap = (post_metadata.len() / NUM_SHARDS).saturating_add(4);
+                let author_cap = (meta_cap / 2).saturating_add(4);
+                let mut meta_shards: [AHashMap<u32, PostMeta>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(meta_cap));
+                let mut author_shards: [AHashMap<u32, Vec<u32>>; NUM_SHARDS] =
+                    std::array::from_fn(|_| AHashMap::with_capacity(author_cap));
+                for (pid, meta) in post_metadata {
+                    let author_id = meta.author_id;
+                    let p_shard = shard_idx(pid);
+                    if meta_shards[p_shard].insert(pid, meta).is_none() {
+                        let a_shard = shard_idx(author_id);
+                        author_shards[a_shard]
+                            .entry(author_id)
+                            .or_default()
+                            .push(pid);
+                    }
+                }
+                for (idx, map) in meta_shards.into_iter().enumerate() {
+                    *self.post_metadata[idx].write() = map;
+                }
+                for (idx, map) in author_shards.into_iter().enumerate() {
+                    *self.author_posts[idx].write() = map;
+                }
+            });
+        });
 
         // 6. Active recent posts
+        let active_cap = (active_recent_posts.len() / NUM_SHARDS).saturating_add(4);
         let mut active_shards: [AHashMap<u32, u64>; NUM_SHARDS] =
-            std::array::from_fn(|_| AHashMap::new());
-        for (pid, ts) in &data.active_recent_posts {
+            std::array::from_fn(|_| AHashMap::with_capacity(active_cap));
+        for (pid, ts) in &active_recent_posts {
             let s = shard_idx(*pid);
             active_shards[s].insert(*pid, *ts);
         }
@@ -1549,13 +1573,13 @@ impl GraphStore {
         {
             let mut log = self.recent_active_log.write();
             log.clear();
-            for &(pid, ts) in &data.active_recent_posts {
+            for &(pid, ts) in &active_recent_posts {
                 log.push(ts, pid);
             }
         }
         // Recompute the O(1) max-timestamp tracker from the restored active posts.
         let mut max_ts = crate::types::BLUESKY_EPOCH_SECS;
-        for &(_, ts) in &data.active_recent_posts {
+        for &(_, ts) in &active_recent_posts {
             if ts > max_ts {
                 max_ts = ts;
             }

@@ -37,10 +37,10 @@ services:
       - fyc_data:/data:rw
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
-      interval: 30s
-      timeout: 30s
+      interval: 5s
+      timeout: 10s
       retries: 5
-      start_period: 360s
+      start_period: 60s
     deploy:
       resources:
         limits:
