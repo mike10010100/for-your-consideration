@@ -2931,4 +2931,109 @@ mod tests {
         }
         assert!(state_store.shards[0].read().len() <= MAX_OAUTH_STATES_PER_SHARD);
     }
+
+    #[tokio::test]
+    async fn test_publish_feed_generator_record_real_oauth_dpop_and_nonce_retry() {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::{routing::post, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let upload_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let put_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let uc = std::sync::Arc::clone(&upload_calls);
+        let pc = std::sync::Arc::clone(&put_calls);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/xrpc/com.atproto.repo.uploadBlob",
+                post(move |headers: HeaderMap| {
+                    let uc = std::sync::Arc::clone(&uc);
+                    async move {
+                        let n = uc.fetch_add(1, Ordering::SeqCst);
+                        if n == 0 && !headers.contains_key("dpop-retry") {
+                            let mut h = HeaderMap::new();
+                            h.insert("DPoP-Nonce", "nonce-blob-1".parse().unwrap());
+                            (
+                                StatusCode::UNAUTHORIZED,
+                                h,
+                                Json(serde_json::json!({"error": "use_dpop_nonce"})),
+                            )
+                                .into_response()
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({"blob": {"$type": "blob", "mimeType": "image/png"}})),
+                            )
+                                .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/xrpc/com.atproto.repo.putRecord",
+                post(move || {
+                    let pc = std::sync::Arc::clone(&pc);
+                    async move {
+                        let n = pc.fetch_add(1, Ordering::SeqCst);
+                        if n == 0 {
+                            let mut h = HeaderMap::new();
+                            h.insert("DPoP-Nonce", "nonce-put-1".parse().unwrap());
+                            (
+                                StatusCode::UNAUTHORIZED,
+                                h,
+                                Json(serde_json::json!({"error": "use_dpop_nonce"})),
+                            )
+                                .into_response()
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "uri": "at://did:plc:realwriter99/app.bsky.feed.generator/for-you",
+                                    "cid": "bafyrealcid99"
+                                })),
+                            )
+                                .into_response()
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dpop_key = DPoPKey::generate();
+        let oauth_sess = UserOAuthSession {
+            did: CompactString::new("did:plc:realwriter99"),
+            handle: CompactString::new("realwriter99.bsky.social"),
+            access_token: "acc_tok_99".to_string(),
+            refresh_token: Some("ref_tok_99".to_string()),
+            token_type: "DPoP".to_string(),
+            dpop_private_key: Some(dpop_key.to_bytes_b64().to_string()),
+            pds_endpoint: format!("http://{addr}"),
+            token_endpoint: format!("http://{addr}/oauth/token"),
+            expires_at_secs: 2_000_000_000,
+        };
+        let req = FeedPublishRequest {
+            rkey: "for-you".to_string(),
+            display_name: "For You".to_string(),
+            description: "Personalized recommendations".to_string(),
+            app_password: None,
+        };
+        let resp = publish_feed_generator_record(
+            "did:plc:realwriter99",
+            "live_token_99",
+            &req,
+            "did:web:fyc.prod.internal",
+            None,
+            Some(&oauth_sess),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.cid, "bafyrealcid99");
+        assert_eq!(upload_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(put_calls.load(Ordering::SeqCst), 2);
+    }
 }
