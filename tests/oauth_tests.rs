@@ -1349,7 +1349,7 @@ async fn test_t2_f1_05_cross_session_state_hijacking_blocked() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    assert!(resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 // ---------------------------------------------------------------------------

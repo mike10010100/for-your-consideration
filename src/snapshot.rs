@@ -44,6 +44,7 @@ use crate::error::{FeedError, Result};
 use crate::graph::{GraphSnapshotData, GraphStore};
 use crate::interner::{string_shard_idx, StringInterner, NUM_INTERNER_SHARDS};
 use crate::preferences::UserPreferencesStore;
+use crate::recommender::ImpressionStore;
 use crate::types::{
     CompactEdge, PostMeta, SnapshotStatusInfo, TopicWeights, UserDials, DEFAULT_MIN_LIKES,
 };
@@ -446,6 +447,43 @@ pub fn save_snapshot_with_preferences(
     preferences: &UserPreferencesStore,
     jetstream_cursor_us: u64,
 ) -> Result<SnapshotHeader> {
+    save_snapshot_internal(
+        path,
+        interner,
+        graph,
+        preferences,
+        None,
+        jetstream_cursor_us,
+    )
+}
+
+/// Atomically saves the interner, graph, user preferences, impression store, and Jetstream cursor to disk.
+pub fn save_snapshot_with_impressions(
+    path: impl AsRef<Path>,
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
+    impressions: &ImpressionStore,
+    jetstream_cursor_us: u64,
+) -> Result<SnapshotHeader> {
+    save_snapshot_internal(
+        path,
+        interner,
+        graph,
+        preferences,
+        Some(impressions),
+        jetstream_cursor_us,
+    )
+}
+
+fn save_snapshot_internal(
+    path: impl AsRef<Path>,
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
+    impressions: Option<&ImpressionStore>,
+    jetstream_cursor_us: u64,
+) -> Result<SnapshotHeader> {
     let dest_path = path.as_ref();
     let tmp_path = dest_path.file_name().map_or_else(
         || dest_path.with_extension("bin.tmp"),
@@ -502,6 +540,11 @@ pub fn save_snapshot_with_preferences(
 
     // Section 8: User Preferences (Version 4)
     let num_preferences = preferences.stream_preferences_to(&mut write_chunk)?;
+
+    // Section 9 (optional): Impression History
+    if let Some(imp_store) = impressions {
+        let _num_impression_viewers = imp_store.stream_impressions_to(&mut write_chunk)?;
+    }
 
     // Finalize CRC32
     let payload_crc32 = hasher.finalize();
@@ -585,6 +628,19 @@ pub fn load_snapshot_with_preferences(
     interner: &StringInterner,
     graph: &GraphStore,
     preferences: &UserPreferencesStore,
+) -> Result<Option<LoadedSnapshot>> {
+    let impressions = ImpressionStore::default();
+    load_snapshot_with_impressions(path, interner, graph, preferences, &impressions)
+}
+
+/// Loads and hydrates snapshot into the interner, graph, user preferences, and impression store
+/// with CRC32 integrity verification.
+pub fn load_snapshot_with_impressions(
+    path: impl AsRef<Path>,
+    interner: &StringInterner,
+    graph: &GraphStore,
+    preferences: &UserPreferencesStore,
+    impressions: &ImpressionStore,
 ) -> Result<Option<LoadedSnapshot>> {
     let file_path = path.as_ref();
     if !file_path.exists() {
@@ -895,6 +951,27 @@ pub fn load_snapshot_with_preferences(
         header_num_preferences
     };
 
+    // Section 9 (optional): Impression History
+    if stream.has_more()? {
+        let imp_viewer_count = stream.read_u32()? as usize;
+        let mut impression_records = Vec::with_capacity(stream.bound_count(imp_viewer_count, 8));
+        for _ in 0..imp_viewer_count {
+            let viewer_id = stream.read_u32()?;
+            let entry_count = stream.read_u32()? as usize;
+            let mut entries = Vec::with_capacity(stream.bound_count(entry_count, 16));
+            for _ in 0..entry_count {
+                let pid = stream.read_u32()?;
+                let served_at_secs = stream.read_u64()?;
+                let cnt = stream.read_u32()?;
+                entries.push((pid, served_at_secs, cnt));
+            }
+            impression_records.push((viewer_id, entries));
+        }
+        impressions.restore_from_snapshot(impression_records);
+    } else {
+        impressions.clear();
+    }
+
     // 4. Hydrate in-memory graph store (interner was hydrated directly in Section 1)
     graph.restore_from_snapshot(GraphSnapshotData {
         user_interactions,
@@ -1015,5 +1092,105 @@ pub fn compact_memory_stores_with_impressions(
         strings_before,
         strings_after,
         duration_ms,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
+mod tests {
+    use super::*;
+    use crate::recommender::ImpressionStore;
+    use crate::types::{SignalType, BLUESKY_EPOCH_SECS};
+
+    #[test]
+    fn test_snapshot_persists_and_restores_impression_store_and_compaction() {
+        let snap_path = std::env::temp_dir().join(format!(
+            "fyc_snap_with_impressions_{}_{}.bin",
+            std::process::id(),
+            123_456
+        ));
+
+        let interner = StringInterner::new();
+        let graph = GraphStore::new();
+        let prefs = UserPreferencesStore::new();
+        let impressions = ImpressionStore::default();
+
+        let viewer = interner.intern("did:plc:snap_viewer");
+        let author = interner.intern("did:plc:snap_author");
+        let post1 = interner.intern("at://did:plc:snap_author/app.bsky.feed.post/1");
+        let post2 = interner.intern("at://did:plc:snap_author/app.bsky.feed.post/2");
+        let _dead_string = interner.intern("did:plc:unreferenced_garbage");
+
+        let now = BLUESKY_EPOCH_SECS + 10_000;
+        graph.record_post_meta(post1, author, None, None, now - 500);
+        graph.record_post_meta(post2, author, None, None, now - 400);
+        graph.record_interaction(viewer, post1, SignalType::Like, now - 300);
+
+        impressions.record_impressions(viewer, &[post1, post2], now - 60);
+        impressions.record_impressions(viewer, &[post2], now - 30);
+
+        // Compact with impressions before saving
+        let stats = compact_memory_stores_with_impressions(&interner, &graph, &prefs, &impressions);
+        assert!(stats.strings_after < stats.strings_before);
+
+        let viewer_after = interner.lookup_id("did:plc:snap_viewer").unwrap();
+        let post2_after = interner
+            .lookup_id("at://did:plc:snap_author/app.bsky.feed.post/2")
+            .unwrap();
+        assert_eq!(impressions.get_viewer_impression_count(viewer_after), 2);
+        assert!(
+            impressions.contains_impression(viewer_after, post2_after),
+            "Recently impressed post must remain tracked after compaction"
+        );
+        let penalty_before = impressions
+            .evaluate_compounded_fatigue_penalty(viewer_after, post2_after, now)
+            .unwrap();
+        assert!(penalty_before < 0.25);
+
+        save_snapshot_with_impressions(
+            &snap_path,
+            &interner,
+            &graph,
+            &prefs,
+            &impressions,
+            123_456,
+        )
+        .unwrap();
+
+        let restored_interner = StringInterner::new();
+        let restored_graph = GraphStore::new();
+        let restored_prefs = UserPreferencesStore::new();
+        let restored_impressions = ImpressionStore::default();
+
+        let loaded = load_snapshot_with_impressions(
+            &snap_path,
+            &restored_interner,
+            &restored_graph,
+            &restored_prefs,
+            &restored_impressions,
+        )
+        .unwrap()
+        .unwrap();
+        let _ = std::fs::remove_file(&snap_path);
+        assert_eq!(loaded.header.jetstream_cursor_us, 123_456);
+
+        let restored_viewer = restored_interner.lookup_id("did:plc:snap_viewer").unwrap();
+        let restored_post1 = restored_interner
+            .lookup_id("at://did:plc:snap_author/app.bsky.feed.post/1")
+            .unwrap();
+        let restored_post2 = restored_interner
+            .lookup_id("at://did:plc:snap_author/app.bsky.feed.post/2")
+            .unwrap();
+
+        assert_eq!(
+            restored_impressions.get_viewer_impression_count(restored_viewer),
+            2
+        );
+        assert!(restored_impressions.contains_impression(restored_viewer, restored_post1));
+        assert!(restored_impressions.contains_impression(restored_viewer, restored_post2));
+        let penalty_after = restored_impressions
+            .evaluate_compounded_fatigue_penalty(restored_viewer, restored_post2, now)
+            .unwrap();
+        assert!((penalty_after - penalty_before).abs() < 1e-6);
     }
 }

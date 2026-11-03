@@ -1388,6 +1388,25 @@ pub async fn handle_post_oauth_callback(
             .into_response();
     }
 
+    // RFC 9207 Authorization Server Issuer Identification: when the callback includes `iss`,
+    // verify that it matches the authorization server bound to the OAuth session state.
+    if let Some(raw_iss) = body.iss.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !session.matches_issuer(raw_iss) {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                Json(ApiErrorResponse::new(
+                    "IssuerMismatch",
+                    "OAuth callback issuer (iss) does not match the expected authorization server",
+                )),
+            )
+                .into_response();
+        }
+    }
+
     let is_localhost = state.hostname.starts_with("localhost")
         || state.hostname.starts_with("127.0.0.1")
         || state.hostname.starts_with("0.0.0.0");
@@ -3186,5 +3205,43 @@ mod tests {
             doc2["feeds"][0]["uri"],
             "at://did:web:feed.example.com/app.bsky.feed.generator/for-your-consideration"
         );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_rfc9207_issuer_mismatch_rejected() {
+        let state = create_test_state();
+        let app = create_xrpc_router(state.clone());
+
+        let state_token = "state_rfc9207_mixup_defense";
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state.oauth_store.insert(
+            state_token.to_string(),
+            OAuthSessionState::new(
+                "verifier_abcdefghijklmnopqrstuvwxyz1234567890",
+                "alice.bsky.social",
+                Some("did:plc:alice".to_string()),
+                "https://bsky.social",
+                "https://bsky.social/oauth/token",
+                "https://feed.example.com/oauth/callback",
+                now_secs,
+            ),
+        );
+
+        let bad_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/oauth/callback")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"code":"mock_code_123","state":"state_rfc9207_mixup_defense","iss":"https://evil-idp.example.org"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(bad_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let err: ApiErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "IssuerMismatch");
     }
 }

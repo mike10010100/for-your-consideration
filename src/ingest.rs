@@ -256,6 +256,13 @@ pub enum JetstreamEvent {
         /// DID of the followed account.
         subject_did: CompactString,
     },
+    /// Directed block relationship (`app.bsky.graph.block`).
+    Block {
+        /// DID of the blocking account.
+        blocker_did: CompactString,
+        /// DID of the blocked account.
+        subject_did: CompactString,
+    },
     /// Deletion of a commit (e.g. un-like, un-repost, or un-follow).
     Delete {
         /// DID of the actor performing the deletion.
@@ -754,6 +761,7 @@ pub fn is_event_matching_collections(event: &JetstreamEvent, wanted: &[CompactSt
         },
         JetstreamEvent::PostMeta { .. } => wanted.iter().any(|w| w == "app.bsky.feed.post"),
         JetstreamEvent::Follow { .. } => wanted.iter().any(|w| w == "app.bsky.graph.follow"),
+        JetstreamEvent::Block { .. } => wanted.iter().any(|w| w == "app.bsky.graph.block"),
         JetstreamEvent::Delete { collection, .. } => wanted.iter().any(|w| w == collection),
     }
 }
@@ -1104,6 +1112,17 @@ pub fn parse_jetstream_frame(text: &str) -> Option<(Vec<JetstreamEvent>, u64)> {
                 subject_did,
             });
         }
+        "app.bsky.graph.block" => {
+            let subject_did = record
+                .get("subject")
+                .and_then(|s| s.as_str().or_else(|| s.get("did").and_then(|d| d.as_str())))
+                .map(CompactString::new)?;
+
+            events.push(JetstreamEvent::Block {
+                blocker_did: msg.did,
+                subject_did,
+            });
+        }
         _ => return None,
     }
 
@@ -1173,6 +1192,14 @@ pub fn apply_event_to_graph(event: &JetstreamEvent, interner: &StringInterner, g
             let fid = interner.intern(follower_did);
             let tid = interner.intern(subject_did);
             graph.record_follow(fid, tid);
+        }
+        JetstreamEvent::Block {
+            blocker_did,
+            subject_did,
+        } => {
+            let bid = interner.intern(blocker_did);
+            let tid = interner.intern(subject_did);
+            graph.record_block(bid, tid);
         }
         JetstreamEvent::Delete {
             did,

@@ -343,6 +343,8 @@ pub struct GraphStore {
     user_likes_bitmaps: [RwLock<AHashMap<u32, RoaringBitmap>>; NUM_SHARDS],
     /// Follow graph: `follower_id -> Vec<u32>`
     follows: [RwLock<AHashMap<u32, Vec<u32>>>; NUM_SHARDS],
+    /// Directed block graph: `blocker_id -> RoaringBitmap` of blocked user IDs
+    user_blocks: [RwLock<AHashMap<u32, RoaringBitmap>>; NUM_SHARDS],
     /// Post metadata: `post_id -> PostMeta`
     post_metadata: [RwLock<AHashMap<u32, PostMeta>>; NUM_SHARDS],
     /// Post topic classification recorded at ingest time: `post_id -> TopicCategory`
@@ -377,6 +379,7 @@ impl GraphStore {
             post_interactions: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             user_likes_bitmaps: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             follows: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
+            user_blocks: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             post_metadata: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             post_topics: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
             author_posts: std::array::from_fn(|_| RwLock::new(AHashMap::new())),
@@ -511,6 +514,53 @@ impl GraphStore {
             list.retain(|&id| id != followed_id);
         }
         self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a directed block relationship (`blocker_id -> blocked_id`).
+    pub fn record_block(&self, blocker_id: u32, blocked_id: u32) {
+        let shard = shard_idx(blocker_id);
+        let mut guard = self.user_blocks[shard].write();
+        guard.entry(blocker_id).or_default().insert(blocked_id);
+        self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Removes a directed block relationship (`blocker_id -> blocked_id`).
+    pub fn remove_block(&self, blocker_id: u32, blocked_id: u32) {
+        let shard = shard_idx(blocker_id);
+        let mut guard = self.user_blocks[shard].write();
+        if let Some(bm) = guard.get_mut(&blocker_id) {
+            bm.remove(blocked_id);
+            if bm.is_empty() {
+                guard.remove(&blocker_id);
+            }
+        }
+        self.mutation_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns whether `blocker_id` has blocked `blocked_id`.
+    #[must_use]
+    pub fn is_blocked(&self, blocker_id: u32, blocked_id: u32) -> bool {
+        let shard = shard_idx(blocker_id);
+        self.user_blocks[shard]
+            .read()
+            .get(&blocker_id)
+            .is_some_and(|bm| bm.contains(blocked_id))
+    }
+
+    /// Returns whether `user_a` has blocked `user_b` or `user_b` has blocked `user_a`.
+    #[must_use]
+    pub fn is_mutually_blocked(&self, user_a: u32, user_b: u32) -> bool {
+        self.is_blocked(user_a, user_b) || self.is_blocked(user_b, user_a)
+    }
+
+    /// Retrieves all user IDs blocked by `blocker_id`.
+    #[must_use]
+    pub fn get_user_blocks(&self, blocker_id: u32) -> Vec<u32> {
+        let shard = shard_idx(blocker_id);
+        self.user_blocks[shard]
+            .read()
+            .get(&blocker_id)
+            .map_or_else(Vec::new, |bm| bm.iter().collect())
     }
 
     /// Records metadata for a post and updates the author posts index.
@@ -1247,6 +1297,16 @@ impl GraphStore {
             }
         }
 
+        for shard in &self.user_blocks {
+            let guard = shard.read();
+            for (&bid, bm) in guard.iter() {
+                if !bm.is_empty() {
+                    ids.insert(bid);
+                    ids |= bm;
+                }
+            }
+        }
+
         for shard in &self.post_metadata {
             let guard = shard.read();
             for (&pid, meta) in guard.iter() {
@@ -1383,6 +1443,32 @@ impl GraphStore {
                         if !new_list.is_empty() {
                             new_list.shrink_to_fit();
                             new_map.insert(new_fid, new_list);
+                        }
+                    }
+                }
+                new_map.shrink_to_fit();
+                *guard = new_map;
+            }
+            std::thread::yield_now();
+        }
+
+        // 4b. Remap user_blocks shard-by-shard
+        for (s, shard) in self.user_blocks.iter().enumerate() {
+            {
+                let mut guard = shard.write();
+                let old_map = std::mem::take(&mut *guard);
+                let mut new_map = AHashMap::with_capacity(old_map.len());
+                for (old_bid, old_bm) in old_map {
+                    if let Some(&new_bid) = id_map.get(&old_bid) {
+                        debug_assert_eq!(shard_idx(new_bid), s);
+                        let mut new_bm = RoaringBitmap::new();
+                        for old_tid in old_bm {
+                            if let Some(&new_tid) = id_map.get(&old_tid) {
+                                new_bm.insert(new_tid);
+                            }
+                        }
+                        if !new_bm.is_empty() {
+                            new_map.insert(new_bid, new_bm);
                         }
                     }
                 }
@@ -1580,6 +1666,12 @@ impl GraphStore {
                 total += follows.capacity() * 4;
             }
 
+            let blk_guard = self.user_blocks[shard].read();
+            total += blk_guard.capacity() * 32;
+            for bm in blk_guard.values() {
+                total += bm.serialized_size();
+            }
+
             let m_guard = self.post_metadata[shard].read();
             total += m_guard.capacity() * (32 + std::mem::size_of::<PostMeta>());
 
@@ -1610,6 +1702,9 @@ impl GraphStore {
             shard.write().clear();
         }
         for shard in &self.follows {
+            shard.write().clear();
+        }
+        for shard in &self.user_blocks {
             shard.write().clear();
         }
         for shard in &self.post_metadata {

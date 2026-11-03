@@ -382,6 +382,7 @@ async fn main() -> Result<()> {
             let hydrate_interner = Arc::clone(&boot_interner);
             let hydrate_graph = Arc::clone(&boot_graph);
             let hydrate_preferences = Arc::clone(&boot_preferences);
+            let hydrate_impressions = Arc::clone(&boot_impressions);
             let hydrate_path = boot_snapshot_path.clone();
             let hydrate_tracker = Arc::clone(&boot_snapshot_tracker);
             let hydrate_slot = Arc::clone(&boot_save_slot);
@@ -389,11 +390,12 @@ async fn main() -> Result<()> {
             let hydrate_res = tokio::task::spawn_blocking(move || {
                 let _guard = hydrate_slot.blocking_lock();
                 let restored_cursor = if hydrate_path.exists() {
-                    match load_snapshot_with_preferences(
+                    match load_snapshot_with_impressions(
                         &hydrate_path,
                         &hydrate_interner,
                         &hydrate_graph,
                         &hydrate_preferences,
+                        &hydrate_impressions,
                     ) {
                         Ok(Some(loaded)) => {
                             info!(
@@ -746,11 +748,12 @@ async fn main() -> Result<()> {
                         snap_sessions.prune_expired(now_secs);
                         snap_active.prune_older_than(now_secs.saturating_sub(900));
 
-                        save_snapshot_with_preferences(
+                        save_snapshot_with_impressions(
                             &snap_path,
                             &snap_interner,
                             &snap_graph,
                             &snap_preferences,
+                            &snap_impressions,
                             current_cursor,
                         )
                     })
@@ -818,6 +821,7 @@ async fn main() -> Result<()> {
         let snap_interner = Arc::clone(&interner);
         let snap_graph = Arc::clone(&graph);
         let snap_preferences = Arc::clone(&preferences_store);
+        let snap_impressions = Arc::clone(&recommender.impression_store);
         let save_slot = Arc::clone(&snapshot_save_slot);
 
         let save_res = tokio::time::timeout(
@@ -825,11 +829,12 @@ async fn main() -> Result<()> {
             tokio::task::spawn_blocking(move || {
                 // Serialize against any in-flight periodic save so the two never race the `.tmp` path.
                 let _guard = save_slot.blocking_lock();
-                save_snapshot_with_preferences(
+                save_snapshot_with_impressions(
                     &snap_path,
                     &snap_interner,
                     &snap_graph,
                     &snap_preferences,
+                    &snap_impressions,
                     final_cursor,
                 )
             }),

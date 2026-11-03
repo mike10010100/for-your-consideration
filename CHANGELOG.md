@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-11-03
+
+### Added
+
+- **Durable `ImpressionStore` Snapshot Persistence (`src/snapshot.rs`, `src/recommender.rs`, `src/main.rs`, `src/lib.rs`)**:
+  - Added `ImpressionStore::stream_impressions_to` and `ImpressionStore::restore_from_snapshot` along with `save_snapshot_with_impressions` and `load_snapshot_with_impressions` (appending optional Section 9 covered by `payload_crc32` while preserving byte-for-byte compatibility with `save_snapshot_with_preferences`).
+  - Wired startup hydration, periodic 5-minute checkpointing, and graceful shutdown snapshot writes in `src/main.rs` to persist and restore viewer impression histories across restarts and redeployments.
+- **`app.bsky.graph.block` Ingestion & Mutual Block Filtering (`src/ingest.rs`, `src/graph.rs`, `src/recommender.rs`)**:
+  - Added `JetstreamEvent::Block` parsing and deletion handling for `app.bsky.graph.block` events in `src/ingest.rs` and sharded `user_blocks` RoaringBitmap storage (`record_block`, `remove_block`, `is_blocked`, `is_mutually_blocked`) in `GraphStore`.
+  - Filtered mutually blocked actors (`viewer` blocked `actor` or `actor` blocked `viewer`) from Tier 1 co-interactor selection, Tier 2 follow-walk traversal, `find_taste_twins`, `recommend_preview_at`, and final candidate post output.
+
+### Fixed
+
+- **Pagination Cursor Session Stability Across Live Impression Recording (`src/recommender.rs`)**:
+  - Added `CachedFeedSession` (`PAGINATION_SESSION_TTL_SECS = 300`, `MAX_PAGINATION_SESSIONS_PER_SHARD = 128`) in `ImpressionStore` so that when `record_impressions` is called on Page 1 (`cursor = None`), subsequent paginated requests (`cursor = Some(...)`) slice from the stable Page 1 ranking rather than re-ranking with Page 1 posts demoted by the Unseen-First Ceiling (which previously caused Page 2 to skip 30 unseen posts).
+- **DNS-Pinned SSRF Client & RFC 9207 OAuth `iss` Verification (`src/auth.rs`, `src/server.rs`, `.github/workflows/codeql.yml`)**:
+  - Added `PinnedSsrfDnsResolver` (`reqwest::dns::Resolve`) and runtime-scoped connection-pooled HTTP clients in `src/auth.rs` so IP addresses validated by `validate_outbound_url_async` are pinned directly into the HTTP client resolver, eliminating DNS-rebinding TOCTOU and per-request TLS client rebuild overhead.
+  - Added `OAuthSessionState::matches_issuer` and `extract_url_origin` to enforce RFC 9207 (`iss` parameter) verification in `handle_post_oauth_callback` (`400 Bad Request` `IssuerMismatch` on authorization server mix-up).
+  - Upgraded `github/codeql-action` to `v4.39.2` (Node 24) and upgraded `skyauth` to `0.3.12` and `skybase` to `0.1.9`.
+
+---
+
 ## [0.7.1] - 2026-11-03
 
 ### Changed
