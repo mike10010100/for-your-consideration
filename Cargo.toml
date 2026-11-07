@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -38,7 +38,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1.0.10"
 futures-util = "0.3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 arc-swap = "1.7"
 
 # HTTP Web Framework & Networking

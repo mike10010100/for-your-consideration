@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.3] - 2026-11-07
+
+### Dependencies
+
+- Bump rust-dependencies group with 10 updates.
+
+---
+
 ## [0.7.1] - 2026-11-03
 
 ### Changed
