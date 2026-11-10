@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-11-10
+
+### Changed
+
+- **Upgraded `skyauth` to `0.3.13` & `skybase` to `0.1.10` (`Cargo.toml`)**:
+  - Incorporates `skyauth 0.3.13` (formally verified Verus/rustc clock-skew leeway kernel, required `iss`/`exp`/`aud` service-auth claims, strict `did:plc`/`did:web` syntax checks, IPv6 literal SSRF validation) and `skybase 0.1.10` (cancellable `connect_async`, zero-ping guard, and strict AT-URI validation).
+
+### Fixed
+
+- **Deterministic Snapshot Linearization & Interner Consistency (`src/graph.rs`, `src/interner.rs`, `src/ingest.rs`)**:
+  - Added `RecentActiveRingBuffer::linearize` and cleared `user_blocks` and `post_topics` in `GraphStore::restore_from_snapshot` so snapshot round-trips preserve exact FIFO eviction order after wraparound and never retain stale pre-restore blocks or topic masks.
+  - Locked all 64 shards upfront in `StringInterner::export_strings` for atomic snapshot export, subscribed `IngesterConfig::default()` to `"app.bsky.graph.block"` paired onto the `"app.bsky.graph.follow"` Jetstream slice, and ignored likes/reposts targeting non-`app.bsky.feed.post` URIs.
+- **Recommender Explainability & Preview Parity (`src/recommender.rs`)**:
+  - Compared normalized cosine similarity against already-normalized `top_twins` scores and enforced `is_mutually_blocked` in `explain_recommendation`.
+  - Enforced `is_mutually_blocked` on Tier 2 follow-walk authors and accumulated time-decayed edge weight across all matching taste twins in `recommend_preview_at`.
+- **Service Auth, OAuth Session & PAR SSRF Hardening (`src/service_auth.rs`, `src/auth.rs`, `src/server.rs`, `src/assets/dashboard.html`)**:
+  - Required `exp` and `aud` claims unconditionally in `ServiceAuthVerifier::verify_service_jwt`, rejected forwarding internal `fyc_v1.` session cookies as remote PDS bearer tokens in `publish_feed_generator_record`, and validated `par_endpoint` with `validate_outbound_url_async` in `handle_post_oauth_login`.
+  - Updated `resetDials` to reset the half-life slider to `6h` and `renderProofChain` to display direct-follow co-like edges accurately.
+
+---
+
 ## [0.7.2] - 2026-11-03
 
 ### Added

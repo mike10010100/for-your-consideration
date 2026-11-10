@@ -1550,7 +1550,7 @@ elements.sliderTopicCulture.value = 1.0;
 state.includeReplies = false;
 state.noNsfw = false;
 state.minLikes = 3;
-elements.dialViewerInput.value = 'did:plc:alice';
+elements.dialViewerInput.value = state.oauthHandle || state.oauthDid || 'did:plc:alice';
 triggerFeedPreview();
 }
 async function openProofExplainer(postUri) {
@@ -1584,8 +1584,12 @@ let title = `Step ${idx + 1}: ${step.step_type}`;
 if (step.step_type === 'viewer_interaction') title = `Step 1: Your Interaction Seed`;
 else if (step.step_type === 'taste_similarity') title = `Step 2: Taste Twin Overlap`;
 else if (step.step_type === 'recommendation_signal') title = `Step 3: Target Recommendation`;
-else if (step.step_type === 'follow_relationship') title = `Step 1: Followed Creator Walk`;
-else if (step.step_type === 'velocity_candidate') title = `Global High-Velocity Pool`;
+else if (step.step_type === 'follow_relationship' || step.step_type === 'follow_graph') title = `Step 1: Followed Creator Walk`;
+else if (step.step_type === 'followed_interaction') title = `Step 2: Followed Interaction`;
+else if (step.step_type === 'follow_affinity_boost') title = `Step 3: Follow Affinity Boost`;
+else if (step.step_type === 'cold_start_onboarding') title = `Step 1: Topic Classification`;
+else if (step.step_type === 'velocity_candidate' || step.step_type === 'velocity_trending') title = `Step 2: High-Velocity Pool`;
+else if (step.step_type === 'topic_diversity_interleaving') title = `Step 3: Topic Diversity Interleaving`;
 const weightText = step.weight !== undefined ? `Signal Weight: ${step.weight}` : '';
 const simText = step.similarity !== undefined ? `Similarity: ${step.similarity.toFixed(3)}` : '';
 const metaText = [weightText, simText].filter(Boolean).join(' • ');

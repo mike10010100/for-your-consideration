@@ -2143,10 +2143,23 @@ pub async fn publish_feed_generator_record(
                 FeedError::Auth("PDS createSession response missing accessJwt".to_string())
             })?
             .to_string()
-    } else if token.starts_with("Bearer ") || token.starts_with("bearer ") {
-        token.to_string()
     } else {
-        format!("Bearer {token}")
+        let stripped_token = token
+            .strip_prefix("Bearer ")
+            .or_else(|| token.strip_prefix("bearer "))
+            .unwrap_or(token)
+            .trim();
+        if stripped_token.starts_with("fyc_v1.") {
+            return Err(FeedError::Auth(
+                "OAuth write session expired or missing; please sign in again or provide an App Password"
+                    .to_string(),
+            ));
+        }
+        if token.starts_with("Bearer ") || token.starts_with("bearer ") {
+            token.to_string()
+        } else {
+            format!("Bearer {token}")
+        }
     };
 
     let auth_header_val = if access_jwt.starts_with("Bearer ") || access_jwt.starts_with("bearer ")

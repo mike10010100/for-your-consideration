@@ -107,10 +107,19 @@ impl RecentActiveRingBuffer {
         }
     }
 
+    #[inline]
+    fn linearize(&mut self) {
+        if self.count == RING_BUFFER_CAPACITY && self.head != 0 {
+            self.buffer.rotate_left(self.head);
+            self.head = 0;
+        }
+    }
+
     fn remap(&mut self, id_map: &AHashMap<u32, u32>) {
         if self.count == 0 {
             return;
         }
+        self.linearize();
         let mut write_idx = 0;
         for i in 0..self.count {
             let (ts, old_pid) = self.buffer[i];
@@ -127,6 +136,7 @@ impl RecentActiveRingBuffer {
         if self.count == 0 {
             return;
         }
+        self.linearize();
         let mut write_idx = 0;
         for i in 0..self.count {
             let (ts, pid) = self.buffer[i];
@@ -143,6 +153,7 @@ impl RecentActiveRingBuffer {
         if self.count == 0 {
             return;
         }
+        self.linearize();
         let mut write_idx = 0;
         for i in 0..self.count {
             let (ts, pid) = self.buffer[i];
@@ -1887,6 +1898,13 @@ impl GraphStore {
             });
         });
 
+        for shard in &self.user_blocks {
+            shard.write().clear();
+        }
+        for shard in &self.post_topics {
+            shard.write().clear();
+        }
+
         // 6. Active recent posts
         let active_cap = (active_recent_posts.len() / NUM_SHARDS).saturating_add(4);
         let mut active_shards: [AHashMap<u32, u64>; NUM_SHARDS] =
@@ -2707,5 +2725,45 @@ mod tests {
             graph.get_velocity_pool_candidates_at(ts + 10, 10),
             [] as [u32; 0]
         );
+    }
+
+    #[test]
+    fn test_ring_buffer_linearize_preserves_order_after_wraparound() {
+        let mut ring = RecentActiveRingBuffer::default();
+        for i in 0..(RING_BUFFER_CAPACITY + 10) {
+            ring.push(1000 + i as u64, (i + 1) as u32);
+        }
+        assert_eq!(ring.count, RING_BUFFER_CAPACITY);
+        assert_eq!(ring.head, 10);
+
+        // Prune nothing so count remains RING_BUFFER_CAPACITY, then push one more item:
+        // the oldest entry (pid = 11, ts = 1010) must be evicted, NOT the newest wrapped entry (pid = 65546).
+        ring.prune_older_than(1000);
+        ring.push(200_000, 999_999);
+
+        let mut out = AHashSet::new();
+        ring.collect_candidates(1000, 200_000, &mut out);
+        assert!(
+            !out.contains(&11),
+            "oldest entry after wrap must be evicted"
+        );
+        assert!(
+            out.contains(&((RING_BUFFER_CAPACITY + 10) as u32)),
+            "newest wrapped entry must not be overwritten"
+        );
+        assert!(out.contains(&999_999));
+    }
+
+    #[test]
+    fn test_restore_from_snapshot_clears_stale_blocks_and_topics() {
+        let graph = GraphStore::new();
+        graph.record_block(1, 2);
+        graph.record_post_topic(100, TopicCategory::Tech);
+        assert!(graph.is_blocked(1, 2));
+        assert_eq!(graph.get_post_topic(100), Some(TopicCategory::Tech));
+
+        graph.restore_from_snapshot(GraphSnapshotData::default());
+        assert!(!graph.is_blocked(1, 2));
+        assert!(graph.get_post_topic(100).is_none());
     }
 }

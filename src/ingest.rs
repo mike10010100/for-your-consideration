@@ -127,6 +127,7 @@ impl Default for IngesterConfig {
                 CompactString::new("app.bsky.feed.repost"),
                 CompactString::new("app.bsky.feed.post"),
                 CompactString::new("app.bsky.graph.follow"),
+                CompactString::new("app.bsky.graph.block"),
             ],
             initial_cursor: None,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
@@ -1015,6 +1016,7 @@ pub fn parse_jetstream_frame(text: &str) -> Option<(Vec<JetstreamEvent>, u64)> {
             let post_uri = record
                 .get("subject")
                 .and_then(|s| s.get("uri").and_then(|u| u.as_str()).or_else(|| s.as_str()))
+                .filter(|uri| !is_non_post_at_uri(uri))
                 .map(CompactString::new)?;
 
             events.push(JetstreamEvent::Interaction {
@@ -1028,6 +1030,7 @@ pub fn parse_jetstream_frame(text: &str) -> Option<(Vec<JetstreamEvent>, u64)> {
             let post_uri = record
                 .get("subject")
                 .and_then(|s| s.get("uri").and_then(|u| u.as_str()).or_else(|| s.as_str()))
+                .filter(|uri| !is_non_post_at_uri(uri))
                 .map(CompactString::new)?;
 
             events.push(JetstreamEvent::Interaction {
@@ -1238,6 +1241,52 @@ pub struct JetstreamIngester {
 /// Alias for [`JetstreamIngester`].
 pub type JetstreamClient = JetstreamIngester;
 
+/// Returns true when `uri` is an `at://` URI pointing at a known non-post collection
+/// (such as a feed generator, starter pack, moderation list, or labeler service).
+#[inline]
+#[must_use]
+fn is_non_post_at_uri(uri: &str) -> bool {
+    uri.contains("/app.bsky.feed.generator/")
+        || uri.contains("/app.bsky.graph.starterpack/")
+        || uri.contains("/app.bsky.graph.list/")
+        || uri.contains("/app.bsky.labeler.service/")
+}
+
+/// Partitions wanted collections into parallel stream slice buckets.
+///
+/// Groups low-frequency `"app.bsky.graph.block"` onto the same slice as `"app.bsky.graph.follow"`
+/// when both are present so high-frequency follow events keep the graph slice watermark advancing.
+#[must_use]
+fn partition_collections_into_slices(wanted: &[CompactString]) -> Vec<Vec<CompactString>> {
+    let has_follow = wanted.iter().any(|c| c == "app.bsky.graph.follow");
+    let mut slices: Vec<Vec<CompactString>> = Vec::with_capacity(wanted.len());
+    for col in wanted {
+        if col == "app.bsky.graph.block" && has_follow {
+            if let Some(follow_slice) = slices
+                .iter_mut()
+                .find(|s| s.iter().any(|c| c == "app.bsky.graph.follow"))
+            {
+                follow_slice.push(col.clone());
+                continue;
+            }
+        }
+        slices.push(vec![col.clone()]);
+        if col == "app.bsky.graph.follow"
+            && wanted.iter().any(|c| c == "app.bsky.graph.block")
+            && !slices
+                .iter()
+                .flat_map(|s| s.iter())
+                .any(|c| c == "app.bsky.graph.block")
+        {
+            if let Some(last) = slices.last_mut() {
+                last.push(CompactString::new("app.bsky.graph.block"));
+            }
+        }
+    }
+    slices.truncate(MAX_STREAM_SLICES);
+    slices
+}
+
 impl JetstreamIngester {
     /// Creates a new [`JetstreamIngester`] instance.
     #[must_use]
@@ -1247,8 +1296,9 @@ impl JetstreamIngester {
         graph: Arc<GraphStore>,
     ) -> Self {
         let stats = Arc::new(IngestionStats::new(config.initial_cursor));
-        let slice_count = if config.parallel_slicing && config.wanted_collections.len() > 1 {
-            config.wanted_collections.len()
+        let slices = partition_collections_into_slices(&config.wanted_collections);
+        let slice_count = if config.parallel_slicing && slices.len() > 1 {
+            slices.len()
         } else {
             1
         };
@@ -1317,17 +1367,12 @@ impl JetstreamIngester {
         tx: &mpsc::Sender<JetstreamEvent>,
         cancel_token: &CancellationToken,
     ) {
-        if self.config.parallel_slicing && self.config.wanted_collections.len() > 1 {
-            let slice_count = self.config.wanted_collections.len().min(MAX_STREAM_SLICES);
+        let slices = partition_collections_into_slices(&self.config.wanted_collections);
+        if self.config.parallel_slicing && slices.len() > 1 {
+            let slice_count = slices.len().min(MAX_STREAM_SLICES);
             self.stats.set_slice_count(slice_count);
 
-            for (slice_idx, collection) in self
-                .config
-                .wanted_collections
-                .iter()
-                .take(slice_count)
-                .enumerate()
-            {
+            for (slice_idx, slice_collections) in slices.into_iter().take(slice_count).enumerate() {
                 let endpoint = if self.config.jetstream_endpoints.is_empty() {
                     self.config.jetstream_url.clone()
                 } else {
@@ -1340,7 +1385,7 @@ impl JetstreamIngester {
                     jetstream_url: endpoint.clone(),
                     jetstream_endpoints: vec![endpoint],
                     parallel_slicing: false,
-                    wanted_collections: vec![collection.clone()],
+                    wanted_collections: slice_collections,
                     initial_cursor: self.config.initial_cursor,
                     channel_capacity: self.config.channel_capacity,
                     initial_backoff: self.config.initial_backoff,
@@ -2605,5 +2650,36 @@ mod tests {
         }
         assert!(graph.get_post_meta(pid).is_none());
         assert!(graph.get_post_topic(pid).is_none());
+    }
+
+    #[test]
+    fn test_ignore_likes_on_non_post_collections_and_default_wants_blocks() {
+        let cfg = IngesterConfig::default();
+        assert!(cfg
+            .wanted_collections
+            .contains(&CompactString::new("app.bsky.graph.block")));
+
+        let feedgen_like = serde_json::json!({
+            "did": "did:plc:liker",
+            "time_us": 1_710_000_000_000_000u64,
+            "kind": "commit",
+            "commit": {
+                "operation": "create",
+                "collection": "app.bsky.feed.like",
+                "rkey": "3k2yihcrp6f2c",
+                "record": {
+                    "$type": "app.bsky.feed.like",
+                    "subject": {
+                        "uri": "at://did:plc:creator/app.bsky.feed.generator/my-feed",
+                        "cid": "bafyreig..."
+                    }
+                }
+            }
+        })
+        .to_string();
+        assert!(
+            parse_jetstream_frame(&feedgen_like).is_none(),
+            "likes on feed generators must not be ingested as post interactions"
+        );
     }
 }
