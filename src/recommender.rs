@@ -1352,7 +1352,7 @@ impl Recommender {
                 let edges_slice = tail_bounded(post_edges, MAX_POST_EDGES);
                 for edge in edges_slice {
                     let co_user = edge.target();
-                    if co_user != vid {
+                    if co_user != vid && !self.graph.is_mutually_blocked(vid, co_user) {
                         if let Some(ref v_bm) = viewer_bm {
                             self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
                                 if let Some(c_bm) = c_bm_opt {
@@ -1370,10 +1370,11 @@ impl Recommender {
                                             );
                                             if conf > 0.0 {
                                                 let score = conf * edge.weight();
-                                                if best_twin
-                                                    .as_ref()
-                                                    .is_none_or(|(_, best_s, _, _)| score > *best_s)
-                                                {
+                                                if best_twin.as_ref().is_none_or(
+                                                    |(_, best_conf, best_sig, _)| {
+                                                        score > *best_conf * best_sig.weight()
+                                                    },
+                                                ) {
                                                     best_twin = Some((
                                                         co_user,
                                                         conf,
@@ -1467,7 +1468,9 @@ impl Recommender {
                     let edges_slice = tail_bounded(post_edges, MAX_POST_EDGES);
                     for edge in edges_slice {
                         let co_user = edge.target();
-                        if follows.contains(&co_user) {
+                        if follows.contains(&co_user)
+                            && !self.graph.is_mutually_blocked(vid, co_user)
+                        {
                             follow_match = Some((co_user, edge.signal()));
                             break;
                         }
@@ -1976,6 +1979,9 @@ impl Recommender {
                 let mut cand_followed: AHashMap<u32, (u32, SignalType)> = AHashMap::new();
                 self.graph.with_user_follows(uid, |follows| {
                     for &followed_id in follows {
+                        if self.graph.is_mutually_blocked(uid, followed_id) {
+                            continue;
+                        }
                         self.graph
                             .with_user_interactions(followed_id, |followed_interactions| {
                                 for edge in followed_interactions {
@@ -1989,7 +1995,10 @@ impl Recommender {
                                     let social_proof = calculate_social_proof_factor(
                                         self.graph.get_post_interaction_count(cand_pid),
                                     );
-                                    cand_details.insert(cand_pid, (decay, social_proof));
+                                    cand_details
+                                        .entry(cand_pid)
+                                        .and_modify(|(d, _)| *d += decay)
+                                        .or_insert((decay, social_proof));
                                     cand_followed
                                         .entry(cand_pid)
                                         .or_insert_with(|| (followed_id, edge.signal()));

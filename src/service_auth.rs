@@ -353,22 +353,25 @@ impl ServiceAuthVerifier {
         }
 
         // Post-signature claim validation (mirrors the payload-only validator).
-        if let Some(exp) = payload.exp {
-            if now_secs > exp.saturating_add(JWT_CLOCK_SKEW_LEEWAY_SECS) {
-                return Err(FeedError::Auth(format!(
-                    "Token expired: exp {exp} (+{JWT_CLOCK_SKEW_LEEWAY_SECS}s leeway) < now {now_secs}"
-                )));
-            }
+        let exp = payload.exp.ok_or_else(|| {
+            FeedError::Auth("Missing expiration (exp) claim in service JWT".to_string())
+        })?;
+        if now_secs > exp.saturating_add(JWT_CLOCK_SKEW_LEEWAY_SECS) {
+            return Err(FeedError::Auth(format!(
+                "Token expired: exp {exp} (+{JWT_CLOCK_SKEW_LEEWAY_SECS}s leeway) < now {now_secs}"
+            )));
         }
 
         if let Some(expected_aud) = expected_audience {
-            if let Some(ref aud) = payload.aud {
-                if aud.as_str() != expected_aud && aud.as_str() != "did:web:for-your-consideration"
-                {
-                    return Err(FeedError::Auth(format!(
-                        "Audience mismatch: expected '{expected_aud}', got '{aud}'"
-                    )));
-                }
+            let aud = payload.aud.as_deref().ok_or_else(|| {
+                FeedError::Auth(format!(
+                    "Audience mismatch: expected '{expected_aud}', got '<missing>'"
+                ))
+            })?;
+            if aud != expected_aud && aud != "did:web:for-your-consideration" {
+                return Err(FeedError::Auth(format!(
+                    "Audience mismatch: expected '{expected_aud}', got '{aud}'"
+                )));
             }
         }
 
@@ -865,5 +868,57 @@ mod tests {
             .await
             .is_err());
         verifier.clear_cache();
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn test_missing_exp_or_aud_rejected_in_verify_service_jwt() {
+        let verifier = ServiceAuthVerifier::new();
+        let signing = SigningKey::from_bytes(&[31u8; 32].into()).unwrap();
+        let did = "did:plc:svc_jwt_missing_claims";
+        verifier.register_test_key(did, *signing.verifying_key());
+
+        let now = now_secs();
+        let header = encode_segment(&serde_json::json!({"alg": "ES256K", "typ": "JWT"}));
+
+        // 1. Missing exp -> rejected
+        let no_exp_payload = encode_segment(&serde_json::json!({
+            "iss": did,
+            "aud": "did:web:feed.example.com"
+        }));
+        let no_exp_input = format!("{header}.{no_exp_payload}");
+        let no_exp_sig: Signature = signing.sign(no_exp_input.as_bytes());
+        let no_exp_jwt = format!(
+            "{no_exp_input}.{}",
+            URL_SAFE_NO_PAD.encode(no_exp_sig.to_bytes().as_slice())
+        );
+        assert!(verifier
+            .verify_service_jwt(
+                &format!("Bearer {no_exp_jwt}"),
+                Some("did:web:feed.example.com"),
+                now
+            )
+            .await
+            .is_err());
+
+        // 2. Missing aud when expected_audience is Some -> rejected
+        let no_aud_payload = encode_segment(&serde_json::json!({
+            "iss": did,
+            "exp": now + 3600
+        }));
+        let no_aud_input = format!("{header}.{no_aud_payload}");
+        let no_aud_sig: Signature = signing.sign(no_aud_input.as_bytes());
+        let no_aud_jwt = format!(
+            "{no_aud_input}.{}",
+            URL_SAFE_NO_PAD.encode(no_aud_sig.to_bytes().as_slice())
+        );
+        assert!(verifier
+            .verify_service_jwt(
+                &format!("Bearer {no_aud_jwt}"),
+                Some("did:web:feed.example.com"),
+                now
+            )
+            .await
+            .is_err());
     }
 }

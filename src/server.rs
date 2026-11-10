@@ -938,6 +938,11 @@ pub async fn handle_get_oauth_login(
     };
 
     let auth_url = if let Some(ref par_endpoint) = resolved.par_endpoint {
+        let allow_local = par_endpoint.starts_with("http://127.0.0.1")
+            || par_endpoint.starts_with("http://localhost");
+        let par_valid = crate::auth::validate_outbound_url_async(par_endpoint, allow_local)
+            .await
+            .is_ok();
         let http_client = build_secure_http_client();
 
         let par_form = [
@@ -958,9 +963,13 @@ pub async fn handle_get_oauth_login(
             req = req.header("DPoP", proof);
         }
 
-        let mut resp = req.form(&par_form).send().await;
+        let mut resp = if par_valid {
+            req.form(&par_form).send().await.ok()
+        } else {
+            None
+        };
 
-        if let Ok(ref r) = resp {
+        if let Some(ref r) = resp {
             if r.status() == StatusCode::BAD_REQUEST || r.status() == StatusCode::UNAUTHORIZED {
                 if let Some(nonce_val) = r.headers().get("DPoP-Nonce").and_then(|h| h.to_str().ok())
                 {
@@ -972,14 +981,15 @@ pub async fn handle_get_oauth_login(
                             .header("DPoP", &retry_proof)
                             .form(&par_form)
                             .send()
-                            .await;
+                            .await
+                            .ok();
                     }
                 }
             }
         }
 
         match resp {
-            Ok(resp) if resp.status().is_success() => {
+            Some(resp) if resp.status().is_success() => {
                 let json: serde_json::Value = resp.json().await.unwrap_or_default();
                 if let Some(request_uri) = json["request_uri"].as_str() {
                     format!(

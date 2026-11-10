@@ -236,9 +236,10 @@ impl StringInterner {
     /// Exports a snapshot clone of all interned strings in deterministic shard and index order.
     #[must_use]
     pub fn export_strings(&self) -> Vec<CompactString> {
-        let mut all = Vec::with_capacity(self.len());
-        for shard in &self.shards {
-            let guard = shard.read();
+        let guards: [_; NUM_INTERNER_SHARDS] = std::array::from_fn(|i| self.shards[i].read());
+        let total: usize = guards.iter().map(|g| g.to_str.len()).sum();
+        let mut all = Vec::with_capacity(total);
+        for guard in &guards {
             all.extend(guard.to_str.iter().cloned());
         }
         all

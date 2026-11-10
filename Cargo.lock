@@ -543,7 +543,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "for-your-consideration"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -1834,9 +1834,9 @@ dependencies = [
 
 [[package]]
 name = "skyauth"
-version = "0.3.12"
+version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cfe142abcc55c4c040099ff324a24c6165e3b95cb4f0c579326aa6371fcd444"
+checksum = "6022f9b8fa25d3f8fc385556f475412136801d1a97c1d0093901cfd3afd77b6c"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -1866,9 +1866,9 @@ dependencies = [
 
 [[package]]
 name = "skybase"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4e076d43bcefa0b1c0cee958eee44356f91824a12742e5593c3b78e39895c5c"
+checksum = "f0823d40f7180f34b66c427ed827531bb81a6a1e130c70aa3e6863672ee98175"
 dependencies = [
  "futures-util",
  "parking_lot 0.12.5",
