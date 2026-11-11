@@ -358,3 +358,58 @@ async fn test_dashboard_concurrent_requests_throughput() {
         h.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn test_dashboard_progressive_disclosure_post_hydration_and_admin_gating() {
+    let state = create_test_state();
+    let app = create_xrpc_router(state);
+
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+
+    // 1. Product Hero + Pin Feed in Bluesky CTA + Feed Descriptor discovery
+    assert!(html.contains("id=\"product-hero\""));
+    assert!(html.contains("id=\"btn-pin-in-bsky\""));
+    assert!(html.contains("/xrpc/app.bsky.feed.describeFeedGenerator"));
+
+    // 2. Browser-direct Bluesky post hydration & readable post cards
+    assert!(html.contains("app.bsky.feed.getPosts"));
+    assert!(html.contains("hydratePostsBatch"));
+    assert!(html.contains("why-reason-pill"));
+    assert!(html.contains("class=\"score-details\""));
+
+    // 3. Progressive disclosure drawers (both collapsed by default)
+    assert!(html.contains("id=\"fine-tune-drawer\""));
+    assert!(!html.contains("id=\"fine-tune-drawer\" open"));
+    let drawer_idx = html
+        .find("id=\"operator-drawer\"")
+        .expect("Must contain #operator-drawer");
+    assert!(!html.contains("id=\"operator-drawer\" open"));
+
+    // 4. Telemetry and Admin Publish action tucked inside collapsed #operator-drawer & hidden by default
+    let admin_bar_idx = html
+        .find("id=\"admin-operator-bar\"")
+        .expect("Must contain #admin-operator-bar");
+    let publish_btn_idx = html
+        .find("id=\"btn-open-publish-modal\"")
+        .expect("Must contain #btn-open-publish-modal");
+    let telemetry_idx = html
+        .find("id=\"telemetry\"")
+        .expect("Must contain #telemetry");
+
+    assert!(
+        admin_bar_idx > drawer_idx && publish_btn_idx > drawer_idx && telemetry_idx > drawer_idx,
+        "Admin publish controls and telemetry must reside inside collapsed #operator-drawer"
+    );
+    assert!(
+        html[admin_bar_idx..publish_btn_idx + 120].contains("display: none"),
+        "Admin controls must start hidden in static HTML"
+    );
+    assert!(
+        html.contains("Boolean(session && state.adminDid &&"),
+        "updatePublishButtonVisibility must strictly require both an active session and matching adminDid"
+    );
+}
