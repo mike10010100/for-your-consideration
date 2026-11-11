@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-11-11
+
+### Changed
+
+- **Atmosphere Suite Dashboard Redesign & Sister-App Unification (`src/assets/dashboard.html`)**:
+  - Redesigned the embedded single-file For You Feed Dashboard (`< 150 KB`, zero external runtime dependencies) around the shared **Atmosphere Instrument** visual system (`1px` architectural hairlines, `tabular-nums` metrics, inline stroke SVG iconography, and sky `#0ea5e9` + warm gold `#fbbf24` 4-point star accents) unified with sister app `skybouncer`.
+  - Added a zero-FOUC `<head>` theme bootstrap and 3-way header theme switcher (`System` / `Light` / `Dark`) persisted in `localStorage` (`atmosphere-theme`) with synchronized `aria-pressed` state, theme-aware velocity sparkline canvas rendering (`drawSparkline`), and theme-adaptive Recommendation Proof Chain SVG rendering (`renderProofSvg`).
+  - Added a `.suite-nav` sister-app switcher pill in the sticky header and footer cross-link routing dynamically between For Your Consideration and Skybouncer (`localhost:3031` locally, `skybouncer.mike10010100.com` in production).
+  - Condensed graph KPI cards and Jetstream hydration status into a unified above-the-fold telemetry panel, paired Live Algorithmic Dials and Dynamic Feed Preview side-by-side, and unified the 4-view AT Protocol OAuth Sign-In modal with unclipped live handle typeahead.
+
+---
+
 ## [0.7.5] - 2026-11-10
 
 ### Changed
