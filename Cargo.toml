@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -105,3 +105,12 @@ type_complexity = "allow"
 uninlined_format_args = "allow"
 assertions_on_constants = "allow"
 unnecessary_cast = "allow"
+
+# Compile third-party dependencies with basic optimizations in dev/test builds so
+# roaring bitmap, proptest, crypto (p256/k256/ring), and coverage runs execute fast
+# without sacrificing debug assertions in crate code.
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.test.package."*"]
+opt-level = 1

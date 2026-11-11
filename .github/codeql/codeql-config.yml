@@ -1,0 +1,5 @@
+name: "For Your Consideration CodeQL Config"
+
+paths-ignore:
+  - "tests"
+  - "benches"
