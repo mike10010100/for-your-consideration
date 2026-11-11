@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] - 2026-11-11
+
+### Changed
+
+- **CI, Coverage, Docker & CodeQL Pipeline Acceleration (`.github/workflows/ci.yml`, `.github/workflows/codeql.yml`, `.github/codeql/codeql-config.yml`, `Cargo.toml`)**:
+  - Unified the duplicate `test` and `coverage` jobs into `Full Test Suite & Durability Verification` using `cargo-nextest` + `cargo-llvm-cov` (`>= 80%` line coverage threshold) with `CARGO_LLVM_COV_TARGET_DIR=target` and isolated `Swatinem/rust-cache@v2` `shared-key`s across `clippy`, `coverage`, and `release-latency`.
+  - Added `[profile.dev.package."*"]` and `[profile.test.package."*"]` `opt-level = 1` in `Cargo.toml` so dependency-heavy `roaring`, `proptest`, and crypto (`p256`/`k256`) test binaries execute fast while preserving full debug assertions in crate code.
+  - Enabled GitHub Actions Buildx layer caching (`cache-from: type=gha` / `cache-to: type=gha,mode=max`) on `docker-build` to reuse the normalized `manifest-prep` Cargo dependency layer across runs, and added `release-latency` to `release` job dependencies.
+  - Accelerated `CodeQL Static Security Scan (rust)` by caching `${{ github.workspace }}/target` via `CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR` + `Swatinem/rust-cache@v2`, adding workflow concurrency cancellation on PR branches, and scoping CodeQL extraction to production sources via `.github/codeql/codeql-config.yml` (`paths-ignore: ["tests", "benches"]`).
+
+---
+
 ## [0.7.6] - 2026-11-11
 
 ### Changed
