@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] - 2026-11-11
+
+### Added
+
+- **Browser-Direct Bluesky Post Hydration & Pin-in-Bluesky Hero CTA (`src/assets/dashboard.html`, `tests/dashboard_spa_tests.rs`)**:
+  - Added `#product-hero` with a dynamic **Open & Pin Feed in Bluesky** CTA (`#btn-pin-in-bsky`) resolved from `/xrpc/app.bsky.feed.describeFeedGenerator` alongside a top-level **Preview Feed For** viewer bar synchronized with **Your Taste Twins**.
+  - Added client-side batched post hydration (`hydratePostsBatch` via `app.bsky.feed.getPosts` in 25-URI chunks with in-tab `postHydrationCache`) to render real Bluesky post text, embedded media/quotes/links, relative timestamps, engagement counts, plain-English `.why-reason-pill` badges, and collapsible `<details class="score-details">` ranking math with zero server RAM overhead while preserving the `< 160 KB` single-file airgapped SPA budget.
+
+### Changed
+
+- **Progressive-Disclosure Feed Tuning & Strict Admin Drawer Gating (`src/assets/dashboard.html`)**:
+  - Streamlined **Tune Your Feed** around 4 visual mode cards (**Realtime Pulse**, **Balanced**, **Deep Dives**, **Explorer**) and quick composition/NSFW toggles, collapsing the 7 granular half-life, discovery, and topic-multiplier sliders into `<details id="fine-tune-drawer">`.
+  - Moved engine, graph, memory, and Jetstream hydration telemetry into a collapsed `<details id="operator-drawer">` with a live summary pill, and strictly hid `#admin-operator-bar` and `#btn-open-publish-modal` unless authenticated as `ADMIN_DID` inside the operator drawer.
+
+---
+
 ## [0.7.7] - 2026-11-11
 
 ### Changed
