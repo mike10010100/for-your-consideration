@@ -84,7 +84,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-nextest & cargo-llvm-cov
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with:
           tool: cargo-nextest,cargo-llvm-cov
 
@@ -168,7 +168,7 @@ jobs:
           persist-credentials: false
 
       - name: Run cargo-deny security checks
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2
 
   docker-build:
     name: Production Docker Build & Healthcheck Verification
