@@ -397,8 +397,8 @@ impl IngestionStats {
         } else {
             let mut min_val = u64::MAX;
             let mut all_started = true;
-            for i in 0..count {
-                let val = self.slice_cursors[i].load(Ordering::Relaxed);
+            for cursor in self.slice_cursors.iter().take(count) {
+                let val = cursor.load(Ordering::Relaxed);
                 if val == 0 {
                     all_started = false;
                 } else if val < min_val {
@@ -684,8 +684,8 @@ impl CursorTracker {
         } else {
             let mut min_val = u64::MAX;
             let mut all_started = true;
-            for i in 0..count {
-                let val = self.slice_cursors[i].load(Ordering::Relaxed);
+            for cursor in self.slice_cursors.iter().take(count) {
+                let val = cursor.load(Ordering::Relaxed);
                 if val == 0 {
                     all_started = false;
                 } else if val < min_val {

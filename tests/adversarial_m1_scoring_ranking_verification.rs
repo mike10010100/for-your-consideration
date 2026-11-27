@@ -208,7 +208,7 @@ fn test_empirical_select_nth_unstable_by_top_k_exact_preservation() {
             let outside_score = exact_sorted[k].1;
 
             // Partition with select_nth_unstable_by
-            let mut partitioned = items.clone();
+            let mut partitioned = items;
             partitioned.select_nth_unstable_by(k, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -233,7 +233,7 @@ fn test_empirical_select_nth_unstable_by_top_k_exact_preservation() {
         {
             let items: Vec<(u32, f32)> = (0..size as u32).map(|id| (id, id as f32)).collect();
 
-            let mut partitioned = items.clone();
+            let mut partitioned = items;
             partitioned.select_nth_unstable_by(k, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -264,7 +264,7 @@ fn test_empirical_select_nth_unstable_by_top_k_exact_preservation() {
             partitioned.truncate(k);
 
             assert_eq!(partitioned.len(), k);
-            let mut exact_sorted = items.clone();
+            let mut exact_sorted = items;
             exact_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let min_exact_top_k = exact_sorted[k - 1].1;
 
@@ -280,7 +280,7 @@ fn test_empirical_select_nth_unstable_by_top_k_exact_preservation() {
         {
             let items: Vec<(u32, f32)> = (0..size as u32).map(|id| (id, 0.75)).collect();
 
-            let mut partitioned = items.clone();
+            let mut partitioned = items;
             partitioned.select_nth_unstable_by(k, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });

@@ -1972,10 +1972,7 @@ impl Recommender {
                         return false;
                     }
                 }
-                if c.score_breakdown.fatigue_penalty <= 0.0 {
-                    return false;
-                }
-                true
+                c.score_breakdown.fatigue_penalty > 0.0
             });
         };
 

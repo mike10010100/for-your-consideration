@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added single-curator (`k == 1`) diversity deferral with backfill (`apply_author_and_curator_diversity`, `MAX_SINGLE_CURATOR_POSTS_PER_TWIN = 2`) alongside the max-2-per-author cap.
   - Guarded `handle_get_feed_skeleton` impression recording and `recommend` pagination session caching against client poll probes (`cursor` empty and `effective_limit < MIN_IMPRESSION_RECORD_LIMIT` (`3`)).
 
+### Security
+
+- **Updated `url` to `>= 2.5.9` (`Cargo.lock`)**: Resolved `RUSTSEC-2026-0592` (stack overflow in `Url::origin()` on nested `blob:` URLs).
+
 ---
 
 ## [0.7.8] - 2026-11-11
