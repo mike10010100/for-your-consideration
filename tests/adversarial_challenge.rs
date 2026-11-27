@@ -176,6 +176,7 @@ fn test_adversarial_root_dampening_5k_reply_tree() {
         limit: 100,
         explore_ratio: 0.0,
         min_likes: 1,
+        include_replies: true,
         ..Default::default()
     };
 

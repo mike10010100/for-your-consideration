@@ -471,48 +471,61 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
     let viewer_did = "did:plc:viral_bounds_viewer";
     let viewer_id = interner.intern(viewer_did);
 
-    // 1. Create 80 seed posts for viewer (MAX_SEED_POSTS = 50)
-    // Posts 0..30 are old, posts 30..80 are recent
+    // 1. Create 150 seed posts for viewer (exceeds MAX_SEED_POSTS = 100):
+    //    Posts 0..50 are older long-term history, posts 50..150 are recent.
     let mut old_pids = Vec::new();
     let mut recent_pids = Vec::new();
-    for i in 0..80 {
+    for i in 0..150 {
         let uri = format!("at://did:plc:author_v/app.bsky.feed.post/seed_{i}");
         let pid = interner.intern(&uri);
         let author_id = interner.intern("did:plc:author_v");
         let ts = now - 500_000 + (i as u64 * 1000);
         graph.record_post_meta(pid, author_id, None, None, ts);
         graph.record_interaction(viewer_id, pid, SignalType::Like, ts);
-        if i < 30 {
+        if i < 50 {
             old_pids.push(pid);
         } else {
             recent_pids.push(pid);
         }
     }
-    assert_eq!(old_pids.len(), 30);
-    assert_eq!(recent_pids.len(), 50);
+    assert_eq!(old_pids.len(), 50);
+    assert_eq!(recent_pids.len(), 100);
 
-    // 2. Create a "phantom twin" who only interacted with OLD seed posts (0..30)
-    // Because seed posts are capped to last 50, this phantom twin must NOT be reached during Tier 1 walk!
-    let phantom_did = "did:plc:phantom_twin";
-    let phantom_id = interner.intern(phantom_did);
+    // 2. Create a "long-term twin" who interacted with older seed posts (0..50).
+    //    Hybrid strided seed selection recalls historical taste twins across full history
+    //    even when the viewer has > MAX_SEED_POSTS recent interactions.
+    let long_term_did = "did:plc:long_term_twin";
+    let long_term_id = interner.intern(long_term_did);
     for &pid in &old_pids {
-        graph.record_interaction(phantom_id, pid, SignalType::Like, now - 400_000);
+        graph.record_interaction(long_term_id, pid, SignalType::Like, now - 400_000);
     }
-    let phantom_cand_uri = "at://did:plc:phantom_cand_auth/app.bsky.feed.post/phantom_cand";
-    let phantom_cand_pid = interner.intern(phantom_cand_uri);
-    let phantom_cand_auth = interner.intern("did:plc:phantom_cand_auth");
-    graph.record_post_meta(phantom_cand_pid, phantom_cand_auth, None, None, now - 100);
-    graph.record_interaction(phantom_id, phantom_cand_pid, SignalType::Like, now - 100);
+    let long_term_cand_uri = "at://did:plc:long_term_cand_auth/app.bsky.feed.post/long_term_cand";
+    let long_term_cand_pid = interner.intern(long_term_cand_uri);
+    let long_term_cand_auth = interner.intern("did:plc:long_term_cand_auth");
+    graph.record_post_meta(
+        long_term_cand_pid,
+        long_term_cand_auth,
+        None,
+        None,
+        now - 100,
+    );
+    graph.record_interaction(
+        long_term_id,
+        long_term_cand_pid,
+        SignalType::Like,
+        now - 100,
+    );
 
-    // 3. Create 150 co-interactors on the 50 RECENT seed posts
-    // We give them varying overlap counts from 2 up to 20 shared likes.
+    // 3. Create 150 co-interactors on the newest recent seed posts (indices 89..100 of recent_pids)
+    //    with 2..11 shared likes (< long_term_twin's ~27 strided shared likes / 50 total likes).
     for u in 0..150 {
         let co_did = format!("did:plc:recent_co_{u:03}");
         let co_id = interner.intern(&co_did);
 
         let shared_count = (u % 10) + 2; // 2..11 shared likes
         for s in 0..shared_count {
-            graph.record_interaction(co_id, recent_pids[s], SignalType::Like, now - 50_000);
+            let pid = recent_pids[recent_pids.len() - 1 - s];
+            graph.record_interaction(co_id, pid, SignalType::Like, now - 50_000);
         }
 
         // Recommend one candidate post per co-interactor
@@ -533,27 +546,27 @@ fn test_empirical_preview_defensive_bounds_exact_scoring_under_viral_fanout() {
         .recommend_preview_at(Some(viewer_did), &dials, now)
         .unwrap();
 
-    // 1. Check candidate evaluation count: exactly MAX_CO_INTERACTORS (100)
+    // 1. Candidate evaluation count stays strictly bounded to MAX_CO_INTERACTORS (100)
     assert_eq!(
         preview.total_candidates, MAX_CO_INTERACTORS,
         "Total candidates evaluated must equal MAX_CO_INTERACTORS (100)"
     );
 
-    // 2. Check phantom candidate from old seed posts is NOT present
-    let has_phantom = preview
+    // 2. Long-term twin discovered via strided historical seeds IS recalled
+    let has_long_term = preview
         .items
         .iter()
-        .any(|it| it.uri.as_str() == phantom_cand_uri);
+        .any(|it| it.uri.as_str() == long_term_cand_uri);
     assert!(
-        !has_phantom,
-        "Candidate from phantom twin on seed posts older than top 50 must be completely excluded"
+        has_long_term,
+        "Candidate from long-term historical twin must be recalled via strided seed sampling"
     );
 
-    // 3. Verify all returned preview items have positive final scores
+    // 3. Verify all returned preview items have finite positive final scores
     for it in &preview.items {
         assert!(
-            it.score_breakdown.final_score > 0.0,
-            "All preview final scores must be positive"
+            it.score_breakdown.final_score.is_finite() && it.score_breakdown.final_score > 0.0,
+            "All preview final scores must be finite and positive"
         );
     }
 }

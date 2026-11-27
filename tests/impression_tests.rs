@@ -717,3 +717,158 @@ fn test_compounded_repeated_impression_fatigue_demotes_viral_post_in_exhausted_p
         Some(FATIGUE_MIN_FLOOR)
     );
 }
+
+#[test]
+fn test_unseen_ceiling_quality_floor_prevents_tail_junk_from_crushing_recovered_posts() {
+    let interner = Arc::new(StringInterner::new());
+    let graph = Arc::new(GraphStore::new());
+
+    let viewer_did = "did:plc:ceiling_floor_viewer";
+    let viewer = interner.intern(viewer_did);
+
+    // 12 seed posts liked by the viewer (Tier 1 active)
+    let mut seed_posts = Vec::new();
+    for s in 0..12 {
+        let seed_author = interner.intern(&format!("did:plc:cf_seed_author_{s}"));
+        let seed_post = interner.intern(&format!(
+            "at://did:plc:cf_seed_author_{s}/app.bsky.feed.post/{s}"
+        ));
+        graph.record_post_meta(seed_post, seed_author, None, None, TEST_EPOCH - 3_000);
+        graph.record_interaction(viewer, seed_post, SignalType::Like, TEST_EPOCH - 2_500);
+        seed_posts.push(seed_post);
+    }
+
+    // 10 strong taste twins sharing all 12 seeds
+    let mut strong_twins = Vec::new();
+    for t in 0..10 {
+        let twin = interner.intern(&format!("did:plc:cf_strong_twin_{t}"));
+        for &sp in &seed_posts {
+            graph.record_interaction(twin, sp, SignalType::Like, TEST_EPOCH - 2_000);
+        }
+        strong_twins.push(twin);
+    }
+
+    // 1 weak taste twin sharing only 2 seeds + 200 disjoint likes (far lower Bayesian similarity)
+    let weak_twin = interner.intern("did:plc:cf_weak_twin");
+    graph.record_interaction(
+        weak_twin,
+        seed_posts[0],
+        SignalType::Like,
+        TEST_EPOCH - 2_000,
+    );
+    graph.record_interaction(
+        weak_twin,
+        seed_posts[1],
+        SignalType::Like,
+        TEST_EPOCH - 2_000,
+    );
+    let weak_noise_author = interner.intern("did:plc:cf_weak_noise_author");
+    for n in 0..200 {
+        let npid = interner.intern(&format!(
+            "at://did:plc:cf_weak_noise_author/app.bsky.feed.post/n_{n}"
+        ));
+        graph.record_post_meta(npid, weak_noise_author, None, None, TEST_EPOCH - 50_000);
+        graph.record_interaction(weak_twin, npid, SignalType::Like, TEST_EPOCH - 40_000);
+    }
+
+    // Candidate 1: strong_unseen — endorsed by all 10 strong twins, unseen by viewer
+    let strong_unseen_author = interner.intern("did:plc:cf_strong_unseen_auth");
+    let strong_unseen_uri = "at://did:plc:cf_strong_unseen_auth/app.bsky.feed.post/strong_unseen";
+    let strong_unseen = interner.intern(strong_unseen_uri);
+    graph.record_post_meta(
+        strong_unseen,
+        strong_unseen_author,
+        None,
+        None,
+        TEST_EPOCH - 200,
+    );
+
+    // Candidate 2: fatigued_consensus — endorsed by all 10 strong twins, served 30m ago
+    let fatigued_author = interner.intern("did:plc:cf_fatigued_auth");
+    let fatigued_uri = "at://did:plc:cf_fatigued_auth/app.bsky.feed.post/fatigued_consensus";
+    let fatigued_consensus = interner.intern(fatigued_uri);
+    graph.record_post_meta(
+        fatigued_consensus,
+        fatigued_author,
+        None,
+        None,
+        TEST_EPOCH - 100,
+    );
+
+    for &twin in &strong_twins {
+        graph.record_interaction(twin, strong_unseen, SignalType::Like, TEST_EPOCH - 200);
+        graph.record_interaction(twin, fatigued_consensus, SignalType::Like, TEST_EPOCH - 100);
+    }
+
+    // Candidate 3: tail_junk_unseen — single weak twin interaction (< 15% of strong_unseen score)
+    let tail_author = interner.intern("did:plc:cf_tail_auth");
+    let tail_uri = "at://did:plc:cf_tail_auth/app.bsky.feed.post/tail_junk";
+    let tail_junk_unseen = interner.intern(tail_uri);
+    graph.record_post_meta(tail_junk_unseen, tail_author, None, None, TEST_EPOCH - 300);
+    graph.record_interaction(
+        weak_twin,
+        tail_junk_unseen,
+        SignalType::Like,
+        TEST_EPOCH - 300,
+    );
+
+    let rec = Recommender::new(interner, graph);
+    rec.record_impressions_by_did(Some(viewer_did), &[fatigued_consensus], TEST_EPOCH - 1_800);
+
+    let dials = RecommendationDials {
+        limit: 10,
+        min_likes: 1,
+        explore_ratio: 0.0,
+        explain: true,
+        ..Default::default()
+    };
+
+    // strong_unseen must be #1 (unseen-first holds for qualified posts),
+    // fatigued_consensus must be #2 (not crushed beneath tail_junk_unseen!),
+    // tail_junk_unseen must rank below fatigued_consensus.
+    let feed = rec.recommend(Some(viewer_did), &dials, TEST_EPOCH).unwrap();
+    let idx_strong = feed
+        .posts
+        .iter()
+        .position(|p| p.post_id == strong_unseen)
+        .expect("strong_unseen must be present");
+    let idx_fatigued = feed
+        .posts
+        .iter()
+        .position(|p| p.post_id == fatigued_consensus)
+        .expect("fatigued_consensus must be present");
+    let idx_tail = feed
+        .posts
+        .iter()
+        .position(|p| p.post_id == tail_junk_unseen)
+        .expect("tail_junk_unseen must be present");
+    assert!(
+        idx_strong < idx_fatigued && idx_fatigued < idx_tail,
+        "Expected strong_unseen ({idx_strong}) < fatigued_consensus ({idx_fatigued}) < tail_junk_unseen ({idx_tail})"
+    );
+
+    let preview = rec
+        .recommend_preview_at(Some(viewer_did), &dials, TEST_EPOCH)
+        .unwrap();
+    let p_strong = preview
+        .items
+        .iter()
+        .position(|p| p.uri.as_str() == strong_unseen_uri)
+        .unwrap();
+    let p_fatigued = preview
+        .items
+        .iter()
+        .position(|p| p.uri.as_str() == fatigued_uri)
+        .unwrap();
+    let p_tail = preview
+        .items
+        .iter()
+        .position(|p| p.uri.as_str() == tail_uri)
+        .unwrap();
+    assert!(p_strong < p_fatigued && p_fatigued < p_tail);
+    for item in &preview.items {
+        let b = &item.score_breakdown;
+        let expected = b.taste_similarity * b.time_decay * b.topic_boost * b.fatigue_penalty;
+        assert!((b.final_score - expected).abs() < 1e-4);
+    }
+}

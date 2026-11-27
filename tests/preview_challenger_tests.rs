@@ -1238,8 +1238,10 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
     let viewer_did = "did:plc:m1_bounds_viewer";
     let viewer_id = interner.intern(viewer_did);
 
-    // Viewer interacts with 100 posts (0..100) with increasing timestamps
-    for i in 0..100 {
+    // Viewer interacts with 400 posts (0..400) with increasing timestamps.
+    // Under MAX_SEED_POSTS = 100 (40 newest + 60 evenly strided across older 360, step = 6),
+    // selected seeds are 360..400 plus 359, 353, ..., 29, 23, 17, 11, 5, leaving 0..5 unsampled.
+    for i in 0..400 {
         let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
         let pid = interner.intern(&uri);
         let author = interner.intern("did:plc:author");
@@ -1247,7 +1249,7 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
         graph.record_interaction(viewer_id, pid, SignalType::Like, now - 100_000 + i as u64);
     }
 
-    // Co-user A only likes oldest seed posts 0..5 (outside the 50 most recent, i.e. 50..100)
+    // Co-user A only likes unsampled oldest seed posts 0..5 (outside the 100 selected seeds)
     let co_a_did = "did:plc:co_user_old";
     let co_a_id = interner.intern(co_a_did);
     for i in 0..5 {
@@ -1260,10 +1262,10 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
     graph.record_post_meta(cand_a_pid, co_a_id, None, None, now - 10_000);
     graph.record_interaction(co_a_id, cand_a_pid, SignalType::Like, now - 10_000);
 
-    // Co-user B likes newest seed posts 95..100 (inside the 50 most recent)
+    // Co-user B likes newest seed posts 395..400 (inside the 40 most recent)
     let co_b_did = "did:plc:co_user_recent";
     let co_b_id = interner.intern(co_b_did);
-    for i in 95..100 {
+    for i in 395..400 {
         let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
         let pid = interner.intern(&uri);
         graph.record_interaction(co_b_id, pid, SignalType::Like, now - 50_000);
@@ -1273,7 +1275,20 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
     graph.record_post_meta(cand_b_pid, co_b_id, None, None, now - 10_000);
     graph.record_interaction(co_b_id, cand_b_pid, SignalType::Like, now - 10_000);
 
-    // 1. Taste twins discovery should find Co-user B (recent seed overlap) and NOT Co-user A
+    // Co-user C likes strided historical seed posts [5, 11, 17, 23, 29] (recalled within cap)
+    let co_c_did = "did:plc:co_user_historical";
+    let co_c_id = interner.intern(co_c_did);
+    for i in [5, 11, 17, 23, 29] {
+        let uri = format!("at://did:plc:author/app.bsky.feed.post/seed_{i:03}");
+        let pid = interner.intern(&uri);
+        graph.record_interaction(co_c_id, pid, SignalType::Like, now - 50_000);
+    }
+    let cand_c_pid = interner.intern("at://did:plc:co_user_historical/app.bsky.feed.post/cand_c");
+    graph.record_post_meta(cand_c_pid, co_c_id, None, None, now - 10_000);
+    graph.record_interaction(co_c_id, cand_c_pid, SignalType::Like, now - 10_000);
+
+    // 1. Taste twins discovery should find Co-user B (recent) and Co-user C (strided historical),
+    //    and NOT Co-user A on unsampled seeds outside MAX_SEED_POSTS = 100
     let twins_resp = rec.find_taste_twins(viewer_did, 10).unwrap();
     let twin_dids: Vec<&str> = twins_resp
         .twins
@@ -1285,11 +1300,15 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
         "Co-user B with recent overlap should be discovered"
     );
     assert!(
+        twin_dids.contains(&co_c_did),
+        "Co-user C with strided historical overlap should be discovered"
+    );
+    assert!(
         !twin_dids.contains(&co_a_did),
-        "Co-user A with older overlap outside top-50 seed posts should NOT be explored"
+        "Co-user A on unsampled seeds outside MAX_SEED_POSTS = 100 should NOT be explored"
     );
 
-    // 2. Feed preview should evaluate candidates from Co-user B and NOT Co-user A
+    // 2. Feed preview should evaluate candidates from Co-user B & Co-user C and NOT Co-user A
     let dials = RecommendationDials {
         limit: 10,
         min_likes: 1,
@@ -1304,8 +1323,12 @@ fn test_m1_defensive_bounds_seed_posts_capping() {
         "Candidate from recent co-interactor should be included"
     );
     assert!(
+        preview_uris.contains(&"at://did:plc:co_user_historical/app.bsky.feed.post/cand_c"),
+        "Candidate from strided historical co-interactor should be included"
+    );
+    assert!(
         !preview_uris.contains(&"at://did:plc:co_user_old/app.bsky.feed.post/cand_a"),
-        "Candidate from old seed co-interactor should not be reached"
+        "Candidate from unsampled seed co-interactor should not be reached"
     );
 }
 

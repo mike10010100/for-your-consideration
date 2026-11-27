@@ -59,11 +59,20 @@ pub const FATIGUE_WINDOW_SECS: u64 = 6 * 3600;
 /// Characteristic time constant (tau) for soft fatigue exponential recovery: 2 hours (7,200s).
 pub const FATIGUE_TAU_SECS: f32 = 2.0 * 3600.0;
 
-/// Maximum number of seed interaction posts explored during Tier 1 and taste-twin walks to prevent combinatorial fanout.
-pub const MAX_SEED_POSTS: usize = 50;
+/// Maximum number of distinct seed interaction posts explored during Tier 1 and taste-twin
+/// walks to prevent combinatorial fanout.
+pub const MAX_SEED_POSTS: usize = 100;
+
+/// Number of most-recent distinct seed posts always included before evenly striding historical
+/// interactions.
+pub const RECENT_SEED_POSTS: usize = 40;
 
 /// Maximum number of reverse interaction edges sliced per post during collaborative filtering walks.
 pub const MAX_POST_EDGES: usize = 500;
+
+/// Minimum per-seed reverse-edge budget when distributing [`MAX_CO_INTERACTOR_SCAN`] across seed
+/// posts.
+pub const MIN_POST_EDGES_PER_SEED: usize = 150;
 
 /// Maximum number of recent interaction edges expanded per co-interactor during Tier 1 walks.
 ///
@@ -82,11 +91,33 @@ pub const MAX_CANDIDATE_EVALS: usize = 10_000;
 /// The co-interactor scan intersects the viewer's like-bitmap against each neighbor's bitmap; cost
 /// grows with the number of neighbors *and* with viewer like-count (bitmap container count). Capping
 /// the number of neighbors examined bounds this quadratic term. Seeds and post edges are already
-/// most-recent-bounded, so this is a consistent deterministic sampling bound.
+/// bounded, so this is a consistent deterministic sampling bound.
 pub const MAX_CO_INTERACTOR_SCAN: usize = 5_000;
 
 /// Maximum number of top co-interactor neighbors retained by Bayesian taste similarity.
 pub const MAX_CO_INTERACTORS: usize = 100;
+
+/// Maximum number of single-curator (`k == 1`) posts surfaced per taste twin before deferring
+/// additional posts from that twin behind other curators.
+pub const MAX_SINGLE_CURATOR_POSTS_PER_TWIN: usize = 2;
+
+/// Minimum fraction of the strongest unseen candidate score required for an unseen post to anchor
+/// the unseen-first ceiling against fatigued posts.
+pub const UNSEEN_CEILING_QUALITY_FLOOR_RATIO: f32 = 0.15;
+
+/// Grace period (`48h`) during which post age applies no staleness dampening (`1.0x`).
+pub const POST_AGE_GRACE_SECS: u64 = 48 * 3600;
+
+/// Exponential decay time constant (`48h`) for post-age staleness after [`POST_AGE_GRACE_SECS`].
+pub const POST_AGE_DECAY_TAU_SECS: f32 = 48.0 * 3600.0;
+
+/// Asymptotic floor factor for post-age staleness dampening so old resurfaced posts retain positive
+/// finite scores.
+pub const POST_AGE_MIN_FACTOR: f32 = 0.02;
+
+/// Minimum requested feed limit required to record impressions and cache pagination sessions so
+/// client poll probes (`limit=1..2`) do not burn top unseen posts or overwrite active pages.
+pub const MIN_IMPRESSION_RECORD_LIMIT: usize = 3;
 
 /// Returns the last `n` elements of `slice`, or the whole slice when it is shorter than `n`.
 #[inline]
@@ -97,6 +128,165 @@ pub(crate) fn tail_bounded<T>(slice: &[T], n: usize) -> &[T] {
     } else {
         slice
     }
+}
+
+/// Selects up to `max_seeds` distinct `(post_id, signal)` seeds from a chronological `edges` slice.
+///
+/// Walks `edges` newest-to-oldest to deduplicate repeat signals on the same post (keeping the most
+/// recent signal), retains up to `recent_count` newest distinct posts, and evenly strides any
+/// remaining capacity across older history so taste-twin discovery spans both recent and long-term
+/// preferences.
+#[must_use]
+pub(crate) fn select_seed_posts(
+    edges: &[CompactEdge],
+    max_seeds: usize,
+    recent_count: usize,
+) -> Vec<(u32, SignalType)> {
+    if max_seeds == 0 || edges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen = AHashSet::new();
+    let mut unique = Vec::new();
+    for edge in edges.iter().rev() {
+        let pid = edge.target();
+        if seen.insert(pid) {
+            unique.push((pid, edge.signal()));
+        }
+    }
+
+    if unique.len() <= max_seeds {
+        return unique;
+    }
+
+    let recent_n = recent_count.min(max_seeds);
+    let stride_n = max_seeds - recent_n;
+    let mut selected = Vec::with_capacity(max_seeds);
+    selected.extend_from_slice(&unique[..recent_n]);
+
+    if stride_n > 0 {
+        let rest = &unique[recent_n..];
+        for i in 0..stride_n {
+            let idx = (i * rest.len()) / stride_n;
+            selected.push(rest[idx]);
+        }
+    }
+
+    selected
+}
+
+/// Computes the per-seed reverse-edge budget from `MAX_CO_INTERACTOR_SCAN / seed_count`,
+/// clamped to `[MIN_POST_EDGES_PER_SEED, MAX_POST_EDGES]`.
+#[inline]
+#[must_use]
+pub(crate) const fn per_seed_post_edge_limit(seed_count: usize) -> usize {
+    let denom = if seed_count == 0 { 1 } else { seed_count };
+    let budget = MAX_CO_INTERACTOR_SCAN / denom;
+    if budget < MIN_POST_EDGES_PER_SEED {
+        MIN_POST_EDGES_PER_SEED
+    } else if budget > MAX_POST_EDGES {
+        MAX_POST_EDGES
+    } else {
+        budget
+    }
+}
+
+/// Computes a smooth post-age staleness multiplier so old resurfaced posts decay even when a twin
+/// recently reposts them.
+///
+/// Posts within [`POST_AGE_GRACE_SECS`] (48 hours) receive `1.0`, then decay exponentially with
+/// `tau =` [`POST_AGE_DECAY_TAU_SECS`] (48 hours) toward [`POST_AGE_MIN_FACTOR`] (`0.02`).
+#[inline]
+#[must_use]
+pub fn calculate_post_age_staleness(created_at_secs: u64, now_secs: u64) -> f32 {
+    let age_secs = now_secs.saturating_sub(created_at_secs);
+    if age_secs <= POST_AGE_GRACE_SECS {
+        1.0
+    } else {
+        let excess = (age_secs - POST_AGE_GRACE_SECS) as f32;
+        (1.0 - POST_AGE_MIN_FACTOR).mul_add(
+            (-excess / POST_AGE_DECAY_TAU_SECS).exp(),
+            POST_AGE_MIN_FACTOR,
+        )
+    }
+}
+
+/// Computes the ceiling scale factor that keeps fatigued candidates cleanly below qualified unseen
+/// candidates (`>= UNSEEN_CEILING_QUALITY_FLOOR_RATIO * max_unseen_score`), preventing weak
+/// low-score unseen tail posts from crushing strong fatigued posts below them.
+fn compute_unseen_ceiling_scale<T>(items: &[T], inspect: impl Fn(usize, &T) -> (f32, bool)) -> f32 {
+    let mut max_unseen: f32 = 0.0;
+    let mut max_fatigued: f32 = 0.0;
+
+    for (idx, item) in items.iter().enumerate() {
+        let (score, is_unseen) = inspect(idx, item);
+        if is_unseen {
+            if score > max_unseen {
+                max_unseen = score;
+            }
+        } else if score > max_fatigued {
+            max_fatigued = score;
+        }
+    }
+
+    if max_unseen <= 0.0 || max_fatigued <= 0.0 {
+        return 1.0;
+    }
+
+    let quality_floor = max_unseen * UNSEEN_CEILING_QUALITY_FLOOR_RATIO;
+    let mut min_qualified_unseen: Option<f32> = None;
+    for (idx, item) in items.iter().enumerate() {
+        let (score, is_unseen) = inspect(idx, item);
+        if is_unseen && score > 0.0 && score >= quality_floor {
+            min_qualified_unseen = Some(min_qualified_unseen.map_or(score, |m| m.min(score)));
+        }
+    }
+
+    match min_qualified_unseen {
+        Some(anchor) if max_fatigued >= anchor * 0.95 => (anchor * 0.95) / max_fatigued,
+        _ => 1.0,
+    }
+}
+
+/// Enforces max 2 posts per author while deferring 3rd+ single-curator (`k == 1`) picks from the
+/// same taste twin behind other curators' candidates and backfilling them afterwards.
+fn apply_author_and_curator_diversity<T>(
+    candidates: Vec<T>,
+    author_of: impl Fn(&T) -> u32,
+    single_curator_twin_of: impl Fn(&T) -> Option<u32>,
+) -> Vec<T> {
+    let mut author_counts: AHashMap<u32, usize> = AHashMap::new();
+    let mut single_curator_counts: AHashMap<u32, usize> = AHashMap::new();
+    let mut diverse = Vec::with_capacity(candidates.len());
+    let mut deferred = Vec::new();
+
+    for cand in candidates {
+        let author_id = author_of(&cand);
+        if author_counts.get(&author_id).copied().unwrap_or(0) >= 2 {
+            continue;
+        }
+        if let Some(twin_id) = single_curator_twin_of(&cand) {
+            let curator_count = single_curator_counts.get(&twin_id).copied().unwrap_or(0);
+            if curator_count >= MAX_SINGLE_CURATOR_POSTS_PER_TWIN {
+                deferred.push(cand);
+                continue;
+            }
+            single_curator_counts.insert(twin_id, curator_count + 1);
+        }
+        *author_counts.entry(author_id).or_insert(0) += 1;
+        diverse.push(cand);
+    }
+
+    for cand in deferred {
+        let author_id = author_of(&cand);
+        let count = author_counts.entry(author_id).or_insert(0);
+        if *count < 2 {
+            *count += 1;
+            diverse.push(cand);
+        }
+    }
+
+    diverse
 }
 
 /// An individual post impression record with its served timestamp.
@@ -747,8 +937,29 @@ struct CandidateEvaluation {
     author_id: u32,
     topic: TopicCategory,
     tier: String,
+    curator_count: usize,
     score_breakdown: ScoreBreakdown,
     attribution: CandidateAttribution,
+}
+
+/// Aggregated Tier 1 candidate statistics collected during Step 3 co-interactor expansion.
+#[derive(Debug, Clone, Copy)]
+struct Tier1CandidateAcc {
+    curator_count: usize,
+    total_sim: f32,
+    total_affinity: f32,
+    latest_decay: f32,
+    best_twin_id: u32,
+    best_twin_sim: f32,
+    best_twin_signal: SignalType,
+}
+
+/// Top co-interactors and optional seed attribution maps from Steps 1 & 2 of a Tier 1 walk.
+#[derive(Debug, Default)]
+struct Tier1CoInteractorDiscovery {
+    top_co_interactors: Vec<(u32, f32)>,
+    seed_signal_by_id: AHashMap<u32, SignalType>,
+    co_interactor_seed: AHashMap<u32, u32>,
 }
 
 /// High-performance graph traversal and multi-signal recommendation engine.
@@ -910,11 +1121,15 @@ impl Recommender {
             });
         };
 
-        let (mut candidates, source) = viewer_id.map_or_else(
+        let (mut candidates, source, tier1_curator_meta) = viewer_id.map_or_else(
             || {
                 let mut t3_candidates = self.traverse_tier3(dials, now_secs);
                 filter_candidate_pool(&mut t3_candidates);
-                (t3_candidates, RecommendationSource::Tier3VelocityPool)
+                (
+                    t3_candidates,
+                    RecommendationSource::Tier3VelocityPool,
+                    AHashMap::new(),
+                )
             },
             |uid| {
                 let user_likes = self.graph.get_user_likes_bitmap(uid);
@@ -922,7 +1137,8 @@ impl Recommender {
 
                 if likes_count >= 10 {
                     // Tier 1: 3-step random walk
-                    let mut t1_candidates = self.traverse_tier1(uid, dials, now_secs);
+                    let (mut t1_candidates, curator_meta) =
+                        self.traverse_tier1_with_curator_meta(uid, dials, now_secs);
                     filter_candidate_pool(&mut t1_candidates);
                     if t1_candidates.is_empty() {
                         // Cascading fallback to Tier 2
@@ -932,12 +1148,24 @@ impl Recommender {
                             // Cascading fallback to Tier 3
                             let mut t3_candidates = self.traverse_tier3(dials, now_secs);
                             filter_candidate_pool(&mut t3_candidates);
-                            (t3_candidates, RecommendationSource::Tier3VelocityPool)
+                            (
+                                t3_candidates,
+                                RecommendationSource::Tier3VelocityPool,
+                                AHashMap::new(),
+                            )
                         } else {
-                            (t2_candidates, RecommendationSource::Tier2FollowWalk)
+                            (
+                                t2_candidates,
+                                RecommendationSource::Tier2FollowWalk,
+                                AHashMap::new(),
+                            )
                         }
                     } else {
-                        (t1_candidates, RecommendationSource::Tier1InteractionWalk)
+                        (
+                            t1_candidates,
+                            RecommendationSource::Tier1InteractionWalk,
+                            curator_meta,
+                        )
                     }
                 } else if likes_count > 0 || !self.graph.get_user_follows(uid).is_empty() {
                     // Tier 2: Follow-graph walk
@@ -947,15 +1175,27 @@ impl Recommender {
                         // Cascading fallback to Tier 3
                         let mut t3_candidates = self.traverse_tier3(dials, now_secs);
                         filter_candidate_pool(&mut t3_candidates);
-                        (t3_candidates, RecommendationSource::Tier3VelocityPool)
+                        (
+                            t3_candidates,
+                            RecommendationSource::Tier3VelocityPool,
+                            AHashMap::new(),
+                        )
                     } else {
-                        (t2_candidates, RecommendationSource::Tier2FollowWalk)
+                        (
+                            t2_candidates,
+                            RecommendationSource::Tier2FollowWalk,
+                            AHashMap::new(),
+                        )
                     }
                 } else {
                     // Tier 3: Cold start velocity pool
                     let mut t3_candidates = self.traverse_tier3(dials, now_secs);
                     filter_candidate_pool(&mut t3_candidates);
-                    (t3_candidates, RecommendationSource::Tier3VelocityPool)
+                    (
+                        t3_candidates,
+                        RecommendationSource::Tier3VelocityPool,
+                        AHashMap::new(),
+                    )
                 }
             },
         );
@@ -964,39 +1204,25 @@ impl Recommender {
         // 1. Seen / Liked deduplication & Self-post exclusion & Root-only & Engagement Floor filtering
         filter_candidate_pool(&mut candidates);
 
-        // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping & Unseen-First Ceiling)
+        // 2. Impression Fatigue Filtering (Smooth Continuous Score Damping & Quality-Anchored Unseen Ceiling)
         if let Some(uid) = viewer_id {
-            let mut min_unseen_score: Option<f32> = None;
-            let mut max_fatigued_score: f32 = 0.0;
             let mut multipliers: Vec<f32> = Vec::with_capacity(candidates.len());
-
             for c in &candidates {
                 let mult = self
                     .impression_store
                     .evaluate_compounded_fatigue_penalty(uid, c.post_id, now_secs)
                     .unwrap_or(1.0);
                 multipliers.push(mult);
-                if mult >= 1.0 {
-                    if c.score > 0.0 {
-                        min_unseen_score =
-                            Some(min_unseen_score.map_or(c.score, |m| m.min(c.score)));
-                    }
-                } else {
-                    let dampened = c.score * mult;
-                    if dampened > max_fatigued_score {
-                        max_fatigued_score = dampened;
-                    }
-                }
             }
 
-            let ceiling_scale = match min_unseen_score {
-                Some(min_unseen)
-                    if max_fatigued_score >= min_unseen * 0.95 && max_fatigued_score > 0.0 =>
-                {
-                    (min_unseen * 0.95) / max_fatigued_score
+            let ceiling_scale = compute_unseen_ceiling_scale(&candidates, |idx, c| {
+                let mult = multipliers[idx];
+                if mult >= 1.0 {
+                    (c.score, true)
+                } else {
+                    (c.score * mult, false)
                 }
-                _ => 1.0,
-            };
+            });
 
             for (c, mult) in candidates.iter_mut().zip(multipliers) {
                 if mult < 1.0 {
@@ -1046,16 +1272,16 @@ impl Recommender {
             }
         }
 
-        // 4. Author diversity filtering: max 2 posts per author per page
-        let mut author_counts: AHashMap<u32, usize> = AHashMap::new();
-        let mut diverse_posts = Vec::with_capacity(thread_filtered.len());
-        for cand in thread_filtered {
-            let count = author_counts.entry(cand.author_id).or_insert(0);
-            if *count < 2 {
-                *count += 1;
-                diverse_posts.push(cand);
-            }
-        }
+        // 4. Author & single-curator diversity filtering: max 2 posts per author per page, defer 3rd+ solo picks
+        let diverse_posts = apply_author_and_curator_diversity(
+            thread_filtered,
+            |cand| cand.author_id,
+            |cand| {
+                tier1_curator_meta
+                    .get(&cand.post_id)
+                    .and_then(|&(count, twin_id)| (count == 1).then_some(twin_id))
+            },
+        );
 
         // Serendipity Exploration Blending
         let final_posts = if dials.explore_ratio > 0.0 && diverse_posts.len() > 2 {
@@ -1065,7 +1291,14 @@ impl Recommender {
         };
 
         if let Some(uid) = viewer_id {
-            if dials.cursor.as_deref().is_none_or(|c| c.trim().is_empty()) {
+            let effective_limit = if dials.limit == 0 {
+                DEFAULT_PAGE_LIMIT
+            } else {
+                dials.limit
+            };
+            if effective_limit >= MIN_IMPRESSION_RECORD_LIMIT
+                && dials.cursor.as_deref().is_none_or(|c| c.trim().is_empty())
+            {
                 self.impression_store.cache_pagination_session(
                     uid,
                     dials_hash,
@@ -1156,10 +1389,12 @@ impl Recommender {
 
         let sqrt_v_len = (v_len as f32).sqrt();
 
-        // Step 1: Collect seed posts bounded to MAX_SEED_POSTS (50) from most recent interactions
+        // Step 1: Collect up to MAX_SEED_POSTS distinct seeds (newest + evenly strided history)
         let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(viewer_id, |edges| {
-            let seed_edges = tail_bounded(edges, MAX_SEED_POSTS);
-            seed_edges.iter().map(CompactEdge::target).collect()
+            select_seed_posts(edges, MAX_SEED_POSTS, RECENT_SEED_POSTS)
+                .into_iter()
+                .map(|(pid, _)| pid)
+                .collect()
         });
 
         // Fallback to RoaringBitmap iteration if with_user_interactions has no forward edges
@@ -1169,14 +1404,26 @@ impl Recommender {
             seed_post_ids
         };
 
-        // Step 2: Accumulate unique co-interactors with MAX_POST_EDGES (500) slice
+        // Step 2: Accumulate unique co-interactors with bounded per-seed reverse-edge budget and scan cap
+        let edge_limit = per_seed_post_edge_limit(seed_posts.len());
         let mut co_interactors = AHashSet::new();
+        let mut scan_capped = false;
         for post_id in seed_posts {
+            if scan_capped {
+                break;
+            }
             self.graph.with_post_interactions(post_id, |p_edges| {
-                let p_edges_slice = tail_bounded(p_edges, MAX_POST_EDGES);
+                let p_edges_slice = tail_bounded(p_edges, edge_limit);
                 for edge in p_edges_slice {
                     let co_uid = edge.target();
-                    if co_uid != viewer_id && !self.graph.is_mutually_blocked(viewer_id, co_uid) {
+                    if co_uid != viewer_id
+                        && !self.graph.is_mutually_blocked(viewer_id, co_uid)
+                        && !co_interactors.contains(&co_uid)
+                    {
+                        if co_interactors.len() >= MAX_CO_INTERACTOR_SCAN {
+                            scan_capped = true;
+                            break;
+                        }
                         co_interactors.insert(co_uid);
                     }
                 }
@@ -1738,236 +1985,98 @@ impl Recommender {
 
             if likes_count >= 10 {
                 // Tier 1 Preview Walk
-                let viewer_bm = self.graph.get_user_likes_bitmap(uid);
-                let mut seen_co_users = AHashSet::new();
-                let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
+                if let Some(ref v_bm) = self.graph.get_user_likes_bitmap(uid) {
+                    if !v_bm.is_empty() {
+                        let Tier1CoInteractorDiscovery {
+                            top_co_interactors,
+                            seed_signal_by_id,
+                            co_interactor_seed,
+                        } = self.discover_tier1_co_interactors(uid, v_bm, true);
 
-                // Limit seed posts to most recent MAX_SEED_POSTS interactions to bound combinatorial fan-out
-                let seed_edges_info: Vec<(u32, SignalType)> =
-                    self.graph.with_user_interactions(uid, |edges| {
-                        tail_bounded(edges, MAX_SEED_POSTS)
-                            .iter()
-                            .map(|e| (e.target(), e.signal()))
-                            .collect()
-                    });
-                let seed_post_ids: Vec<u32> = seed_edges_info.iter().map(|(pid, _)| *pid).collect();
-                let seed_signal_by_id: AHashMap<u32, SignalType> =
-                    seed_edges_info.into_iter().collect();
-                // Remembers, per co-interactor, the seed post through which they were discovered so
-                // the proof chain can be built without rescanning reverse edges later.
-                let mut co_interactor_seed: AHashMap<u32, u32> = AHashMap::new();
+                        let cand_vec = self.collect_tier1_candidates(
+                            &top_co_interactors,
+                            seen_bitmap.as_ref(),
+                            dials.half_life_secs,
+                            now_secs,
+                        );
 
-                if let Some(ref v_bm) = viewer_bm {
-                    let v_len = v_bm.len() as f32;
-                    if v_len > 0.0 {
-                        let sqrt_v_len = v_len.sqrt();
-                        // Bound the number of distinct neighbors intersected. Seeds and post edges
-                        // are already most-recent-bounded, so this deterministically caps the
-                        // quadratic viewer-bitmap x neighbor-bitmap work on large graphs.
-                        let mut scan_capped = false;
-                        for post_id in seed_post_ids {
-                            if scan_capped {
-                                break;
-                            }
-                            self.graph
-                                .with_post_interactions(post_id, |post_interactions| {
-                                    let p_edges_slice =
-                                        tail_bounded(post_interactions, MAX_POST_EDGES);
-                                    for p_edge in p_edges_slice {
-                                        if scan_capped {
-                                            break;
-                                        }
-                                        let co_user = p_edge.target();
-                                        if co_user != uid
-                                            && !self.graph.is_mutually_blocked(uid, co_user)
-                                            && seen_co_users.insert(co_user)
-                                        {
-                                            if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
-                                                scan_capped = true;
-                                                break;
-                                            }
-                                            co_interactor_seed.insert(co_user, post_id);
-                                            self.graph.with_user_likes_bitmap(
-                                                co_user,
-                                                |c_bm_opt| {
-                                                    if let Some(c_bm) = c_bm_opt {
-                                                        let inter_len = v_bm.intersection_len(c_bm);
-                                                        if inter_len >= MIN_SHARED_OVERLAP as u64 {
-                                                            let c_len = c_bm.len() as f32;
-                                                            if c_len > 0.0 {
-                                                                let raw_cosine = (inter_len as f32)
-                                                                    / (sqrt_v_len * c_len.sqrt());
-                                                                let conf =
-                                                                    calculate_bayesian_confidence(
-                                                                        raw_cosine,
-                                                                        inter_len as usize,
-                                                                        DEFAULT_BAYESIAN_BETA,
-                                                                    );
-                                                                if conf > 0.0 {
-                                                                    co_interactor_weights
-                                                                        .insert(co_user, conf);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                },
-                                            );
-                                        }
-                                    }
-                                });
-                        }
-                    }
-                }
+                        for (pid, acc) in cand_vec {
+                            let Some(uri) = self.interner.lookup_str(pid) else {
+                                continue;
+                            };
+                            let meta =
+                                self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
+                            let author_did = self
+                                .interner
+                                .lookup_str(meta.author_id)
+                                .unwrap_or_else(|| CompactString::new("unknown"));
+                            let topic = self.classify_post_with_graph(
+                                pid,
+                                uri.as_str(),
+                                Some(author_did.as_str()),
+                            );
+                            let topic_boost = dials.topic_weights.get_weight(topic);
 
-                // Cap co-interactors to top MAX_CO_INTERACTORS highest-weighted neighbors
-                let mut top_co_interactors: Vec<(u32, f32)> =
-                    co_interactor_weights.into_iter().collect();
-                if top_co_interactors.len() > MAX_CO_INTERACTORS {
-                    top_co_interactors.select_nth_unstable_by(MAX_CO_INTERACTORS, |a, b| {
-                        b.1.partial_cmp(&a.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.0.cmp(&b.0))
-                    });
-                    top_co_interactors.truncate(MAX_CO_INTERACTORS);
-                }
+                            let fatigue_penalty = self
+                                .impression_store
+                                .evaluate_compounded_fatigue_penalty(uid, pid, now_secs)
+                                .unwrap_or(0.0);
 
-                let mut cand_details: AHashMap<u32, (usize, f32, f32, f32)> = AHashMap::new();
-                // Strongest (highest taste-confidence) twin that touched each candidate, captured
-                // during the walk so the proof chain needs no reverse-edge rescan.
-                let mut cand_twin: AHashMap<u32, (u32, f32, SignalType)> = AHashMap::new();
-                let mut seen_posts_for_curator = AHashSet::new();
-                for (co_user, co_sim) in top_co_interactors {
-                    seen_posts_for_curator.clear();
-                    self.graph
-                        .with_user_interactions(co_user, |co_interactions| {
-                            for c_edge in tail_bounded(co_interactions, MAX_CO_INTERACTOR_EDGES) {
-                                let cand_pid = c_edge.target();
-                                if seen_bitmap
-                                    .as_ref()
-                                    .is_some_and(|seen| seen.contains(cand_pid))
-                                {
-                                    continue;
-                                }
-                                let decay = calculate_time_decay(
-                                    c_edge.signal(),
-                                    c_edge.timestamp_secs(),
-                                    now_secs,
-                                    dials.half_life_secs,
-                                );
-                                let affinity = co_sim * decay;
-                                let entry =
-                                    cand_details.entry(cand_pid).or_insert((0, 0.0, 0.0, decay));
-                                if seen_posts_for_curator.insert(cand_pid) {
-                                    entry.0 += 1;
-                                }
-                                entry.1 += co_sim;
-                                entry.2 += affinity;
-                                if decay > entry.3 {
-                                    entry.3 = decay;
-                                }
-                                // Select the contributing twin exactly as the standalone explainer
-                                // does: highest conf * signal-weight, tie-broken by lowest id.
-                                let twin_score = co_sim * c_edge.weight();
-                                cand_twin
-                                    .entry(cand_pid)
-                                    .and_modify(|best| {
-                                        let best_score = best.1 * best.2.weight();
-                                        if twin_score > best_score
-                                            || (twin_score == best_score && co_user < best.0)
-                                        {
-                                            *best = (co_user, co_sim, c_edge.signal());
-                                        }
-                                    })
-                                    .or_insert_with(|| (co_user, co_sim, c_edge.signal()));
-                            }
-                        });
-                }
+                            let age_factor =
+                                calculate_post_age_staleness(meta.created_at, now_secs);
+                            let aged_affinity = acc.total_affinity * age_factor;
+                            let consensus_boost = calculate_consensus_boost(acc.curator_count);
+                            let social_proof = calculate_social_proof_factor(
+                                self.graph.get_post_interaction_count(pid),
+                            );
+                            let taste_similarity = acc.total_sim * consensus_boost * social_proof;
+                            let base_score =
+                                aged_affinity * consensus_boost * social_proof * topic_boost;
+                            let final_score = base_score * fatigue_penalty;
+                            let effective_decay = if acc.total_sim > 0.0 {
+                                aged_affinity / acc.total_sim
+                            } else {
+                                acc.latest_decay * age_factor
+                            };
 
-                // Bound candidate materialization: at most MAX_CANDIDATE_EVALS distinct posts are
-                // scored, keeping the highest-affinity candidates. This caps the stage whose cost
-                // otherwise grows with the combined histories of up to MAX_CO_INTERACTORS neighbors.
-                let mut cand_vec: Vec<(u32, (usize, f32, f32, f32))> =
-                    cand_details.into_iter().collect();
-                if cand_vec.len() > MAX_CANDIDATE_EVALS {
-                    cand_vec.select_nth_unstable_by(MAX_CANDIDATE_EVALS, |a, b| {
-                        b.1 .2
-                            .partial_cmp(&a.1 .2)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.0.cmp(&b.0))
-                    });
-                    cand_vec.truncate(MAX_CANDIDATE_EVALS);
-                }
+                            let breakdown = ScoreBreakdown {
+                                time_decay: effective_decay,
+                                taste_similarity,
+                                topic_boost,
+                                fatigue_penalty,
+                                final_score,
+                            };
 
-                for (pid, (curator_count, total_sim, total_affinity, latest_decay)) in cand_vec {
-                    let Some(uri) = self.interner.lookup_str(pid) else {
-                        continue;
-                    };
-                    let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
-                    let author_did = self
-                        .interner
-                        .lookup_str(meta.author_id)
-                        .unwrap_or_else(|| CompactString::new("unknown"));
-                    let topic =
-                        self.classify_post_with_graph(pid, uri.as_str(), Some(author_did.as_str()));
-                    let topic_boost = dials.topic_weights.get_weight(topic);
-
-                    let fatigue_penalty = self
-                        .impression_store
-                        .evaluate_compounded_fatigue_penalty(uid, pid, now_secs)
-                        .unwrap_or(0.0);
-
-                    let consensus_boost = calculate_consensus_boost(curator_count);
-                    let social_proof =
-                        calculate_social_proof_factor(self.graph.get_post_interaction_count(pid));
-                    let taste_similarity = total_sim * consensus_boost * social_proof;
-                    let base_score = total_affinity * consensus_boost * social_proof * topic_boost;
-                    let final_score = base_score * fatigue_penalty;
-                    let effective_decay = if total_sim > 0.0 {
-                        total_affinity / total_sim
-                    } else {
-                        latest_decay
-                    };
-
-                    let breakdown = ScoreBreakdown {
-                        time_decay: effective_decay,
-                        taste_similarity,
-                        topic_boost,
-                        fatigue_penalty,
-                        final_score,
-                    };
-
-                    // Build attribution from data already gathered during the walk (no rescan).
-                    let attribution = cand_twin.get(&pid).map_or_else(
-                        CandidateAttribution::tier3,
-                        |&(twin_id, twin_sim, twin_sig)| {
-                            let seed_post_id = co_interactor_seed.get(&twin_id).copied();
+                            // Build attribution from data already gathered during the walk (no rescan).
+                            let seed_post_id = co_interactor_seed.get(&acc.best_twin_id).copied();
                             let seed_signal = seed_post_id
                                 .and_then(|sp| seed_signal_by_id.get(&sp).copied())
                                 .unwrap_or(SignalType::Like);
-                            CandidateAttribution {
-                                twin_id: Some(twin_id),
-                                twin_sim,
-                                twin_signal: twin_sig,
+                            let attribution = CandidateAttribution {
+                                twin_id: Some(acc.best_twin_id),
+                                twin_sim: acc.best_twin_sim,
+                                twin_signal: acc.best_twin_signal,
                                 seed_post_id,
                                 seed_signal,
                                 followed_id: None,
                                 followed_signal: SignalType::Like,
-                            }
-                        },
-                    );
+                            };
 
-                    candidate_evals.push(CandidateEvaluation {
-                        post_id: pid,
-                        uri,
-                        author_did,
-                        author_id: meta.author_id,
-                        topic,
-                        tier: "Tier 1: 3-Step Interaction Walk".to_string(),
-                        score_breakdown: breakdown,
-                        attribution,
-                    });
+                            candidate_evals.push(CandidateEvaluation {
+                                post_id: pid,
+                                uri,
+                                author_did,
+                                author_id: meta.author_id,
+                                topic,
+                                tier: "Tier 1: 3-Step Interaction Walk".to_string(),
+                                curator_count: acc.curator_count,
+                                score_breakdown: breakdown,
+                                attribution,
+                            });
+                        }
+                        filter_preview_pool(&mut candidate_evals);
+                    }
                 }
-                filter_preview_pool(&mut candidate_evals);
             }
 
             if candidate_evals.is_empty()
@@ -2057,6 +2166,7 @@ impl Recommender {
                         author_id: meta.author_id,
                         topic,
                         tier: "Tier 2: 2-Step Follow Walk".to_string(),
+                        curator_count: 1,
                         score_breakdown: breakdown,
                         attribution,
                     });
@@ -2106,6 +2216,7 @@ impl Recommender {
                     author_id: meta.author_id,
                     topic,
                     tier: "Tier 3: Topic Velocity Pool".to_string(),
+                    curator_count: 0,
                     score_breakdown: breakdown,
                     attribution: CandidateAttribution::tier3(),
                 });
@@ -2118,31 +2229,22 @@ impl Recommender {
         // 1. Seen/liked deduplication & self-post exclusion & hard suppression filter & Root-only & Engagement floor filtering
         filter_preview_pool(&mut candidate_evals);
 
-        // Apply unseen-first fatigue ceiling so already-served posts in the active
-        // fatigue window cannot outrank fresh unseen candidates on feed refresh.
-        let mut min_unseen_score: Option<f32> = None;
-        let mut max_fatigued_score: f32 = 0.0;
-        for c in &candidate_evals {
-            let s = c.score_breakdown.final_score;
-            if c.score_breakdown.fatigue_penalty >= 1.0 {
-                if s > 0.0 {
-                    min_unseen_score = Some(min_unseen_score.map_or(s, |m| m.min(s)));
-                }
-            } else if s > max_fatigued_score {
-                max_fatigued_score = s;
-            }
-        }
-        if let Some(min_unseen) = min_unseen_score {
-            if max_fatigued_score >= min_unseen * 0.95 && max_fatigued_score > 0.0 {
-                let ceiling_scale = (min_unseen * 0.95) / max_fatigued_score;
-                for c in &mut candidate_evals {
-                    if c.score_breakdown.fatigue_penalty < 1.0 {
-                        c.score_breakdown.fatigue_penalty *= ceiling_scale;
-                        c.score_breakdown.final_score = c.score_breakdown.taste_similarity
-                            * c.score_breakdown.time_decay
-                            * c.score_breakdown.topic_boost
-                            * c.score_breakdown.fatigue_penalty;
-                    }
+        // Apply quality-anchored unseen-first fatigue ceiling so qualified unseen posts rank ahead
+        // of served posts without letting low-score unseen tail posts crush strong fatigued ones.
+        let ceiling_scale = compute_unseen_ceiling_scale(&candidate_evals, |_, c| {
+            (
+                c.score_breakdown.final_score,
+                c.score_breakdown.fatigue_penalty >= 1.0,
+            )
+        });
+        if ceiling_scale < 1.0 {
+            for c in &mut candidate_evals {
+                if c.score_breakdown.fatigue_penalty < 1.0 {
+                    c.score_breakdown.fatigue_penalty *= ceiling_scale;
+                    c.score_breakdown.final_score = c.score_breakdown.taste_similarity
+                        * c.score_breakdown.time_decay
+                        * c.score_breakdown.topic_boost
+                        * c.score_breakdown.fatigue_penalty;
                 }
             }
         }
@@ -2175,16 +2277,16 @@ impl Recommender {
             }
         }
 
-        // 4. Author diversity (max 2 per author)
-        let mut author_counts: AHashMap<u32, usize> = AHashMap::new();
-        let mut diverse_evals = Vec::with_capacity(thread_filtered.len());
-        for cand in thread_filtered {
-            let count = author_counts.entry(cand.author_id).or_insert(0);
-            if *count < 2 {
-                *count += 1;
-                diverse_evals.push(cand);
-            }
-        }
+        // 4. Author & single-curator diversity (max 2 per author, defer 3rd+ solo picks per twin)
+        let mut diverse_evals = apply_author_and_curator_diversity(
+            thread_filtered,
+            |cand| cand.author_id,
+            |cand| {
+                (cand.curator_count == 1)
+                    .then_some(cand.attribution.twin_id)
+                    .flatten()
+            },
+        );
 
         let limit = if dials.limit == 0 {
             DEFAULT_PAGE_LIMIT
@@ -2220,89 +2322,91 @@ impl Recommender {
         })
     }
 
-    /// Performs the Tier 1 3-step co-interaction random walk:
-    /// `Viewer -> Interacted Posts -> Top Co-Interactors (Cosine Taste Similarity) -> Candidate Posts`.
-    #[must_use]
-    pub fn traverse_tier1(
+    /// Executes Steps 1 & 2 of the Tier 1 co-interaction walk:
+    /// `Viewer -> Seed Posts (deduplicated recent + strided history) -> Top-K Co-Interactors`.
+    ///
+    /// When `track_seed_attribution` is `true`, also returns `(seed_signal_by_id,
+    /// co_interactor_seed)` so preview proof chains require no reverse-edge rescan.
+    fn discover_tier1_co_interactors(
         &self,
         viewer_id: u32,
-        dials: &RecommendationDials,
-        now_secs: u64,
-    ) -> Vec<ScoredPost> {
-        let viewer_bm = self.graph.get_user_likes_bitmap(viewer_id);
-        let Some(ref v_bm) = viewer_bm else {
-            return Vec::new();
-        };
-        let v_len = v_bm.len() as f32;
+        viewer_bm: &RoaringBitmap,
+        track_seed_attribution: bool,
+    ) -> Tier1CoInteractorDiscovery {
+        let v_len = viewer_bm.len() as f32;
         if v_len == 0.0 {
-            return Vec::new();
+            return Tier1CoInteractorDiscovery::default();
         }
         let sqrt_v_len = v_len.sqrt();
 
+        let seed_edges_info: Vec<(u32, SignalType)> =
+            self.graph.with_user_interactions(viewer_id, |edges| {
+                select_seed_posts(edges, MAX_SEED_POSTS, RECENT_SEED_POSTS)
+            });
+        let seed_post_ids: Vec<u32> = seed_edges_info.iter().map(|(pid, _)| *pid).collect();
+        let seed_signal_by_id: AHashMap<u32, SignalType> = if track_seed_attribution {
+            seed_edges_info.into_iter().collect()
+        } else {
+            AHashMap::new()
+        };
+
+        let edge_limit = per_seed_post_edge_limit(seed_post_ids.len());
         let mut seen_co_users = AHashSet::new();
         let mut co_interactor_weights: AHashMap<u32, f32> = AHashMap::new();
+        let mut co_interactor_seed: AHashMap<u32, u32> = AHashMap::new();
 
-        // Limit seed posts to most recent MAX_SEED_POSTS interactions to bound combinatorial fan-out (SEC-07)
-        let seed_post_ids: Vec<u32> = self.graph.with_user_interactions(viewer_id, |edges| {
-            let seed_edges = if edges.len() > MAX_SEED_POSTS {
-                &edges[edges.len() - MAX_SEED_POSTS..]
-            } else {
-                edges
-            };
-            seed_edges.iter().map(CompactEdge::target).collect()
-        });
-
-        // Step 1 & 2: Viewer -> Seed Posts -> Co-interactors
+        // Bound distinct co-interactor bitmap intersections; seeds and per-seed post edges
+        // are already bounded, deterministically capping quadratic bitmap work.
         let mut scan_capped = false;
         for post_id in seed_post_ids {
             if scan_capped {
                 break;
             }
-            self.graph.with_post_interactions(post_id, |p_edges| {
-                let p_edges_slice = if p_edges.len() > MAX_POST_EDGES {
-                    &p_edges[p_edges.len() - MAX_POST_EDGES..]
-                } else {
-                    p_edges
-                };
-                for p_edge in p_edges_slice {
-                    if scan_capped {
-                        break;
-                    }
-                    let co_user = p_edge.target();
-                    if co_user != viewer_id
-                        && !self.graph.is_mutually_blocked(viewer_id, co_user)
-                        && seen_co_users.insert(co_user)
-                    {
-                        if seen_co_users.len() > MAX_CO_INTERACTOR_SCAN {
-                            scan_capped = true;
+            self.graph
+                .with_post_interactions(post_id, |post_interactions| {
+                    let p_edges_slice = tail_bounded(post_interactions, edge_limit);
+                    for p_edge in p_edges_slice {
+                        if scan_capped {
                             break;
                         }
-                        self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
-                            if let Some(c_bm) = c_bm_opt {
-                                let inter_len = v_bm.intersection_len(c_bm);
-                                if inter_len >= MIN_SHARED_OVERLAP as u64 {
-                                    let c_len = c_bm.len() as f32;
-                                    if c_len > 0.0 {
-                                        let raw_cosine =
-                                            (inter_len as f32) / (sqrt_v_len * c_len.sqrt());
-                                        let conf = calculate_bayesian_confidence(
-                                            raw_cosine,
-                                            inter_len as usize,
-                                            DEFAULT_BAYESIAN_BETA,
-                                        );
-                                        if conf > 0.0 {
-                                            co_interactor_weights.insert(co_user, conf);
+                        let co_user = p_edge.target();
+                        if co_user != viewer_id
+                            && !self.graph.is_mutually_blocked(viewer_id, co_user)
+                            && !seen_co_users.contains(&co_user)
+                        {
+                            if seen_co_users.len() >= MAX_CO_INTERACTOR_SCAN {
+                                scan_capped = true;
+                                break;
+                            }
+                            seen_co_users.insert(co_user);
+                            if track_seed_attribution {
+                                co_interactor_seed.insert(co_user, post_id);
+                            }
+                            self.graph.with_user_likes_bitmap(co_user, |c_bm_opt| {
+                                if let Some(c_bm) = c_bm_opt {
+                                    let inter_len = viewer_bm.intersection_len(c_bm);
+                                    if inter_len >= MIN_SHARED_OVERLAP as u64 {
+                                        let c_len = c_bm.len() as f32;
+                                        if c_len > 0.0 {
+                                            let raw_cosine =
+                                                (inter_len as f32) / (sqrt_v_len * c_len.sqrt());
+                                            let conf = calculate_bayesian_confidence(
+                                                raw_cosine,
+                                                inter_len as usize,
+                                                DEFAULT_BAYESIAN_BETA,
+                                            );
+                                            if conf > 0.0 {
+                                                co_interactor_weights.insert(co_user, conf);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
-                }
-            });
+                });
         }
 
-        // Cap co-interactors to top MAX_CO_INTERACTORS highest-weighted neighbors
         let mut top_co_interactors: Vec<(u32, f32)> = co_interactor_weights.into_iter().collect();
         if top_co_interactors.len() > MAX_CO_INTERACTORS {
             top_co_interactors.select_nth_unstable_by(MAX_CO_INTERACTORS, |a, b| {
@@ -2313,34 +2417,129 @@ impl Recommender {
             top_co_interactors.truncate(MAX_CO_INTERACTORS);
         }
 
-        // Step 3: Co-interactors -> Candidate Posts
-        let mut candidate_map: AHashMap<u32, (usize, f32)> = AHashMap::new();
-        let mut seen_posts_for_curator = AHashSet::new();
-        for (co_user, co_sim) in top_co_interactors {
-            seen_posts_for_curator.clear();
+        Tier1CoInteractorDiscovery {
+            top_co_interactors,
+            seed_signal_by_id,
+            co_interactor_seed,
+        }
+    }
+
+    /// Executes Step 3 of the Tier 1 walk (`Co-Interactors -> Deduplicated Candidate Posts`)
+    /// bounded to `MAX_CO_INTERACTOR_EDGES` per twin and `MAX_CANDIDATE_EVALS` total candidates.
+    fn collect_tier1_candidates(
+        &self,
+        top_co_interactors: &[(u32, f32)],
+        seen_bitmap: Option<&RoaringBitmap>,
+        half_life_secs: f32,
+        now_secs: u64,
+    ) -> Vec<(u32, Tier1CandidateAcc)> {
+        let mut cand_details: AHashMap<u32, Tier1CandidateAcc> = AHashMap::new();
+        let mut curator_best: AHashMap<u32, (f32, SignalType)> = AHashMap::new();
+
+        for &(co_user, co_sim) in top_co_interactors {
+            curator_best.clear();
             self.graph
                 .with_user_interactions(co_user, |co_interactions| {
-                    for c_edge in co_interactions {
+                    for c_edge in tail_bounded(co_interactions, MAX_CO_INTERACTOR_EDGES) {
                         let cand_pid = c_edge.target();
+                        if seen_bitmap.is_some_and(|seen| seen.contains(cand_pid)) {
+                            continue;
+                        }
+                        let sig = c_edge.signal();
                         let decay = calculate_time_decay(
-                            c_edge.signal(),
+                            sig,
                             c_edge.timestamp_secs(),
                             now_secs,
-                            dials.half_life_secs,
+                            half_life_secs,
                         );
-                        let affinity = co_sim * decay;
-                        let entry = candidate_map.entry(cand_pid).or_insert((0, 0.0));
-                        if seen_posts_for_curator.insert(cand_pid) {
-                            entry.0 += 1;
-                        }
-                        entry.1 += affinity;
+                        curator_best
+                            .entry(cand_pid)
+                            .and_modify(|best| {
+                                if decay > best.0
+                                    || (decay == best.0 && sig.weight() > best.1.weight())
+                                {
+                                    *best = (decay, sig);
+                                }
+                            })
+                            .or_insert((decay, sig));
                     }
                 });
+
+            let twin_weight_score = |sim: f32, sig: SignalType| sim * sig.weight();
+            for (cand_pid, (best_decay, best_sig)) in curator_best.drain() {
+                let affinity = co_sim * best_decay;
+                let incoming_twin_score = twin_weight_score(co_sim, best_sig);
+                cand_details
+                    .entry(cand_pid)
+                    .and_modify(|acc| {
+                        acc.curator_count += 1;
+                        acc.total_sim += co_sim;
+                        acc.total_affinity += affinity;
+                        if best_decay > acc.latest_decay {
+                            acc.latest_decay = best_decay;
+                        }
+                        let best_score = twin_weight_score(acc.best_twin_sim, acc.best_twin_signal);
+                        if incoming_twin_score > best_score
+                            || (incoming_twin_score == best_score && co_user < acc.best_twin_id)
+                        {
+                            acc.best_twin_id = co_user;
+                            acc.best_twin_sim = co_sim;
+                            acc.best_twin_signal = best_sig;
+                        }
+                    })
+                    .or_insert(Tier1CandidateAcc {
+                        curator_count: 1,
+                        total_sim: co_sim,
+                        total_affinity: affinity,
+                        latest_decay: best_decay,
+                        best_twin_id: co_user,
+                        best_twin_sim: co_sim,
+                        best_twin_signal: best_sig,
+                    });
+            }
         }
 
-        let mut scored: Vec<ScoredPost> = candidate_map
+        let mut cand_vec: Vec<(u32, Tier1CandidateAcc)> = cand_details.into_iter().collect();
+        if cand_vec.len() > MAX_CANDIDATE_EVALS {
+            cand_vec.select_nth_unstable_by(MAX_CANDIDATE_EVALS, |a, b| {
+                b.1.total_affinity
+                    .partial_cmp(&a.1.total_affinity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            cand_vec.truncate(MAX_CANDIDATE_EVALS);
+        }
+        cand_vec
+    }
+
+    /// Performs the Tier 1 walk and returns scored posts together with per-post
+    /// `(curator_count, primary_curator_id)` metadata for single-curator diversity filtering.
+    fn traverse_tier1_with_curator_meta(
+        &self,
+        viewer_id: u32,
+        dials: &RecommendationDials,
+        now_secs: u64,
+    ) -> (Vec<ScoredPost>, AHashMap<u32, (usize, u32)>) {
+        let viewer_bm = self.graph.get_user_likes_bitmap(viewer_id);
+        let Some(ref v_bm) = viewer_bm else {
+            return (Vec::new(), AHashMap::new());
+        };
+        if v_bm.is_empty() {
+            return (Vec::new(), AHashMap::new());
+        }
+
+        let discovery = self.discover_tier1_co_interactors(viewer_id, v_bm, false);
+        let cand_vec = self.collect_tier1_candidates(
+            &discovery.top_co_interactors,
+            Some(v_bm),
+            dials.half_life_secs,
+            now_secs,
+        );
+
+        let mut curator_meta: AHashMap<u32, (usize, u32)> = AHashMap::with_capacity(cand_vec.len());
+        let mut scored: Vec<ScoredPost> = cand_vec
             .into_iter()
-            .filter_map(|(pid, (curator_count, total_affinity))| {
+            .filter_map(|(pid, acc)| {
                 let uri = self.interner.lookup_str(pid)?;
                 let meta = self.resolve_or_synthesize_post_meta(pid, uri.as_str(), now_secs);
                 if self.graph.is_mutually_blocked(viewer_id, meta.author_id) {
@@ -2350,10 +2549,13 @@ impl Recommender {
                 let category =
                     self.classify_post_with_graph(pid, uri.as_str(), author_str.as_deref());
                 let topic_boost = dials.topic_weights.get_weight(category);
-                let consensus_boost = calculate_consensus_boost(curator_count);
+                let age_factor = calculate_post_age_staleness(meta.created_at, now_secs);
+                let consensus_boost = calculate_consensus_boost(acc.curator_count);
                 let social_proof =
                     calculate_social_proof_factor(self.graph.get_post_interaction_count(pid));
-                let score = total_affinity * consensus_boost * social_proof * topic_boost;
+                let score =
+                    acc.total_affinity * age_factor * consensus_boost * social_proof * topic_boost;
+                curator_meta.insert(pid, (acc.curator_count, acc.best_twin_id));
                 Some(ScoredPost {
                     post_id: pid,
                     uri,
@@ -2371,7 +2573,20 @@ impl Recommender {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.post_id.cmp(&b.post_id))
         });
-        scored
+        (scored, curator_meta)
+    }
+
+    /// Performs the Tier 1 3-step co-interaction random walk:
+    /// `Viewer -> Interacted Posts -> Top Co-Interactors (Cosine Taste Similarity) -> Candidate Posts`.
+    #[must_use]
+    pub fn traverse_tier1(
+        &self,
+        viewer_id: u32,
+        dials: &RecommendationDials,
+        now_secs: u64,
+    ) -> Vec<ScoredPost> {
+        self.traverse_tier1_with_curator_meta(viewer_id, dials, now_secs)
+            .0
     }
 
     /// Performs the Tier 2 2-step follow-graph traversal:
@@ -3900,5 +4115,395 @@ mod tests {
         let uris: Vec<&str> = feed.posts.iter().map(|p| p.uri.as_str()).collect();
         assert!(uris.contains(&"at://did:plc:clean_author/post/cand_clean"));
         assert!(!uris.contains(&"at://did:plc:blocked_author/post/by_blocked_author"));
+    }
+
+    #[test]
+    fn test_select_seed_posts_deduplicates_and_strides_history() {
+        let base_ts = BLUESKY_EPOCH_SECS + 10_000;
+        let mut edges = Vec::new();
+
+        // 105 older distinct posts (post_id 1..=105)
+        for pid in 1..=105u32 {
+            edges.push(CompactEdge::new(
+                pid,
+                SignalType::Like,
+                base_ts + u64::from(pid),
+            ));
+        }
+        // 15 newest distinct posts (post_id 106..=120), each with Like followed by Repost
+        for pid in 106..=120u32 {
+            let ts = base_ts + u64::from(pid) * 10;
+            edges.push(CompactEdge::new(pid, SignalType::Like, ts));
+            edges.push(CompactEdge::new(pid, SignalType::Repost, ts + 1));
+        }
+
+        let selected = select_seed_posts(&edges, MAX_SEED_POSTS, RECENT_SEED_POSTS);
+        assert_eq!(selected.len(), MAX_SEED_POSTS);
+
+        let unique_pids: AHashSet<u32> = selected.iter().map(|&(pid, _)| pid).collect();
+        assert_eq!(unique_pids.len(), MAX_SEED_POSTS);
+
+        // Newest 15 duplicated posts appear once each with latest signal (Repost), never twice
+        for (i, pid) in (106..=120u32).rev().enumerate() {
+            assert_eq!(selected[i], (pid, SignalType::Repost));
+        }
+        // Newest RECENT_SEED_POSTS (40) distinct posts are all retained upfront (120 down to 81)
+        for (i, pid) in (81..=120u32).rev().enumerate() {
+            assert_eq!(selected[i].0, pid);
+        }
+        // Remaining 60 slots evenly stride older history down into earliest posts (1..=10)
+        assert!(
+            selected.iter().any(|&(pid, _)| pid <= 10),
+            "Strided historical seeds must reach earliest history"
+        );
+    }
+
+    #[test]
+    fn test_tier1_deduplicates_multiple_signals_per_curator() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 100_000;
+
+        let viewer = interner.intern("did:plc:dedup_viewer");
+        let twin = interner.intern("did:plc:dedup_twin");
+        let other = interner.intern("did:plc:dedup_other");
+        let author_a = interner.intern("did:plc:dedup_auth_a");
+        let author_b = interner.intern("did:plc:dedup_auth_b");
+
+        for i in 0..10 {
+            let sp = interner.intern(&format!(
+                "at://did:plc:dedup_auth_a/app.bsky.feed.post/s_{i}"
+            ));
+            graph.record_post_meta(sp, author_a, None, None, now - 3_000);
+            graph.record_interaction(viewer, sp, SignalType::Like, now - 2_000);
+            graph.record_interaction(twin, sp, SignalType::Like, now - 1_900);
+        }
+
+        // Candidate A: twin BOTH liked AND reposted at `now - 100` (total interactions = 2)
+        let uri_multi = "at://did:plc:dedup_auth_a/app.bsky.feed.post/multi_sig";
+        let cand_multi = interner.intern(uri_multi);
+        graph.record_post_meta(cand_multi, author_a, None, None, now - 200);
+        graph.record_interaction(twin, cand_multi, SignalType::Like, now - 100);
+        graph.record_interaction(twin, cand_multi, SignalType::Repost, now - 100);
+
+        // Candidate B: twin ONLY reposted at `now - 100`, plus 1 unrelated liker -> exact same global N=2
+        let uri_single = "at://did:plc:dedup_auth_b/app.bsky.feed.post/single_rp";
+        let cand_single = interner.intern(uri_single);
+        graph.record_post_meta(cand_single, author_b, None, None, now - 200);
+        graph.record_interaction(twin, cand_single, SignalType::Repost, now - 100);
+        graph.record_interaction(other, cand_single, SignalType::Like, now - 100);
+
+        let rec = Recommender::new(interner, graph);
+        let dials = RecommendationDials {
+            min_likes: 1,
+            explore_ratio: 0.0,
+            ..Default::default()
+        };
+
+        let feed = rec
+            .recommend(Some("did:plc:dedup_viewer"), &dials, now)
+            .unwrap();
+        let sc_multi = feed
+            .posts
+            .iter()
+            .find(|p| p.post_id == cand_multi)
+            .unwrap()
+            .score;
+        let sc_single = feed
+            .posts
+            .iter()
+            .find(|p| p.post_id == cand_single)
+            .unwrap()
+            .score;
+        assert!(
+            (sc_multi - sc_single).abs() < 1e-4,
+            "Same twin Like+Repost must score identically to Repost alone (multi={sc_multi}, single={sc_single})"
+        );
+
+        let preview = rec
+            .recommend_preview_at(Some("did:plc:dedup_viewer"), &dials, now)
+            .unwrap();
+        let pm = preview
+            .items
+            .iter()
+            .find(|p| p.uri.as_str() == uri_multi)
+            .unwrap();
+        let ps = preview
+            .items
+            .iter()
+            .find(|p| p.uri.as_str() == uri_single)
+            .unwrap();
+        assert!((pm.score_breakdown.final_score - ps.score_breakdown.final_score).abs() < 1e-4);
+        assert!(
+            (pm.score_breakdown.taste_similarity - ps.score_breakdown.taste_similarity).abs()
+                < 1e-4,
+            "Same twin Like+Repost must not double-count taste_similarity"
+        );
+        for item in &preview.items {
+            let b = &item.score_breakdown;
+            let expected = b.taste_similarity * b.time_decay * b.topic_boost * b.fatigue_penalty;
+            assert!((b.final_score - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_post_age_staleness_dampens_resurfaced_old_posts() {
+        let now = BLUESKY_EPOCH_SECS + 300 * 86_400;
+        assert_eq!(calculate_post_age_staleness(now - 3600, now), 1.0);
+        assert_eq!(
+            calculate_post_age_staleness(now - POST_AGE_GRACE_SECS, now),
+            1.0
+        );
+        let stale_9mo = calculate_post_age_staleness(now - 270 * 86_400, now);
+        assert!(stale_9mo > 0.0 && stale_9mo < 0.03);
+
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let viewer = interner.intern("did:plc:age_viewer");
+        let twin = interner.intern("did:plc:age_twin");
+        let auth_fresh = interner.intern("did:plc:age_auth_fresh");
+        let auth_old = interner.intern("did:plc:age_auth_old");
+
+        for i in 0..10 {
+            let sp = interner.intern(&format!(
+                "at://did:plc:age_auth_fresh/app.bsky.feed.post/s_{i}"
+            ));
+            graph.record_post_meta(sp, auth_fresh, None, None, now - 3_000);
+            graph.record_interaction(viewer, sp, SignalType::Like, now - 2_000);
+            graph.record_interaction(twin, sp, SignalType::Like, now - 1_900);
+        }
+
+        let uri_fresh = "at://did:plc:age_auth_fresh/app.bsky.feed.post/fresh_post";
+        let pid_fresh = interner.intern(uri_fresh);
+        graph.record_post_meta(pid_fresh, auth_fresh, None, None, now - 600);
+        graph.record_interaction(twin, pid_fresh, SignalType::Repost, now - 600);
+
+        let uri_old = "at://did:plc:age_auth_old/app.bsky.feed.post/ancient_post";
+        let pid_old = interner.intern(uri_old);
+        graph.record_post_meta(pid_old, auth_old, None, None, now - 270 * 86_400);
+        graph.record_interaction(twin, pid_old, SignalType::Repost, now - 600);
+
+        let rec = Recommender::new(interner, graph);
+        let dials = RecommendationDials {
+            half_life_secs: 2.0 * 3600.0,
+            min_likes: 1,
+            explore_ratio: 0.0,
+            ..Default::default()
+        };
+
+        let feed = rec
+            .recommend(Some("did:plc:age_viewer"), &dials, now)
+            .unwrap();
+        assert_eq!(feed.posts[0].post_id, pid_fresh);
+        assert_eq!(feed.posts[1].post_id, pid_old);
+        assert!(feed.posts[0].score > feed.posts[1].score * 40.0);
+        assert!(feed.posts[1].score > 0.0);
+
+        let preview = rec
+            .recommend_preview_at(Some("did:plc:age_viewer"), &dials, now)
+            .unwrap();
+        assert_eq!(preview.items[0].uri.as_str(), uri_fresh);
+        assert_eq!(preview.items[1].uri.as_str(), uri_old);
+        for item in &preview.items {
+            let b = &item.score_breakdown;
+            let expected = b.taste_similarity * b.time_decay * b.topic_boost * b.fatigue_penalty;
+            assert!((b.final_score - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_single_curator_diversity_defers_prolific_twin_without_dropping() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 100_000;
+
+        let viewer = interner.intern("did:plc:div_viewer");
+        let seed_auth = interner.intern("did:plc:div_seed_auth");
+        let mut seeds = Vec::new();
+        for i in 0..10 {
+            let sp = interner.intern(&format!(
+                "at://did:plc:div_seed_auth/app.bsky.feed.post/s_{i}"
+            ));
+            graph.record_post_meta(sp, seed_auth, None, None, now - 5_000);
+            graph.record_interaction(viewer, sp, SignalType::Like, now - 4_000);
+            seeds.push(sp);
+        }
+
+        // Prolific twin A (shares all 10 seeds) has 6 solo posts by 6 distinct authors
+        let twin_a = interner.intern("did:plc:div_twin_a");
+        for &sp in &seeds {
+            graph.record_interaction(twin_a, sp, SignalType::Like, now - 3_000);
+        }
+        let mut twin_a_posts = Vec::new();
+        for i in 0..6u64 {
+            let aid = interner.intern(&format!("did:plc:div_auth_a_{i}"));
+            let pid = interner.intern(&format!(
+                "at://did:plc:div_auth_a_{i}/app.bsky.feed.post/p_{i}"
+            ));
+            graph.record_post_meta(pid, aid, None, None, now - 200);
+            graph.record_interaction(twin_a, pid, SignalType::Repost, now - 10 - i);
+            twin_a_posts.push(pid);
+        }
+
+        // Three less-prolific twins B, C, D (share 9 seeds) each have 1 solo post
+        let mut other_posts = Vec::new();
+        for (t_idx, name) in ["b", "c", "d"].iter().enumerate() {
+            let twin = interner.intern(&format!("did:plc:div_twin_{name}"));
+            for &sp in &seeds[..9] {
+                graph.record_interaction(twin, sp, SignalType::Like, now - 3_000);
+            }
+            let aid = interner.intern(&format!("did:plc:div_auth_{name}"));
+            let pid = interner.intern(&format!(
+                "at://did:plc:div_auth_{name}/app.bsky.feed.post/p_{t_idx}"
+            ));
+            graph.record_post_meta(pid, aid, None, None, now - 200);
+            graph.record_interaction(twin, pid, SignalType::Like, now - 500);
+            other_posts.push(pid);
+        }
+
+        let rec = Recommender::new(Arc::clone(&interner), Arc::clone(&graph));
+        let dials = RecommendationDials {
+            limit: 20,
+            min_likes: 1,
+            explore_ratio: 0.0,
+            ..Default::default()
+        };
+
+        let feed = rec
+            .recommend(Some("did:plc:div_viewer"), &dials, now)
+            .unwrap();
+        assert_eq!(
+            feed.posts.len(),
+            9,
+            "Deferred posts must be backfilled, not dropped"
+        );
+        let top5_from_a = feed.posts[..5]
+            .iter()
+            .filter(|p| twin_a_posts.contains(&p.post_id))
+            .count();
+        assert_eq!(
+            top5_from_a, MAX_SINGLE_CURATOR_POSTS_PER_TWIN,
+            "Top 5 must include at most {MAX_SINGLE_CURATOR_POSTS_PER_TWIN} solo picks from prolific twin A before other curators"
+        );
+        for op in &other_posts {
+            assert!(
+                feed.posts[..5].iter().any(|p| p.post_id == *op),
+                "Other twins' solo posts must precede twin A's deferred 3rd..6th solo picks"
+            );
+        }
+
+        // Single-twin edge case: 1 twin with 5 solo posts still returns all 5 via backfill
+        let interner_solo = Arc::new(StringInterner::new());
+        let graph_solo = Arc::new(GraphStore::new());
+        let sv = interner_solo.intern("did:plc:solo_v");
+        let st = interner_solo.intern("did:plc:solo_t");
+        let sa = interner_solo.intern("did:plc:solo_sa");
+        for i in 0..10 {
+            let sp =
+                interner_solo.intern(&format!("at://did:plc:solo_sa/app.bsky.feed.post/s_{i}"));
+            graph_solo.record_post_meta(sp, sa, None, None, now - 5_000);
+            graph_solo.record_interaction(sv, sp, SignalType::Like, now - 4_000);
+            graph_solo.record_interaction(st, sp, SignalType::Like, now - 3_000);
+        }
+        for i in 0..5 {
+            let aid = interner_solo.intern(&format!("did:plc:solo_ca_{i}"));
+            let pid = interner_solo.intern(&format!(
+                "at://did:plc:solo_ca_{i}/app.bsky.feed.post/p_{i}"
+            ));
+            graph_solo.record_post_meta(pid, aid, None, None, now - 200);
+            graph_solo.record_interaction(st, pid, SignalType::Like, now - 100);
+        }
+        let rec_solo = Recommender::new(interner_solo, graph_solo);
+        let solo_feed = rec_solo
+            .recommend(Some("did:plc:solo_v"), &dials, now)
+            .unwrap();
+        assert_eq!(solo_feed.posts.len(), 5);
+    }
+
+    #[test]
+    fn test_pagination_session_not_clobbered_by_poll_probe() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = BLUESKY_EPOCH_SECS + 50_000;
+
+        let viewer = interner.intern("did:plc:poll_sess_viewer");
+        let followed = interner.intern("did:plc:poll_sess_curator");
+        graph.record_follow(viewer, followed);
+
+        for idx in 0..20 {
+            let aid = interner.intern(&format!("did:plc:poll_sess_auth_{idx:02}"));
+            let pid = interner.intern(&format!(
+                "at://did:plc:poll_sess_auth_{idx:02}/post/{idx:02}"
+            ));
+            graph.record_post_meta(pid, aid, None, None, now - 500 + idx);
+            graph.record_interaction(followed, pid, SignalType::Like, now - 400 + idx);
+        }
+
+        let rec = Recommender::new(interner, graph);
+        let baseline = rec
+            .recommend(
+                Some("did:plc:poll_sess_viewer"),
+                &RecommendationDials {
+                    limit: 10,
+                    min_likes: 1,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(baseline.posts.len(), 10);
+
+        // 1. Page 1 (limit = 5, cursor = None) caches full session and records impressions
+        let page1 = rec
+            .recommend(
+                Some("did:plc:poll_sess_viewer"),
+                &RecommendationDials {
+                    limit: 5,
+                    min_likes: 1,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap();
+        assert_eq!(page1.posts.len(), 5);
+        let page1_ids: Vec<u32> = page1.posts.iter().map(|p| p.post_id).collect();
+        rec.impression_store()
+            .record_impressions(viewer, &page1_ids, now);
+
+        // 2. Poll probes (limit = 1 and limit = 2, cursor = None) must NOT clobber cached Page 1 session
+        for poll_limit in [1usize, 2usize] {
+            let poll = rec
+                .recommend(
+                    Some("did:plc:poll_sess_viewer"),
+                    &RecommendationDials {
+                        limit: poll_limit,
+                        min_likes: 1,
+                        ..Default::default()
+                    },
+                    now + 5,
+                )
+                .unwrap();
+            assert_eq!(poll.posts.len(), poll_limit);
+        }
+
+        // 3. Page 2 (limit = 5, cursor = Some("5")) still hits the cached Page 1 session
+        let page2 = rec
+            .recommend(
+                Some("did:plc:poll_sess_viewer"),
+                &RecommendationDials {
+                    limit: 5,
+                    min_likes: 1,
+                    cursor: page1.cursor,
+                    ..Default::default()
+                },
+                now + 10,
+            )
+            .unwrap();
+        assert_eq!(page2.posts.len(), 5);
+
+        let mut combined: Vec<u32> = page1_ids;
+        combined.extend(page2.posts.iter().map(|p| p.post_id));
+        let expected: Vec<u32> = baseline.posts.iter().map(|p| p.post_id).collect();
+        assert_eq!(combined, expected);
     }
 }

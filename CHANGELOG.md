@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] - 2026-11-27
+
+### Fixed
+
+- **2h Feed Quality & Tier 1 Traversal Stability (`src/recommender.rs`, `src/server.rs`)**:
+  - Replaced the 50-edge tail seed window with hybrid deduplicated seed selection (`MAX_SEED_POSTS = 100`: `RECENT_SEED_POSTS = 40` newest distinct seeds + `60` evenly strided across older history) and adaptive per-seed reverse-edge budgeting (`per_seed_post_edge_limit`, `MIN_POST_EDGES_PER_SEED = 150`, `MAX_CO_INTERACTOR_SCAN = 5_000`) across `discover_tier1_co_interactors` and `find_taste_twins`.
+  - Unified Step 1–3 Tier 1 walk logic between `traverse_tier1` and `recommend_preview_at` (including `MAX_CO_INTERACTOR_EDGES` and `MAX_CANDIDATE_EVALS` parity) and deduplicated per-curator `(co_user, cand_pid)` signals to the strongest decayed interaction so Like+Repost no longer double-counts curator similarity or affinity.
+  - Added smooth post-age staleness dampening (`calculate_post_age_staleness`: `1.0x` up to `48h`, exponential decay with `48h` tau toward `0.02` floor) folded into `effective_decay` / `base_score` so resurfaced old posts do not overwhelm short-freshness feeds.
+  - Anchored the unseen-first fatigue ceiling on qualified unseen posts (`>= 0.15 * max_unseen_score` via `compute_unseen_ceiling_scale`) so low-score unseen tail posts cannot crush strong fatigued candidates.
+  - Added single-curator (`k == 1`) diversity deferral with backfill (`apply_author_and_curator_diversity`, `MAX_SINGLE_CURATOR_POSTS_PER_TWIN = 2`) alongside the max-2-per-author cap.
+  - Guarded `handle_get_feed_skeleton` impression recording and `recommend` pagination session caching against client poll probes (`cursor` empty and `effective_limit < MIN_IMPRESSION_RECORD_LIMIT` (`3`)).
+
+---
+
 ## [0.7.8] - 2026-11-11
 
 ### Added
