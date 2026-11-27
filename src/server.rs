@@ -724,11 +724,15 @@ pub async fn handle_get_feed_skeleton(
         .recommend(viewer_did.as_deref(), &dials, now_secs)
     {
         Ok(rec) => {
-            if let Some(ref did) = viewer_did {
-                let post_ids: Vec<u32> = rec.posts.iter().map(|p| p.post_id).collect();
-                state
-                    .recommender
-                    .record_impressions_by_did(Some(did), &post_ids, now_secs);
+            let is_poll_probe = dials.cursor.as_deref().is_none_or(|c| c.trim().is_empty())
+                && dials.limit < crate::recommender::MIN_IMPRESSION_RECORD_LIMIT;
+            if !is_poll_probe {
+                if let Some(ref did) = viewer_did {
+                    let post_ids: Vec<u32> = rec.posts.iter().map(|p| p.post_id).collect();
+                    state
+                        .recommender
+                        .record_impressions_by_did(Some(did), &post_ids, now_secs);
+                }
             }
 
             let skeleton = FeedSkeletonResponse {
@@ -3253,5 +3257,91 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let err: ApiErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(err.error, "IssuerMismatch");
+    }
+
+    #[tokio::test]
+    async fn test_get_feed_skeleton_poll_probe_skips_impression_recording() {
+        let interner = Arc::new(StringInterner::new());
+        let graph = Arc::new(GraphStore::new());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        for i in 0..4u64 {
+            let pid = interner.intern(&format!(
+                "at://did:plc:probe_author_{i}/app.bsky.feed.post/{i}"
+            ));
+            let aid = interner.intern(&format!("did:plc:probe_author_{i}"));
+            graph.record_post_meta(pid, aid, None, None, now - i * 10);
+            for l in 0..3 {
+                let lid = interner.intern(&format!("did:plc:probe_liker_{l}"));
+                graph.record_interaction(lid, pid, SignalType::Like, now - i * 10);
+            }
+        }
+
+        let recommender = Arc::new(Recommender::new(interner, graph));
+        let state = AppState::new(recommender, "did:web:feed.example.com", "feed.example.com");
+        let app = create_xrpc_router(state.clone());
+
+        let viewer_did = "did:plc:poll_probe_viewer";
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"iss":"{viewer_did}","aud":"did:web:feed.example.com","exp":{}}}"#,
+            now + 3600
+        ));
+        let jwt = format!("{header}.{payload}.sig");
+
+        // 1. Poll probes (limit=1 and limit=2, no cursor) return posts without recording impressions.
+        for limit in [1, 2] {
+            let req = Request::builder()
+                .uri(format!(
+                    "/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:plc:feed/app.bsky.feed.generator/foryou&limit={limit}"
+                ))
+                .header(AUTHORIZATION, format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let skeleton: FeedSkeletonResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(skeleton.feed.len(), limit);
+        }
+
+        if let Some(vid) = state.recommender.interner.lookup_id(viewer_did) {
+            assert_eq!(
+                state
+                    .recommender
+                    .impression_store()
+                    .get_viewer_impression_count(vid),
+                0,
+                "Poll probes with limit < 3 and no cursor must not record impressions"
+            );
+        }
+
+        // 2. Real page fetch (limit=3) records impressions normally.
+        let req_real = Request::builder()
+            .uri("/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:plc:feed/app.bsky.feed.generator/foryou&limit=3")
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_real = app.oneshot(req_real).await.unwrap();
+        assert_eq!(resp_real.status(), StatusCode::OK);
+        let body_real = resp_real.into_body().collect().await.unwrap().to_bytes();
+        let skeleton_real: FeedSkeletonResponse = serde_json::from_slice(&body_real).unwrap();
+        assert_eq!(skeleton_real.feed.len(), 3);
+
+        let vid = state
+            .recommender
+            .interner
+            .lookup_id(viewer_did)
+            .expect("Viewer DID must be interned after real page fetch");
+        assert_eq!(
+            state
+                .recommender
+                .impression_store()
+                .get_viewer_impression_count(vid),
+            3
+        );
     }
 }

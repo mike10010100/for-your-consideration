@@ -99,8 +99,7 @@ impl RecentActiveRingBuffer {
         if self.count == 0 {
             return;
         }
-        for i in 0..self.count {
-            let (ts, pid) = self.buffer[i];
+        for &(ts, pid) in self.buffer.iter().take(self.count) {
             if ts >= window_start && ts <= current_time_secs {
                 out.insert(pid);
             }

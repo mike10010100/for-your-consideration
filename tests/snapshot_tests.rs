@@ -737,11 +737,11 @@ fn test_systematic_prune_compact_and_snapshot_oracle_exploration() {
             let pid = interner.intern(&post_uri);
 
             edges_oracle
-                .entry((user_did.clone(), post_uri.clone(), sig_code))
+                .entry((user_did, post_uri.clone(), sig_code))
                 .or_insert(ts);
             graph.record_interaction(uid, pid, sig, ts);
 
-            meta_oracle.insert(post_uri.clone(), (author_did.clone(), ts, is_nsfw));
+            meta_oracle.insert(post_uri, (author_did, ts, is_nsfw));
             graph.record_post_meta_with_nsfw(pid, aid, None, None, ts, is_nsfw);
         }
 
