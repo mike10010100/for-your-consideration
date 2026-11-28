@@ -1,6 +1,6 @@
 [package]
 name = "for-your-consideration"
-version = "0.7.9"
+version = "0.7.10"
 edition = "2021"
 authors = ["Contributors"]
 description = "High-performance single-box For Your Consideration graph recommendation and custom feed generator for AT Protocol (Homage to For You)"
@@ -22,16 +22,16 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # AT Protocol OAuth & Cryptography Library (Formally Verified)
-skyauth = { version = "0.3.13", features = ["axum"] }
+skyauth = { version = "0.3.14", features = ["axum"] }
 # AT Protocol Data Plane, Lexicon & Jetstream Ingestion Library (storage-free mode)
-skybase = { version = "0.1.10", default-features = false }
+skybase = { version = "0.1.13", default-features = false }
 
 # Memory Allocators
 tikv-jemallocator = { version = "0.7", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Async Runtime & Concurrency
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.53.3", features = ["full"] }
 tokio-util = "0.7"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
