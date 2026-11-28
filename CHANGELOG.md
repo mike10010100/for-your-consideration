@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.10] - 2026-11-28
+
+### Security & Dependencies
+
+- **Upgraded `skyauth` (`0.3.13` -> `0.3.14`) & `skybase` (`0.1.10` -> `0.1.13`) (`Cargo.toml`, `Cargo.lock`)**:
+  - Picks up `skyauth 0.3.14` (`SealedBox` `Zeroize` / `ZeroizeOnDrop` key-material wiping, `SsrfFilter::build_http_client`, and `tokio >= 1.53.3` / `url >= 2.5.9` security floor bumps) and `skybase 0.1.11`–`0.1.13` (persistent Jetstream idle read deadline, authoritative PDS proxy discovery for App-Password chat, `AppViewClient` 2 MiB streaming body cap, and `PdsRepoClient` SSRF/timeout hardening).
+- **Updated `quinn-udp` (`0.5.15` -> `0.5.16`) & `rustix` (`1.1.4` -> `1.1.6`) (`Cargo.lock`)**: Resolved `RUSTSEC-2026-0538` and `RUSTSEC-2026-0486` in `cargo audit`.
+
+---
+
 ## [0.7.9] - 2026-11-27
 
 ### Fixed
